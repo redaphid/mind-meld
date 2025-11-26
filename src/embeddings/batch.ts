@@ -49,8 +49,9 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
     errors: 0,
   };
 
-  // Ensure model is available
+  // Ensure models are available
   await ensureEmbeddingModel();
+  await ensureSummarizeModel();
 
   const batchSize = config.embeddings.batchSize;
   const collection = await getCollection(config.chroma.collections.messages);
@@ -112,8 +113,18 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
     console.log(`Batch ${offset}: ${messagesToEmbed.length}/${messages.length} need embedding...`);
 
     try {
-      // Generate embeddings
-      const texts = messagesToEmbed.map((m) => m.content_text);
+      // Prepare texts for embedding - summarize if too long for embedding context
+      const MAX_EMBED_CHARS = 8000;
+      const texts: string[] = [];
+      for (const m of messagesToEmbed) {
+        if (m.content_text.length > MAX_EMBED_CHARS) {
+          // Summarize long messages to preserve semantic content
+          const summary = await summarizeConversation([m.content_text]);
+          texts.push(summary);
+        } else {
+          texts.push(m.content_text);
+        }
+      }
       const embeddings = await generateEmbeddings(texts);
 
       // Prepare data for Chroma
