@@ -4,21 +4,30 @@ import { ChromaClient } from "chromadb";
 async function stats() {
   console.log("\n=== Mindmeld Statistics ===\n");
 
-  // Sources
-  const sources = await query<{ name: string; count: number }>(`
-    SELECT s.name, COUNT(DISTINCT p.id) as count
-    FROM sources s
-    LEFT JOIN projects p ON p.source_id = s.id
-    GROUP BY s.name
+  // Detailed breakdown by source
+  const bySource = await query<{ source: string; projects: number; sessions: number; messages: number }>(`
+    SELECT
+      src.name as source,
+      COUNT(DISTINCT p.id) as projects,
+      COUNT(DISTINCT s.id) as sessions,
+      COUNT(DISTINCT m.id) as messages
+    FROM sources src
+    LEFT JOIN projects p ON p.source_id = src.id
+    LEFT JOIN sessions s ON s.project_id = p.id
+    LEFT JOIN messages m ON m.session_id = s.id
+    GROUP BY src.name
+    ORDER BY messages DESC
   `);
-  console.log("Sources:");
-  for (const s of sources.rows) {
-    console.log(`  ${s.name}: ${s.count} projects`);
+  console.log("By Source:");
+  console.log("  Source           Projects   Sessions   Messages");
+  console.log("  ─────────────────────────────────────────────────");
+  for (const s of bySource.rows) {
+    console.log(`  ${s.source.padEnd(15)} ${String(s.projects).padStart(10)} ${String(s.sessions).padStart(10)} ${String(s.messages).padStart(10)}`);
   }
 
   // Projects
   const projects = await query<{ count: number }>(`SELECT COUNT(*) as count FROM projects`);
-  console.log(`\nProjects: ${projects.rows[0].count}`);
+  console.log(`\nTotal Projects: ${projects.rows[0].count}`);
 
   // Sessions
   const sessions = await query<{ count: number }>(`SELECT COUNT(*) as count FROM sessions`);
