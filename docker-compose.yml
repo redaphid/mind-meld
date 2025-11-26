@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mindmeld-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mindmeld
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindmeld_dev}
+      POSTGRES_DB: conversations
+    ports:
+      - "5433:5432"  # Non-standard port to avoid conflicts
+    volumes:
+      - ~/THE_SINK/semantic-code-sync/postgresdb:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mindmeld -d conversations"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: mindmeld-chroma
+    restart: unless-stopped
+    environment:
+      CHROMA_SERVER_AUTHN_PROVIDER: ""
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+      CHROMA_SERVER_CORS_ALLOW_ORIGINS: '["*"]'
+    ports:
+      - "8001:8000"  # Non-standard port to avoid conflicts
+    volumes:
+      - ~/THE_SINK/semantic-code-sync/chromadb:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  default:
+    name: mindmeld-network

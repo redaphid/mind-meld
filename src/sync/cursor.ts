@@ -1,0 +1,225 @@
+import { copyFile, mkdir, stat } from 'fs/promises';
+import { homedir } from 'os';
+import { join, dirname } from 'path';
+import { existsSync } from 'fs';
+import { config } from '../config.js';
+import { queries } from '../db/postgres.js';
+import {
+  setDatabasePath,
+  listConversations,
+  getConversation,
+  listMessages,
+} from '@redaphid/cursor-conversations';
+
+export interface CursorSyncStats {
+  conversationsProcessed: number;
+  messagesInserted: number;
+  skipped: number;
+  errors: string[];
+}
+
+// Get path to Cursor's main state database
+function getCursorDbPath(): string {
+  if (process.env.CURSOR_DB_PATH) return process.env.CURSOR_DB_PATH;
+  if (process.platform === 'darwin') {
+    return `${homedir()}/Library/Application Support/Cursor/User/globalStorage/state.vscdb`;
+  }
+  if (process.platform === 'win32') {
+    return `${homedir()}\\AppData\\Roaming\\Cursor\\User\\globalStorage\\state.vscdb`;
+  }
+  return `${homedir()}/.config/Cursor/User/globalStorage/state.vscdb`;
+}
+
+// Copy Cursor DB to tmp to avoid lock conflicts
+async function copyCursorDb(): Promise<string> {
+  const srcPath = getCursorDbPath();
+  const tmpDir = join(dirname(new URL(import.meta.url).pathname), '../../tmp');
+  const destPath = join(tmpDir, 'cursor.db');
+
+  // Create tmp directory if needed
+  await mkdir(tmpDir, { recursive: true });
+
+  // Copy the database file
+  console.log(`Copying Cursor DB from ${srcPath} to ${destPath}...`);
+  await copyFile(srcPath, destPath);
+
+  // Also copy WAL files if they exist (SQLite write-ahead log)
+  const walPath = `${srcPath}-wal`;
+  const shmPath = `${srcPath}-shm`;
+
+  if (existsSync(walPath)) {
+    await copyFile(walPath, `${destPath}-wal`);
+  }
+  if (existsSync(shmPath)) {
+    await copyFile(shmPath, `${destPath}-shm`);
+  }
+
+  console.log('Cursor DB copied successfully');
+  return destPath;
+}
+
+// Extract text content from a Cursor message
+function extractMessageText(message: any): string {
+  // Handle different message formats
+  if (message.text) return message.text;
+
+  // Handle responseParts format
+  if (message.responseParts && Array.isArray(message.responseParts)) {
+    const textParts: string[] = [];
+    for (const part of message.responseParts) {
+      if (part.type === 'text' && part.rawText) {
+        textParts.push(part.rawText);
+      }
+    }
+    if (textParts.length > 0) return textParts.join('\n');
+  }
+
+  // Handle thinking content
+  if (message.thinking) return `[THINKING] ${message.thinking}`;
+
+  // Handle code blocks
+  if (message.codeBlocks?.length) {
+    return `[${message.codeBlocks.length} code block(s)]`;
+  }
+
+  return '';
+}
+
+// Main sync function for Cursor
+export async function syncCursor(options?: { incremental?: boolean }): Promise<CursorSyncStats> {
+  const stats: CursorSyncStats = {
+    conversationsProcessed: 0,
+    messagesInserted: 0,
+    skipped: 0,
+    errors: [],
+  };
+
+  // Copy database to avoid lock conflicts
+  let dbPath: string;
+  try {
+    dbPath = await copyCursorDb();
+    setDatabasePath(dbPath);
+  } catch (e) {
+    const error = `Failed to copy Cursor database: ${e}`;
+    console.error(error);
+    stats.errors.push(error);
+    return stats;
+  }
+
+  console.log('Syncing Cursor conversations...');
+
+  // Get source ID
+  const source = await queries.getSourceByName('cursor');
+  if (!source) {
+    stats.errors.push('Cursor source not found in database');
+    return stats;
+  }
+
+  // Get last sync state
+  const syncState = await queries.getSyncState(source.id, 'sessions');
+  const lastSyncTime = syncState?.last_sync_timestamp?.getTime() ?? 0;
+
+  try {
+    // List all conversations
+    const { conversations, total } = await listConversations({
+      sortBy: 'recent_activity',
+      sortOrder: 'desc',
+      limit: 1000,
+    });
+
+    console.log(`Found ${total} Cursor conversations`);
+
+    // Get or create project for Cursor (do this once outside the loop)
+    const projectId = await queries.upsertProject(
+      source.id,
+      'cursor-main',
+      'cursor-main',
+      'Cursor Conversations'
+    );
+
+    for (const conv of conversations) {
+      try {
+        // Check if session exists in our DB
+        const existingSession = await queries.getSessionByExternalId(projectId, conv.conversationId);
+
+        // Incremental mode: skip if session exists and hasn't been updated
+        if (options?.incremental && existingSession) {
+          const storedModifiedAt = existingSession.file_modified_at?.getTime() ?? 0;
+          if (conv.updatedAt <= storedModifiedAt) {
+            // Conversation hasn't been updated since we last synced it
+            stats.skipped++;
+            continue;
+          }
+          console.log(`  Re-syncing ${conv.conversationId}: updatedAt ${conv.updatedAt} > stored ${storedModifiedAt}`);
+        }
+
+        // Get full conversation with messages
+        const { messages } = await listMessages(conv.conversationId, { limit: 500 });
+
+        // Upsert session
+        const sessionId = await queries.upsertSession({
+          projectId,
+          externalId: conv.conversationId,
+          title: conv.preview?.slice(0, 100) || 'Untitled',
+          fileModifiedAt: new Date(conv.updatedAt),
+        });
+
+        // Insert messages and track total content size
+        let sequenceNum = 0;
+        let totalContentChars = 0;
+        for (const message of messages) {
+          const contentText = extractMessageText(message);
+          if (!contentText) continue;
+
+          totalContentChars += contentText.length;
+          const role = message.type === 1 ? 'user' : 'assistant';
+
+          const msgId = await queries.insertMessage({
+            sessionId,
+            externalId: message.messageId,
+            role,
+            contentText,
+            contentJson: message,
+            timestamp: new Date(conv.createdAt),
+            sequenceNum: sequenceNum++,
+          });
+
+          if (msgId) stats.messagesInserted++;
+        }
+
+        // Update session stats and content_chars
+        await queries.updateSessionStats(sessionId);
+        await queries.updateSessionContentChars(sessionId);
+
+        stats.conversationsProcessed++;
+
+        if (stats.conversationsProcessed % 50 === 0) {
+          console.log(`Processed ${stats.conversationsProcessed} Cursor conversations...`);
+        }
+      } catch (e) {
+        const error = `Failed to sync Cursor conversation ${conv.conversationId}: ${e}`;
+        console.error(error);
+        stats.errors.push(error);
+      }
+    }
+  } catch (e) {
+    const error = `Failed to list Cursor conversations: ${e}`;
+    console.error(error);
+    stats.errors.push(error);
+  }
+
+  // Update sync state
+  await queries.updateSyncState(
+    source.id,
+    'sessions',
+    stats.conversationsProcessed,
+    stats.messagesInserted,
+    stats.errors.length > 0 ? stats.errors.join('; ') : undefined
+  );
+
+  console.log(
+    `Cursor sync complete: ${stats.conversationsProcessed} conversations, ${stats.messagesInserted} messages`
+  );
+
+  return stats;
+}
