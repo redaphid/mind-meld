@@ -214,6 +214,7 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
        AND (
          e.id IS NULL  -- No embedding exists
          OR s.content_chars > COALESCE(e.content_chars_at_embed, 0)  -- Content has grown
+         OR COALESCE(s.content_chars, 0) = 0  -- content_chars not calculated yet
        )
      LIMIT 100`,
     [config.chroma.collections.sessions]
@@ -291,6 +292,14 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
           },
         ],
       });
+
+      // Update session's content_chars if it was missing
+      if (!session.content_chars || session.content_chars === 0) {
+        await query(
+          `UPDATE sessions SET content_chars = $1 WHERE id = $2`,
+          [actualContentChars, session.id]
+        );
+      }
 
       // Record/update in PostgreSQL with content_chars_at_embed
       await query(
