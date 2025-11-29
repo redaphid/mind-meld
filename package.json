@@ -1,6 +1,6 @@
 {
   "name": "@sibipro/mindmeld",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Unified conversation index for Claude Code and Cursor with PostgreSQL + Chroma",
   "type": "module",
   "packageManager": "pnpm@10.11.0",
