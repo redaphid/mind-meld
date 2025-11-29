@@ -65,6 +65,7 @@ STORAGE:
    └─ convo-projects       → Project-level embeddings
 
 SYNC:
+├─ Docker-based hourly cron (mindmeld-sync container)
 ├─ Incremental by default (only new/modified files)
 └─ Progress tracking for resumability
 ```

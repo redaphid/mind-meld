@@ -37,6 +37,30 @@ services:
       timeout: 5s
       retries: 5
 
+  sync:
+    build:
+      context: .
+      dockerfile: Dockerfile.sync
+    container_name: mindmeld-sync
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      CHROMA_HOST: chroma
+      CHROMA_PORT: 8000
+      OLLAMA_URL: http://host.docker.internal:11434
+      SYNC_INTERVAL_MINUTES: 60
+    volumes:
+      - ~/.claude:/root/.claude:ro
+      - ~/.cursor:/root/.cursor:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 networks:
   default:
     name: mindmeld-network
