@@ -10,6 +10,7 @@
   "scripts": {
     "preinstall": "npx only-allow pnpm",
     "build": "tsc",
+    "build:binary": "bun build --compile src/index.ts --outfile out/mindmeld",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "sync": "tsx src/index.ts sync",
@@ -29,7 +30,7 @@
   },
   "dependencies": {
     "@chroma-core/ollama": "^0.1.8",
-    "@redaphid/cursor-conversations": "link:../../mcp-cursor-conversations",
+    "@hypnodroid/cursor-conversations": "file:/Users/hypnodroid/Projects/mcp-cursor-conversations",
     "better-sqlite3": "^11.6.0",
     "chromadb": "^3.1.6",
     "commander": "^12.1.0",
