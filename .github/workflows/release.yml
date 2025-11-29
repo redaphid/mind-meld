@@ -5,59 +5,11 @@ on:
     tags:
       - 'v*'
 
-env:
-  NODE_VERSION: "22"
-
 jobs:
   release:
-    runs-on: blacksmith-2vcpu-ubuntu-2204
-    permissions:
-      contents: write
-      packages: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          run_install: false
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: pnpm
-          registry-url: 'https://npm.pkg.github.com'
-          scope: '@sibipro'
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Run tests
-        run: pnpm test -- --passWithNoTests
-
-      - name: Build TypeScript
-        run: pnpm build
-
-      - name: Build Bun binary
-        run: |
-          mkdir -p out
-          bun build --compile src/index.ts --outfile out/mindmeld-linux-x64
-
-      - name: Publish to GitHub Packages
-        run: pnpm publish --no-git-checks --access restricted
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: out/mindmeld-linux-x64
-          generate_release_notes: true
+    uses: sibipro/claude-ci-workflows/.github/workflows/release.yml@main
+    secrets: inherit
+    with:
+      build-binary: true
+      binary-entry: src/index.ts
+      binary-name: mindmeld
