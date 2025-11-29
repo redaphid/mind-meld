@@ -6,11 +6,11 @@ Mindmeld syncs conversations from Claude Code and Cursor into a unified PostgreS
 
 ## Ports (Non-Standard to Avoid Conflicts)
 
-| Service | Port | Default |
-|---------|------|---------|
-| PostgreSQL | **5433** | 5432 |
-| Chroma | **8001** | 8000 |
-| Ollama | 11434 | 11434 (shared) |
+| Service    | Port     | Default        |
+| ---------- | -------- | -------------- |
+| PostgreSQL | **5433** | 5432           |
+| Chroma     | **8001** | 8000           |
+| Ollama     | 11434    | 11434 (shared) |
 
 ## Quick Start
 
@@ -78,17 +78,20 @@ SYNC:
 ## Data Sources
 
 ### Claude Code (`~/.claude/`)
+
 - `projects/{encoded-path}/*.jsonl` - Conversation sessions
 - `projects/{encoded-path}/agent-*.jsonl` - Subagent sessions
 - `history.jsonl` - Global command history
 - `plans/*.md` - Plan mode files
 
 ### Cursor (`~/.cursor/chats/`)
+
 - `{workspace-hash}/{uuid}/store.db` - SQLite blob storage
 
 ## Database Schema
 
 Key tables:
+
 - `sources` - Source systems (claude_code, cursor)
 - `projects` - Project/workspace mapping
 - `sessions` - Conversation sessions with metadata
@@ -122,3 +125,5 @@ pnpm run dev
 # Type check
 pnpm run type-check
 ```
+
+MANDATORY PROTOCOL: when a session is started in this project, run `pnpm run dev` in a background thread, if you aren't already. This allows Claude code to connect to it

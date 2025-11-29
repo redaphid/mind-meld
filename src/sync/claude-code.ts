@@ -133,8 +133,14 @@ export async function syncClaudeCode(options?: {
     return stats;
   }
 
-  // Get last sync state
-  const syncState = await queries.getSyncState(source.id, 'sessions');
+  // Get latest file_modified_at from sessions table (more reliable than sync_state)
+  const lastFileModified = options?.incremental
+    ? await queries.getLatestFileModified(source.id)
+    : null;
+
+  if (lastFileModified) {
+    console.log(`Incremental sync: skipping files not modified since ${lastFileModified.toISOString()}`);
+  }
 
   // Discover projects
   const projectPaths = await discoverProjects(basePath);
@@ -168,11 +174,11 @@ export async function syncClaudeCode(options?: {
         try {
           const fileStat = await stat(sessionFile);
 
-          // Skip if incremental and file hasn't changed
+          // Skip if incremental and file hasn't changed since last sync
           if (
             options?.incremental &&
-            syncState?.last_file_modified &&
-            fileStat.mtime <= syncState.last_file_modified
+            lastFileModified &&
+            fileStat.mtime <= lastFileModified
           ) {
             stats.skipped++;
             continue;

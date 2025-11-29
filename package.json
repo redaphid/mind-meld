@@ -30,8 +30,7 @@
   },
   "dependencies": {
     "@chroma-core/ollama": "^0.1.8",
-    "@hypnodroid/cursor-conversations": "file:/Users/hypnodroid/Projects/mcp-cursor-conversations",
-    "better-sqlite3": "^11.6.0",
+    "@hypnodroid/cursor-conversations": "link:../../mcp-cursor-conversations",
     "chromadb": "^3.1.6",
     "commander": "^12.1.0",
     "cron": "^3.1.7",
@@ -40,12 +39,13 @@
     "ollama": "^0.5.11",
     "pg": "^8.13.1",
     "readline": "^1.3.0",
+    "sql.js": "^1.13.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
     "@types/pg": "^8.11.10",
+    "@types/sql.js": "^1.4.9",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.6"

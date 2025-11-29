@@ -160,6 +160,18 @@ export const queries = {
     return result.rows[0] ?? null;
   },
 
+  // Get the latest file_modified_at across all sessions for a source (for incremental sync)
+  getLatestFileModified: async (sourceId: number): Promise<Date | null> => {
+    const result = await query<{ max_modified: Date | null }>(
+      `SELECT MAX(s.file_modified_at) as max_modified
+       FROM sessions s
+       JOIN projects p ON s.project_id = p.id
+       WHERE p.source_id = $1`,
+      [sourceId]
+    );
+    return result.rows[0]?.max_modified ?? null;
+  },
+
   // Update content_chars for a session (sum of all message content lengths)
   updateSessionContentChars: async (sessionId: number) => {
     await query(
@@ -258,19 +270,21 @@ export const queries = {
     entityType: string,
     filesProcessed: number,
     recordsSynced: number,
-    lastError?: string
+    lastError?: string,
+    lastFileModified?: Date
   ) => {
     await query(
-      `INSERT INTO sync_state (source_id, entity_type, last_sync_timestamp, files_processed, records_synced, last_error, updated_at)
-       VALUES ($1, $2, NOW(), $3, $4, $5, NOW())
+      `INSERT INTO sync_state (source_id, entity_type, last_sync_timestamp, files_processed, records_synced, last_error, last_file_modified, updated_at)
+       VALUES ($1, $2, NOW(), $3, $4, $5, $6, NOW())
        ON CONFLICT (source_id, entity_type)
        DO UPDATE SET
          last_sync_timestamp = NOW(),
          files_processed = sync_state.files_processed + $3,
          records_synced = sync_state.records_synced + $4,
          last_error = $5,
+         last_file_modified = COALESCE($6, sync_state.last_file_modified),
          updated_at = NOW()`,
-      [sourceId, entityType, filesProcessed, recordsSynced, lastError ?? null]
+      [sourceId, entityType, filesProcessed, recordsSynced, lastError ?? null, lastFileModified ?? null]
     );
   },
 
