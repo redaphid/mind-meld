@@ -49,8 +49,9 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
     errors: 0,
   };
 
-  // Ensure model is available
+  // Ensure models are available
   await ensureEmbeddingModel();
+  await ensureSummarizeModel();
 
   const batchSize = config.embeddings.batchSize;
   const collection = await getCollection(config.chroma.collections.messages);
@@ -112,8 +113,18 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
     console.log(`Batch ${offset}: ${messagesToEmbed.length}/${messages.length} need embedding...`);
 
     try {
-      // Generate embeddings
-      const texts = messagesToEmbed.map((m) => m.content_text);
+      // Prepare texts for embedding - summarize if too long for embedding context
+      const MAX_EMBED_CHARS = 8000;
+      const texts: string[] = [];
+      for (const m of messagesToEmbed) {
+        if (m.content_text.length > MAX_EMBED_CHARS) {
+          // Summarize long messages to preserve semantic content
+          const summary = await summarizeConversation([m.content_text]);
+          texts.push(summary);
+        } else {
+          texts.push(m.content_text);
+        }
+      }
       const embeddings = await generateEmbeddings(texts);
 
       // Prepare data for Chroma
@@ -203,6 +214,7 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
        AND (
          e.id IS NULL  -- No embedding exists
          OR s.content_chars > COALESCE(e.content_chars_at_embed, 0)  -- Content has grown
+         OR COALESCE(s.content_chars, 0) = 0  -- content_chars not calculated yet
        )
      LIMIT 100`,
     [config.chroma.collections.sessions]
@@ -280,6 +292,14 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
           },
         ],
       });
+
+      // Update session's content_chars if it was missing
+      if (!session.content_chars || session.content_chars === 0) {
+        await query(
+          `UPDATE sessions SET content_chars = $1 WHERE id = $2`,
+          [actualContentChars, session.id]
+        );
+      }
 
       // Record/update in PostgreSQL with content_chars_at_embed
       await query(
