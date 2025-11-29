@@ -1,6 +1,16 @@
-import { readdir, stat } from 'fs/promises';
+import { readdir, stat, readFile } from 'fs/promises';
 import { join } from 'path';
-import Database from 'better-sqlite3';
+import initSqlJs, { Database as SqlJsDatabase } from 'sql.js';
+
+// Cache the SQL.js initialization
+let SQL: Awaited<ReturnType<typeof initSqlJs>> | null = null;
+
+async function getSqlJs() {
+  if (!SQL) {
+    SQL = await initSqlJs();
+  }
+  return SQL;
+}
 
 // Cursor stores conversations in SQLite with blob storage
 export interface CursorMeta {
@@ -97,34 +107,39 @@ export async function parseCursorStoreDb(storePath: string): Promise<ParsedCurso
   const conversationId = pathParts[pathParts.length - 2]; // UUID directory
   const workspaceHash = pathParts[pathParts.length - 3]; // Workspace hash directory
 
-  let db: Database.Database | null = null;
+  let db: SqlJsDatabase | null = null;
 
   try {
-    db = new Database(storePath, { readonly: true });
+    const SQL = await getSqlJs();
+    const fileBuffer = await readFile(storePath);
+    db = new SQL.Database(fileBuffer);
 
     // Get metadata from meta table
-    const metaRow = db.prepare('SELECT value FROM meta WHERE key = ?').get('0') as
-      | { value: string }
-      | undefined;
-
-    if (!metaRow) {
+    const metaResult = db.exec("SELECT value FROM meta WHERE key = '0'");
+    if (!metaResult.length || !metaResult[0].values.length) {
       return null;
     }
 
-    const meta = decodeHexJson(metaRow.value) as CursorMeta | null;
+    const metaValue = metaResult[0].values[0][0] as string;
+    const meta = decodeHexJson(metaValue) as CursorMeta | null;
     if (!meta) {
       return null;
     }
 
     // Get all blobs
-    const blobs = db.prepare('SELECT id, data FROM blobs').all() as { id: string; data: Buffer }[];
+    const blobsResult = db.exec('SELECT id, data FROM blobs');
+    if (!blobsResult.length) {
+      return null;
+    }
 
     const messages: ParsedCursorMessage[] = [];
     let sequenceNum = 0;
 
-    for (const blob of blobs) {
+    for (const row of blobsResult[0].values) {
       try {
-        const text = blob.data.toString('utf8');
+        const blobId = row[0] as string;
+        const blobData = row[1] as Uint8Array;
+        const text = Buffer.from(blobData).toString('utf8');
         const parsed = JSON.parse(text) as CursorMessage;
 
         // Only process message objects
@@ -132,7 +147,7 @@ export async function parseCursorStoreDb(storePath: string): Promise<ParsedCurso
           const toolUsage = extractCursorTool(parsed.content);
 
           messages.push({
-            id: blob.id,
+            id: blobId,
             role: toolUsage ? 'tool' : parsed.role,
             contentText: extractCursorText(parsed.content),
             contentJson: parsed,

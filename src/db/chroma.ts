@@ -1,4 +1,4 @@
-import { ChromaClient, Collection, IncludeEnum } from 'chromadb';
+import { ChromaClient, Collection } from 'chromadb';
 import { OllamaEmbeddingFunction } from '@chroma-core/ollama';
 import { config } from '../config.js';
 
@@ -85,14 +85,14 @@ export async function querySimilar(
   ids: string[][];
   documents: (string | null)[][];
   metadatas: (Record<string, unknown> | null)[][];
-  distances: number[][] | null;
+  distances: (number | null)[][] | null;
 }> {
   const collection = await getCollection(collectionName);
   const results = await collection.query({
     queryEmbeddings: [queryEmbedding],
     nResults,
-    where: whereFilter,
-    include: [IncludeEnum.Documents, IncludeEnum.Metadatas, IncludeEnum.Distances],
+    where: whereFilter as Parameters<typeof collection.query>[0]['where'],
+    include: ['documents', 'metadatas', 'distances'],
   });
   return results;
 }
@@ -115,7 +115,7 @@ export async function getEmbeddingMetadata(
   const collection = await getCollection(collectionName);
   const result = await collection.get({
     ids: [id],
-    include: [IncludeEnum.Metadatas],
+    include: ['metadatas'],
   });
   if (result.ids.length === 0 || !result.metadatas?.[0]) {
     return null;
