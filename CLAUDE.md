@@ -26,9 +26,6 @@ cp .env.example .env
 
 # Run initial sync
 pnpm run sync
-
-# Start cron daemon (hourly sync)
-pnpm run cron:start
 ```
 
 ## Commands
@@ -41,8 +38,6 @@ pnpm run sync -- -s cursor # Sync only Cursor
 pnpm run embeddings        # Generate pending embeddings
 pnpm run search "query"    # Search conversations
 pnpm run stats             # Show sync statistics
-
-pnpm run cron:start        # Start hourly sync daemon
 ```
 
 ## Architecture
@@ -70,7 +65,6 @@ STORAGE:
    └─ convo-projects       → Project-level embeddings
 
 SYNC:
-├─ Hourly cron job
 ├─ Incremental by default (only new/modified files)
 └─ Progress tracking for resumability
 ```
