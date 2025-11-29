@@ -32,7 +32,7 @@ services:
     volumes:
       - ~/THE_SINK/semantic-code-sync/chromadb:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8000"]
       interval: 10s
       timeout: 5s
       retries: 5

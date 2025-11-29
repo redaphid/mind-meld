@@ -108,6 +108,85 @@ LIMIT 20;
 SELECT * FROM v_tool_stats;
 ```
 
+## Chroma v3 API Reference
+
+### Client Initialization
+
+```typescript
+import { ChromaClient } from "chromadb";
+
+const client = new ChromaClient({
+  path: "http://localhost:8001"  // Note: we use port 8001
+});
+
+// Health check
+await client.heartbeat();
+```
+
+### Collection Management
+
+```typescript
+// Create collection (uses default embedding function if not specified)
+const collection = await client.createCollection({ name: "my-collection" });
+
+// Create without embedding function (must provide embeddings manually)
+const collection = await client.createCollection({
+  name: "my_collection",
+  embeddingFunction: null,
+});
+
+// Get existing collection
+const collection = await client.getCollection({
+  name: "my-collection",
+  embeddingFunction: embedder  // required for older versions
+});
+```
+
+### Adding/Upserting Data
+
+```typescript
+// Add records
+await collection.add({
+  ids: ["id1", "id2"],
+  embeddings: [[1, 2, 3], [4, 5, 6]],
+  metadatas: [{ key: "value" }, { key: "value" }],
+  documents: ["document1", "document2"],
+});
+
+// Upsert (add or update)
+await collection.upsert({
+  ids: ["id1", "id2"],
+  embeddings: [[1.1, 2.3, 3.2], [4.5, 6.9, 4.4]],
+  metadatas: [{ chapter: "3" }, { chapter: "5" }],
+  documents: ["doc1", "doc2"],
+});
+```
+
+### Querying
+
+```typescript
+// Query with text (requires embedding function on collection)
+const results = await collection.query({
+  queryTexts: ["my query"],
+  nResults: 10
+});
+
+// Query with embeddings (no embedding function needed)
+const results = await collection.query({
+  queryEmbeddings: [[0.1, 0.2, 0.3]],
+  nResults: 10
+});
+
+// Control returned fields
+await collection.query({
+  queryTexts: ["my query"],
+  include: ["documents", "metadatas", "embeddings"],
+});
+
+// Get by IDs
+await collection.get({ ids: ["id1", "id2"] });
+```
+
 ## Development
 
 ```bash
