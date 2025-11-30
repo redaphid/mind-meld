@@ -5,12 +5,12 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: mindmeld
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindmeld_dev}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_DB: conversations
     ports:
-      - "5433:5432"  # Non-standard port to avoid conflicts
+      - "${POSTGRES_PORT:?POSTGRES_PORT is required}:5432"
     volumes:
-      - ~/THE_SINK/semantic-code-sync/postgresdb:/var/lib/postgresql/data
+      - ${DATA_DIR:?DATA_DIR is required}/postgres:/var/lib/postgresql/data
       - ./init-db:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mindmeld -d conversations"]
@@ -28,9 +28,9 @@ services:
       ANONYMIZED_TELEMETRY: "FALSE"
       CHROMA_SERVER_CORS_ALLOW_ORIGINS: '["*"]'
     ports:
-      - "8001:8000"  # Non-standard port to avoid conflicts
+      - "${CHROMA_PORT:?CHROMA_PORT is required}:8000"
     volumes:
-      - ~/THE_SINK/semantic-code-sync/chromadb:/data
+      - ${DATA_DIR:?DATA_DIR is required}/chroma:/data
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8000"]
       interval: 10s
@@ -53,12 +53,11 @@ services:
       POSTGRES_PORT: 5432
       CHROMA_HOST: chroma
       CHROMA_PORT: 8000
-      OLLAMA_URL: http://host.docker.internal:11434
-      SYNC_INTERVAL_SECONDS: 3600
+      OLLAMA_URL: ${OLLAMA_URL:?OLLAMA_URL is required}
+      SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-3600}
     volumes:
-      - ~/.claude:/root/.claude:ro
-      # Mount Cursor data from macOS location to Linux-expected path
-      - ~/Library/Application Support/Cursor/User/globalStorage:/root/.config/Cursor/User/globalStorage:ro
+      - ${CLAUDE_CODE_PATH:?CLAUDE_CODE_PATH is required}:/root/.claude:ro
+      - ${CURSOR_GLOBALSTATE_PATH:?CURSOR_GLOBALSTATE_PATH is required}:/root/.config/Cursor/User/globalStorage:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
