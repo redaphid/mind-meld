@@ -40,7 +40,7 @@
   },
   "dependencies": {
     "@chroma-core/ollama": "^0.1.8",
-    "@hypnodroid/cursor-conversations": "^2.4.1",
+    "@redaphid/cursor-conversations": "link:../cursor-conversations",
     "chromadb": "^3.1.6",
     "commander": "^12.1.0",
     "dotenv": "^16.4.5",

@@ -9,7 +9,7 @@ import {
   listConversations,
   getConversation,
   listMessages,
-} from '@hypnodroid/cursor-conversations';
+} from '@redaphid/cursor-conversations';
 
 export interface CursorSyncStats {
   conversationsProcessed: number;

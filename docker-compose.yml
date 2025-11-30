@@ -57,7 +57,8 @@ services:
       SYNC_INTERVAL_SECONDS: 3600
     volumes:
       - ~/.claude:/root/.claude:ro
-      - ~/.cursor:/root/.cursor:ro
+      # Mount Cursor data from macOS location to Linux-expected path
+      - ~/Library/Application Support/Cursor/User/globalStorage:/root/.config/Cursor/User/globalStorage:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

@@ -1,6 +1,12 @@
 FROM debian:bookworm-slim
 
+# Install CA certificates and curl for HTTPS
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
+
+# Download sql.js WASM at build time (Bun's fetch hangs in some Docker contexts)
+RUN curl -fsSL https://sql.js.org/dist/sql-wasm.wasm -o /app/sql-wasm.wasm
 
 # Copy pre-built binary (use arm64 for Apple Silicon, x64 for CI/production)
 COPY out/mindmeld-linux-arm64 /app/mindmeld
