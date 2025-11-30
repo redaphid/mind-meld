@@ -70,6 +70,7 @@ function parseTimestamp(timestamp: unknown): Date | null {
 
 export interface ParsedSession {
   sessionId: string;
+  parentSessionId?: string; // For agent files, this is the parent conversation's sessionId
   filePath: string;
   fileModifiedAt: Date;
   isAgent: boolean;
@@ -198,8 +199,9 @@ export async function parseClaudeSessionFile(filePath: string): Promise<ParsedSe
     try {
       const parsed = JSON.parse(line) as ClaudeMessage;
 
-      // Skip file-history-snapshot entries
-      if (parsed.type === 'file-history-snapshot') continue;
+      // Skip non-message entries (metadata types)
+      const messageTypes = ['user', 'assistant'];
+      if (!messageTypes.includes(parsed.type)) continue;
 
       // Extract session metadata from first message
       if (!sessionIdFromContent && parsed.sessionId) {
@@ -263,8 +265,14 @@ export async function parseClaudeSessionFile(filePath: string): Promise<ParsedSe
   // Re-assign sequence numbers after sort
   messages.forEach((m, i) => (m.sequenceNum = i));
 
+  // For agent files: use filename as sessionId, sessionIdFromContent as parentSessionId
+  // For regular files: use sessionIdFromContent if available, otherwise filename
+  const finalSessionId = isAgent ? sessionId : (sessionIdFromContent ?? sessionId);
+  const parentSessionId = isAgent ? sessionIdFromContent : undefined;
+
   return {
-    sessionId: sessionIdFromContent ?? sessionId,
+    sessionId: finalSessionId,
+    parentSessionId,
     filePath,
     fileModifiedAt: fileStats.mtime,
     isAgent,

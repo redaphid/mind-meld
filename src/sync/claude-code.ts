@@ -104,8 +104,9 @@ async function syncSession(
     if (msgId) messagesInserted++;
   }
 
-  // Update session stats
+  // Update session stats and content_chars
   await queries.updateSessionStats(sessionId);
+  await queries.updateSessionContentChars(sessionId);
 
   return { messagesInserted };
 }
@@ -133,13 +134,10 @@ export async function syncClaudeCode(options?: {
     return stats;
   }
 
-  // Get latest file_modified_at from sessions table (more reliable than sync_state)
-  const lastFileModified = options?.incremental
-    ? await queries.getLatestFileModified(source.id)
-    : null;
-
-  if (lastFileModified) {
-    console.log(`Incremental sync: skipping files not modified since ${lastFileModified.toISOString()}`);
+  // Incremental sync checks each file individually against Postgres
+  // No global time cutoff - we check file_modified_at per session
+  if (options?.incremental) {
+    console.log('Incremental sync: will skip files already synced with same modification time');
   }
 
   // Discover projects
@@ -174,17 +172,7 @@ export async function syncClaudeCode(options?: {
         try {
           const fileStat = await stat(sessionFile);
 
-          // Skip if incremental and file hasn't changed since last sync
-          if (
-            options?.incremental &&
-            lastFileModified &&
-            fileStat.mtime <= lastFileModified
-          ) {
-            stats.skipped++;
-            continue;
-          }
-
-          // Check if already synced with same modification time
+          // Check if already synced with same modification time (per-file check)
           const fileName = sessionFile.split('/').pop()!.replace('.jsonl', '');
           const isAgent = fileName.startsWith('agent-');
           const sessionExternalId = isAgent ? fileName : fileName;

@@ -115,9 +115,7 @@ export async function syncCursor(options?: { incremental?: boolean }): Promise<C
     return stats;
   }
 
-  // Get last sync state
-  const syncState = await queries.getSyncState(source.id, 'sessions');
-  const lastSyncTime = syncState?.last_sync_timestamp?.getTime() ?? 0;
+  // Incremental sync checks each conversation's updatedAt against stored file_modified_at
 
   try {
     // List all conversations
