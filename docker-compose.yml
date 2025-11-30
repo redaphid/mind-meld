@@ -32,7 +32,7 @@ services:
     volumes:
       - ~/THE_SINK/semantic-code-sync/chromadb:/data
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8000"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8000"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -54,7 +54,7 @@ services:
       CHROMA_HOST: chroma
       CHROMA_PORT: 8000
       OLLAMA_URL: http://host.docker.internal:11434
-      SYNC_INTERVAL_MINUTES: 60
+      SYNC_INTERVAL_SECONDS: 3600
     volumes:
       - ~/.claude:/root/.claude:ro
       - ~/.cursor:/root/.cursor:ro

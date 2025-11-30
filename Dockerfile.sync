@@ -1,23 +1,18 @@
-FROM alpine:3.19
-
-RUN apk add --no-cache dcron
+FROM debian:bookworm-slim
 
 WORKDIR /app
 
-# Copy pre-built binary
-COPY out/mindmeld-linux-x64 /app/mindmeld
+# Copy pre-built binary (use arm64 for Apple Silicon, x64 for CI/production)
+COPY out/mindmeld-linux-arm64 /app/mindmeld
 RUN chmod +x /app/mindmeld
 
-# Create sync script
-RUN echo '#!/bin/sh' > /app/sync.sh && \
-    echo '/app/mindmeld sync 2>&1 | tee -a /var/log/mindmeld-sync.log' >> /app/sync.sh && \
-    chmod +x /app/sync.sh
+# Default to hourly sync (3600 seconds)
+ENV SYNC_INTERVAL_SECONDS=3600
 
-# Setup cron (runs every hour)
-RUN echo '0 * * * * /app/sync.sh' > /etc/crontabs/root
-
-# Create log file
-RUN touch /var/log/mindmeld-sync.log
-
-# Run initial sync then start cron
-CMD /app/sync.sh && crond -f -l 2
+# Run sync in a loop
+CMD while true; do \
+      echo "=== Sync starting at $(date -Iseconds) ===" && \
+      /app/mindmeld sync && \
+      echo "=== Sync complete, sleeping ${SYNC_INTERVAL_SECONDS}s ===" && \
+      sleep ${SYNC_INTERVAL_SECONDS}; \
+    done
