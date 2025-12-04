@@ -267,10 +267,11 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
       const actualContentChars = formattedMessages.reduce((sum, m) => sum + m.length, 0);
 
       // Summarize if needed (handles long conversations automatically)
-      const textForEmbedding = await summarizeConversation(formattedMessages);
+      const textForEmbedding = await summarizeConversation(formattedMessages)
+      const wasSummarized = textForEmbedding.length < formattedMessages.join('').length
 
       // Generate embedding from summary or full text
-      const embeddings = await generateEmbeddings([textForEmbedding.slice(0, 8000)]);
+      const embeddings = await generateEmbeddings([textForEmbedding.slice(0, 8000)])
 
       // Upsert to Chroma sessions collection (update if exists)
       await upsertEmbeddings(config.chroma.collections.sessions, {
@@ -287,19 +288,17 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
             message_count: session.message_count,
             total_tokens: session.total_tokens,
             content_chars: actualContentChars,
-            was_summarized: textForEmbedding.length < formattedMessages.join('').length,
+            was_summarized: wasSummarized,
             embedded_at: Date.now(),
           },
         ],
-      });
+      })
 
-      // Update session's content_chars if it was missing
-      if (!session.content_chars || session.content_chars === 0) {
-        await query(
-          `UPDATE sessions SET content_chars = $1 WHERE id = $2`,
-          [actualContentChars, session.id]
-        );
-      }
+      // Store summary in Postgres for FTS (always update - summary improves over time)
+      await query(
+        `UPDATE sessions SET summary = $1, content_chars = $2 WHERE id = $3`,
+        [textForEmbedding, actualContentChars, session.id]
+      )
 
       // Record/update in PostgreSQL with content_chars_at_embed
       await query(
