@@ -73,6 +73,7 @@ services:
       CHROMA_HOST: chroma
       CHROMA_PORT: 8000
       OLLAMA_URL: ${OLLAMA_URL:?OLLAMA_URL is required}
+      SUMMARIZE_MODEL: ${SUMMARIZE_MODEL:-granite3-dense:2b}
       SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-3600}
     volumes:
       - ${CLAUDE_CODE_PATH:?CLAUDE_CODE_PATH is required}:/root/.claude:ro
