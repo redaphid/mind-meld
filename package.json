@@ -28,6 +28,7 @@
     "sync:claude": "tsx src/index.ts sync --source claude_code",
     "sync:cursor": "tsx src/index.ts sync --source cursor",
     "sync:embeddings": "tsx src/index.ts embeddings",
+    "compute:centroids": "tsx scripts/compute-centroids.ts",
     "search": "tsx scripts/search.ts",
     "stats": "tsx scripts/stats.ts",
     "db:migrate": "tsx scripts/migrate.ts",
