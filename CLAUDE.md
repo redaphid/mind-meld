@@ -36,6 +36,7 @@ pnpm run sync -- --full    # Force full re-sync
 pnpm run sync -- -s cursor # Sync only Cursor
 
 pnpm run embeddings        # Generate pending embeddings
+pnpm run compute:centroids # Compute session/project centroids for weighted search
 pnpm run search "query"    # Search conversations
 pnpm run stats             # Show sync statistics
 ```
@@ -94,6 +95,55 @@ Key tables:
 - `embeddings` - Links to Chroma vectors
 
 ## Search
+
+### Weighted Centroid Search
+
+Advanced semantic search using session and project centroids (average embeddings):
+
+**Setup:**
+```bash
+# 1. Generate embeddings first
+pnpm run embeddings
+
+# 2. Compute centroids (session and project averages)
+pnpm run compute:centroids
+```
+
+**MCP Search Parameters:**
+- `likeSession`: Boost results similar to specific session(s) style
+- `unlikeSession`: Suppress results similar to specific session(s)
+- `likeProject`: Boost results matching specific project(s) topics
+- `unlikeProject`: Suppress results matching specific project(s)
+
+**Weight Syntax:**
+- Simple: `["123"]` - Default weight 1.0
+- Weighted: `["123:1.5"]` - 1.5x boost
+- Multiple: `["123:1.5", "456:0.5"]` - Combine multiple
+
+**Weight Scale:**
+- `0.3-0.5`: Gentle nudge, diverse results
+- `1.0`: Standard influence (default)
+- `1.2-1.5`: Noticeable bias, strong preference
+- `2.0+`: Aggressive, may over-filter
+
+**Example:**
+```typescript
+// Find sessions similar to session 104057 but not like briefing sessions
+{
+  query: "storefronts implementation",
+  likeSession: ["104057:1.5"],
+  unlikeSession: ["briefing-session:0.5"],
+  cwd: "/Users/you/Projects/sibi/rza"
+}
+```
+
+**Algorithm:** Uses Rocchio with 0.2 dampening for negative weights:
+```
+Q' = Q - γN + Σ(w * C+) - Σ(γw * C-)
+where γ = 0.2 (prevents over-suppression)
+```
+
+### SQL Search
 
 ```sql
 -- Full-text search
