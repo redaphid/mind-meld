@@ -81,6 +81,29 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  centroid-compute:
+    build:
+      context: .
+      dockerfile: Dockerfile.centroids
+    container_name: mindmeld-centroids
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      CHROMA_HOST: chroma
+      CHROMA_PORT: 8000
+      OLLAMA_URL: ${OLLAMA_URL:?OLLAMA_URL is required}
+      CENTROID_INTERVAL_SECONDS: ${CENTROID_INTERVAL_SECONDS:-25200}  # 7 hours default
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 networks:
   default:
     name: mindmeld-network

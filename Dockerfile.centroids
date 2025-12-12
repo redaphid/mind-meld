@@ -1,0 +1,26 @@
+FROM node:20-alpine
+
+# Install pnpm
+RUN corepack enable && corepack prepare pnpm@latest --activate
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json pnpm-lock.yaml ./
+
+# Install dependencies
+RUN pnpm install --frozen-lockfile --prod=false
+
+# Copy source code
+COPY . .
+
+# Default to 7 hours (25200 seconds)
+ENV CENTROID_INTERVAL_SECONDS=25200
+
+# Run centroid computation in a loop
+CMD while true; do \
+      echo "=== Centroid computation starting at $(date -Iseconds) ===" && \
+      pnpm compute:centroids && \
+      echo "=== Centroid computation complete, sleeping ${CENTROID_INTERVAL_SECONDS}s ===" && \
+      sleep ${CENTROID_INTERVAL_SECONDS}; \
+    done

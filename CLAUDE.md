@@ -68,7 +68,8 @@ STORAGE:
 SYNC:
 ├─ Docker-based hourly cron (mindmeld-sync container)
 ├─ Incremental by default (only new/modified files)
-└─ Progress tracking for resumability
+├─ Progress tracking for resumability
+└─ Centroid computation every 7 hours (mindmeld-centroids container)
 ```
 
 ## Data Sources
@@ -142,6 +143,9 @@ pnpm run compute:centroids
 Q' = Q - γN + Σ(w * C+) - Σ(γw * C-)
 where γ = 0.2 (prevents over-suppression)
 ```
+
+**Automated Updates:**
+Centroids are automatically recomputed every 7 hours by the `mindmeld-centroids` Docker container. This keeps search results fresh as new conversations are added. Adjust via `CENTROID_INTERVAL_SECONDS` in `.env`.
 
 ### SQL Search
 
