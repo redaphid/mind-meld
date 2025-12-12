@@ -21,8 +21,8 @@ interface MessageToEmbed {
   model: string | null;
 }
 
-// Get candidate messages for embedding (paginated by offset)
-async function getMessagesToEmbed(limit: number, offset: number): Promise<MessageToEmbed[]> {
+// Get candidate messages for embedding - only those not yet embedded
+async function getMessagesToEmbed(limit: number): Promise<MessageToEmbed[]> {
   const result = await query<MessageToEmbed>(
     `SELECT m.id, m.session_id, m.content_text, m.role, m.timestamp,
             p.path as project_path, src.name as source_name, m.model
@@ -30,11 +30,13 @@ async function getMessagesToEmbed(limit: number, offset: number): Promise<Messag
      JOIN sessions s ON m.session_id = s.id
      JOIN projects p ON s.project_id = p.id
      JOIN sources src ON p.source_id = src.id
+     LEFT JOIN embeddings e ON e.message_id = m.id
      WHERE m.content_text IS NOT NULL
        AND LENGTH(m.content_text) > 10
+       AND e.id IS NULL
      ORDER BY m.id
-     LIMIT $1 OFFSET $2`,
-    [limit, offset]
+     LIMIT $1`,
+    [limit]
   );
 
   return result.rows;
@@ -54,63 +56,20 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
   await ensureSummarizeModel();
 
   const batchSize = config.embeddings.batchSize;
-  const collection = await getCollection(config.chroma.collections.messages);
-  let offset = 0;
   let hasMore = true;
+  let totalProcessed = 0;
 
   while (hasMore) {
-    const messages = await getMessagesToEmbed(batchSize, offset);
-    offset += messages.length;
+    // Query only returns messages without embeddings in Postgres
+    const messagesToEmbed = await getMessagesToEmbed(batchSize);
 
-    if (messages.length === 0) {
+    if (messagesToEmbed.length === 0) {
       hasMore = false;
       break;
     }
 
-    // Check Chroma to see which messages need embedding
-    const chromaIds = messages.map((m) => `msg-${m.id}`);
-    let chromaResult: { ids: string[]; metadatas: (Record<string, unknown> | null)[] | null };
-
-    try {
-      chromaResult = await collection.get({
-        ids: chromaIds,
-        include: ['metadatas']
-      });
-    } catch (e) {
-      console.error('Failed to check Chroma:', e);
-      stats.errors++;
-      continue;
-    }
-
-    // Build a map of what Chroma has
-    const chromaMap = new Map<string, { token_count?: number }>();
-    for (let i = 0; i < chromaResult.ids.length; i++) {
-      const metadata = chromaResult.metadatas?.[i];
-      chromaMap.set(chromaResult.ids[i], {
-        token_count: metadata?.token_count as number | undefined,
-      });
-    }
-
-    // Filter to messages that need embedding:
-    // - Not in Chroma at all
-    // - Or token_count doesn't match content length
-    const messagesToEmbed = messages.filter((m) => {
-      const chromaId = `msg-${m.id}`;
-      const existing = chromaMap.get(chromaId);
-      if (!existing) return true; // Not in Chroma
-      if (existing.token_count !== m.content_text.length) return true; // Char count mismatch
-      return false;
-    });
-
-    if (messagesToEmbed.length === 0) {
-      stats.skipped += messages.length;
-      if (offset % 5000 === 0) {
-        console.log(`Checked ${offset} messages, ${stats.skipped} up-to-date, ${stats.processed} embedded...`);
-      }
-      continue;
-    }
-
-    console.log(`Batch ${offset}: ${messagesToEmbed.length}/${messages.length} need embedding...`);
+    totalProcessed += messagesToEmbed.length;
+    console.log(`Batch: ${messagesToEmbed.length} messages need embedding (${totalProcessed} total)...`);
 
     try {
       // Prepare texts for embedding - summarize if too long for embedding context
@@ -167,8 +126,7 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
       }
 
       stats.processed += messagesToEmbed.length;
-      stats.skipped += messages.length - messagesToEmbed.length;
-      console.log(`Embedded ${stats.processed} messages total (${stats.skipped} skipped)`);
+      console.log(`Embedded ${stats.processed} messages total`);
     } catch (e) {
       console.error('Batch embedding failed:', e);
       stats.errors++;
@@ -211,6 +169,7 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
      JOIN sources src ON p.source_id = src.id
      LEFT JOIN embeddings e ON e.chroma_collection = $1 AND e.chroma_id = 'session-' || s.id::text
      WHERE s.message_count > 0
+       AND s.title != 'Warmup'  -- Exclude noise sessions
        AND (
          e.id IS NULL  -- No embedding exists
          OR s.content_chars > COALESCE(e.content_chars_at_embed, 0)  -- Content has grown
