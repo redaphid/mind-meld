@@ -24,6 +24,14 @@ export const addVectors = (a: number[], b: number[]): number[] => {
 }
 
 /**
+ * Scale a vector by a scalar multiplier
+ * Used for weighted centroid contributions
+ */
+export const scaleVector = (vector: number[], scalar: number): number[] => {
+  return vector.map((val) => val * scalar)
+}
+
+/**
  * Normalize vector to unit length
  * Important after vector arithmetic to maintain search quality
  */

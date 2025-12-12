@@ -5,9 +5,40 @@ import { query, closePool } from '../db/postgres.js'
 import { querySimilar, getCollection } from '../db/chroma.js'
 import { config } from '../config.js'
 import { Ollama } from 'ollama'
-import { subtractVectors, normalizeVector } from '../utils/vector-math.js'
+import { subtractVectors, normalizeVector, addVectors, scaleVector } from '../utils/vector-math.js'
 
 const ollama = new Ollama({ host: config.ollama.url })
+
+// Rocchio algorithm dampening factor for negative weights
+// Prevents over-suppression: negative weights are reduced to 20% of stated value
+const UNLIKE_DAMPENING = 0.2
+
+// Types for weighted parameters
+type WeightedId = { id: string; weight: number }
+type ResolvedCentroid = { id: string; weight: number; centroid: number[] }
+
+/**
+ * Parse weighted ID parameters
+ * Format: "identifier:weight" or just "identifier" (defaults to weight 1.0)
+ * Examples: "session-123", "session-123:0.5", "session-456:2.0"
+ */
+const parseWeightedIds = (params: string[]): WeightedId[] =>
+  params
+    .map((item) => {
+      const trimmed = item.trim()
+      const colonIndex = trimmed.lastIndexOf(':')
+
+      // Check if there's a colon and it's followed by a valid number
+      if (colonIndex > 0) {
+        const possibleWeight = trimmed.slice(colonIndex + 1)
+        const weight = Number.parseFloat(possibleWeight)
+        if (!Number.isNaN(weight)) {
+          return { id: trimmed.slice(0, colonIndex), weight }
+        }
+      }
+      return { id: trimmed, weight: 1.0 }
+    })
+    .filter((item) => item.id.length > 0)
 
 const server = new McpServer({
   name: 'mindmeld',
@@ -23,20 +54,54 @@ const getQueryEmbedding = async (text: string): Promise<number[]> => {
   return response.embeddings[0]
 }
 
-// Compose query vector with optional negative query
+/**
+ * Compose query vector with optional negative query and centroid boosting
+ * Follows Rocchio algorithm: Q' = Q - γN + Σ(w * C+) - Σ(γw * C-)
+ * Where γ = UNLIKE_DAMPENING (0.2)
+ */
 const composeQueryVector = async (
-  query: string,
-  negativeQuery?: string
+  query: string | undefined,
+  negativeQuery: string | undefined,
+  likeSessionCentroids: ResolvedCentroid[] = [],
+  unlikeSessionCentroids: ResolvedCentroid[] = [],
+  likeProjectCentroids: ResolvedCentroid[] = [],
+  unlikeProjectCentroids: ResolvedCentroid[] = []
 ): Promise<number[]> => {
-  let queryVector = await getQueryEmbedding(query)
+  // Start with text query embedding or zero vector
+  let queryVector = query
+    ? await getQueryEmbedding(query)
+    : new Array(1024).fill(0) // BGE-M3 dimensions
 
+  // 1. Apply negative text query (vector subtraction)
   if (negativeQuery) {
     const negativeEmbedding = await getQueryEmbedding(negativeQuery)
     queryVector = subtractVectors(queryVector, negativeEmbedding)
-    queryVector = normalizeVector(queryVector)
   }
 
-  return queryVector
+  // 2. Apply positive session centroids (weighted addition)
+  for (const { id, weight, centroid } of likeSessionCentroids) {
+    queryVector = addVectors(queryVector, scaleVector(centroid, weight))
+  }
+
+  // 3. Apply negative session centroids (weighted subtraction with dampening)
+  for (const { id, weight, centroid } of unlikeSessionCentroids) {
+    const effectiveWeight = weight * UNLIKE_DAMPENING
+    queryVector = subtractVectors(queryVector, scaleVector(centroid, effectiveWeight))
+  }
+
+  // 4. Apply positive project centroids
+  for (const { id, weight, centroid } of likeProjectCentroids) {
+    queryVector = addVectors(queryVector, scaleVector(centroid, weight))
+  }
+
+  // 5. Apply negative project centroids (with dampening)
+  for (const { id, weight, centroid } of unlikeProjectCentroids) {
+    const effectiveWeight = weight * UNLIKE_DAMPENING
+    queryVector = subtractVectors(queryVector, scaleVector(centroid, effectiveWeight))
+  }
+
+  // Final normalization
+  return normalizeVector(queryVector)
 }
 
 // Helper to find projects matching a path (CWD-aware)
@@ -58,6 +123,74 @@ const findProjectsByPath = async (cwd: string) => {
   return result.rows
 }
 
+/**
+ * Resolve session centroids from weighted IDs
+ * Fetches centroid vectors from database and validates them
+ */
+const resolveSessionCentroids = async (
+  weightedIds: WeightedId[]
+): Promise<ResolvedCentroid[]> => {
+  if (weightedIds.length === 0) return []
+
+  const resolved: ResolvedCentroid[] = []
+
+  for (const { id, weight } of weightedIds) {
+    const sessionId = parseInt(id)
+    if (isNaN(sessionId)) continue
+
+    const result = await query<{
+      centroid_vector: string | null
+      centroid_message_count: number | null
+    }>(
+      `SELECT centroid_vector, centroid_message_count
+       FROM sessions
+       WHERE id = $1 AND centroid_vector IS NOT NULL`,
+      [sessionId]
+    )
+
+    if (result.rows[0] && result.rows[0].centroid_vector) {
+      const centroid = JSON.parse(result.rows[0].centroid_vector) as number[]
+      resolved.push({ id, weight, centroid })
+    }
+  }
+
+  return resolved
+}
+
+/**
+ * Resolve project centroids from weighted IDs
+ * Fetches centroid vectors from database and validates them
+ */
+const resolveProjectCentroids = async (
+  weightedIds: WeightedId[]
+): Promise<ResolvedCentroid[]> => {
+  if (weightedIds.length === 0) return []
+
+  const resolved: ResolvedCentroid[] = []
+
+  for (const { id, weight } of weightedIds) {
+    const projectId = parseInt(id)
+    if (isNaN(projectId)) continue
+
+    const result = await query<{
+      centroid_vector: string | null
+      centroid_message_count: number | null
+    }>(
+      `SELECT centroid_vector, centroid_message_count
+       FROM projects
+       WHERE id = $1 AND centroid_vector IS NOT NULL`,
+      [projectId]
+    )
+
+    if (result.rows[0] && result.rows[0].centroid_vector) {
+      const centroid = JSON.parse(result.rows[0].centroid_vector) as number[]
+      resolved.push({ id, weight, centroid })
+    }
+  }
+
+  return resolved
+}
+
 // Search tool - hybrid FTS + semantic search
 server.tool(
   'search',
@@ -76,9 +209,18 @@ CWD-AWARE:
 SEARCH MODES:
 - semantic: Find conceptually similar content (default)
 - text: Exact phrase/keyword matching
-- hybrid: Combines both approaches`,
+- hybrid: Combines both approaches
+
+WEIGHTED CENTROID SEARCH:
+- likeSession: Boost results similar to specific session(s) style
+  Format: ["123"] or ["123:1.5"] for weighted boost
+- unlikeSession: Suppress results similar to specific session(s)
+- likeProject: Boost results matching specific project(s) topics
+- unlikeProject: Suppress results matching specific project(s)
+
+Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressive)`,
   {
-    query: z.string().describe('Search query - natural language works best for semantic search'),
+    query: z.string().optional().describe('Search query - natural language works best for semantic search (optional when using centroid params)'),
     negativeQuery: z.string().optional().describe('Negative query - pushes results away from this concept (e.g., "slack briefing summaries" to exclude discussion threads)'),
     excludeTerms: z.string().optional().describe('Hard filter - exclude results containing these terms (e.g., "warmup slack briefing" removes those sessions entirely)'),
     cwd: z.string().optional().describe('Current working directory - conversations from matching projects get boosted'),
@@ -87,14 +229,42 @@ SEARCH MODES:
     source: z.enum(['claude_code', 'cursor']).optional().describe('Filter to specific source'),
     since: z.string().optional().describe('Only include conversations since this time (e.g., "7d", "2024-01-01")'),
     projectOnly: z.boolean().optional().describe('Only search conversations from the CWD project'),
+    likeSession: z.array(z.string()).optional().describe('Boost results similar to these session IDs (format: ["123"] or ["123:1.5"] for weighted)'),
+    unlikeSession: z.array(z.string()).optional().describe('Suppress results similar to these session IDs'),
+    likeProject: z.array(z.string()).optional().describe('Boost results matching these project IDs'),
+    unlikeProject: z.array(z.string()).optional().describe('Suppress results matching these project IDs'),
   },
   async (params) => {
     const limit = params.limit ?? 20
     const mode = params.mode ?? 'hybrid'
 
+    // Validate that we have either a query or centroid params
+    if (!params.query && !params.likeSession && !params.likeProject && !params.unlikeSession && !params.unlikeProject) {
+      throw new Error('Must provide either query or centroid parameters (likeSession, likeProject, etc.)')
+    }
+
     // Find matching projects for CWD boosting
     const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
     const projectIds = matchingProjects.map((p) => p.id)
+
+    // Parse weighted centroid parameters
+    const likeSessionIds = params.likeSession ? parseWeightedIds(params.likeSession) : []
+    const unlikeSessionIds = params.unlikeSession ? parseWeightedIds(params.unlikeSession) : []
+    const likeProjectIds = params.likeProject ? parseWeightedIds(params.likeProject) : []
+    const unlikeProjectIds = params.unlikeProject ? parseWeightedIds(params.unlikeProject) : []
+
+    // Resolve centroids from database (in parallel)
+    const [
+      likeSessionCentroids,
+      unlikeSessionCentroids,
+      likeProjectCentroids,
+      unlikeProjectCentroids
+    ] = await Promise.all([
+      resolveSessionCentroids(likeSessionIds),
+      resolveSessionCentroids(unlikeSessionIds),
+      resolveProjectCentroids(likeProjectIds),
+      resolveProjectCentroids(unlikeProjectIds)
+    ])
 
     // Build time filter
     let sinceDate: Date | null = null
@@ -124,7 +294,14 @@ SEARCH MODES:
     // Semantic search via Chroma
     if (mode === 'semantic' || mode === 'hybrid') {
       try {
-        const embedding = await composeQueryVector(params.query, params.negativeQuery)
+        const embedding = await composeQueryVector(
+          params.query,
+          params.negativeQuery,
+          likeSessionCentroids,
+          unlikeSessionCentroids,
+          likeProjectCentroids,
+          unlikeProjectCentroids
+        )
         const chromaResults = await querySimilar(
           config.chroma.collections.sessions,
           embedding,
