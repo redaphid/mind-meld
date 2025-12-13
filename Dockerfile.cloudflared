@@ -1,0 +1,4 @@
+FROM cloudflare/cloudflared:latest
+
+# This will be configured via docker-compose environment variables
+# No additional configuration needed - cloudflared will use TUNNEL_TOKEN from env
