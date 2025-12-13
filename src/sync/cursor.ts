@@ -132,30 +132,10 @@ async function extractWorkspacePath(conversationId: string): Promise<string | nu
 }
 
 // Extract text content from a Cursor message
+// The cursor-conversations library now handles richText, codeBlocks, toolFormerData, etc.
+// This function just provides a fallback for edge cases
 function extractMessageText(message: any): string {
-  // Handle different message formats
-  if (message.text) return message.text;
-
-  // Handle responseParts format
-  if (message.responseParts && Array.isArray(message.responseParts)) {
-    const textParts: string[] = [];
-    for (const part of message.responseParts) {
-      if (part.type === 'text' && part.rawText) {
-        textParts.push(part.rawText);
-      }
-    }
-    if (textParts.length > 0) return textParts.join('\n');
-  }
-
-  // Handle thinking content
-  if (message.thinking) return `[THINKING] ${message.thinking}`;
-
-  // Handle code blocks
-  if (message.codeBlocks?.length) {
-    return `[${message.codeBlocks.length} code block(s)]`;
-  }
-
-  return '';
+  return message.text || '';
 }
 
 // Main sync function for Cursor
@@ -257,9 +237,16 @@ export async function syncCursor(options?: { incremental?: boolean }): Promise<C
         // Insert messages and track total content size
         let sequenceNum = 0;
         let totalContentChars = 0;
+        let skippedCount = 0;
         for (const message of messages) {
           const contentText = extractMessageText(message);
-          if (!contentText) continue;
+          if (!contentText) {
+            skippedCount++;
+            if (skippedCount === 1) {
+              console.log(`Skipping message with no text. message.text=${message.text}, messageId=${message.messageId}`);
+            }
+            continue;
+          }
 
           totalContentChars += contentText.length;
           const role = message.type === 1 ? 'user' : 'assistant';
@@ -275,6 +262,9 @@ export async function syncCursor(options?: { incremental?: boolean }): Promise<C
           });
 
           if (msgId) stats.messagesInserted++;
+        }
+        if (skippedCount > 0) {
+          console.log(`Conversation ${conv.conversationId}: Processed ${messages.length} messages, inserted ${stats.messagesInserted - (stats.messagesInserted - messages.length + skippedCount)}, skipped ${skippedCount}`);
         }
 
         // Update session stats and content_chars
