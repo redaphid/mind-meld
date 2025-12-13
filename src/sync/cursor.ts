@@ -1,6 +1,6 @@
 import { copyFile, mkdir, stat } from 'fs/promises';
 import { homedir } from 'os';
-import { join, dirname } from 'path';
+import { join, dirname, basename } from 'path';
 import { existsSync } from 'fs';
 import { config } from '../config.js';
 import { queries } from '../db/postgres.js';
@@ -9,6 +9,7 @@ import {
   listConversations,
   getConversation,
   listMessages,
+  queryAll,
 } from '@redaphid/cursor-conversations';
 
 export interface CursorSyncStats {
@@ -56,6 +57,78 @@ async function copyCursorDb(): Promise<string> {
 
   console.log('Cursor DB copied successfully');
   return destPath;
+}
+
+// Extract workspace path from conversation context
+async function extractWorkspacePath(conversationId: string): Promise<string | null> {
+  try {
+    // Query raw conversation data to get context
+    const rows = await queryAll<{ key: string; value: string }>(`
+      SELECT value
+      FROM cursorDiskKV
+      WHERE key = 'composerData:${conversationId}'
+      AND value IS NOT NULL
+      AND value != 'null'
+      LIMIT 1
+    `);
+
+    if (rows.length === 0) return null;
+
+    const data = JSON.parse(rows[0].value);
+    const context = data.context;
+
+    if (!context) return null;
+
+    // Try to extract workspace from file selections
+    if (context.fileSelections && Array.isArray(context.fileSelections)) {
+      for (const selection of context.fileSelections) {
+        const fsPath = selection.uri?.fsPath;
+        if (fsPath && typeof fsPath === 'string') {
+          // Extract a reasonable workspace path (go up to a common ancestor)
+          // E.g., /Users/hypnodroid/Projects/sibi/habitat/agent/src/app.tsx
+          // becomes sibi/habitat or similar
+          const parts = fsPath.split('/').filter(Boolean);
+
+          // Find common workspace patterns
+          const projectsIndex = parts.indexOf('Projects');
+          if (projectsIndex >= 0 && projectsIndex + 2 < parts.length) {
+            // Return something like "sibi/habitat"
+            return `${parts[projectsIndex + 1]}/${parts[projectsIndex + 2]}`;
+          }
+
+          // Fallback: use last 2-3 directory components before filename
+          if (parts.length >= 3) {
+            const dirParts = parts.slice(0, -1); // Remove filename
+            if (dirParts.length >= 2) {
+              return dirParts.slice(-2).join('/');
+            }
+          }
+        }
+      }
+    }
+
+    // Try folder selections
+    if (context.folderSelections && Array.isArray(context.folderSelections)) {
+      for (const selection of context.folderSelections) {
+        const fsPath = selection.uri?.fsPath;
+        if (fsPath && typeof fsPath === 'string') {
+          const parts = fsPath.split('/').filter(Boolean);
+          const projectsIndex = parts.indexOf('Projects');
+          if (projectsIndex >= 0 && projectsIndex + 2 < parts.length) {
+            return `${parts[projectsIndex + 1]}/${parts[projectsIndex + 2]}`;
+          }
+          if (parts.length >= 2) {
+            return parts.slice(-2).join('/');
+          }
+        }
+      }
+    }
+
+    return null;
+  } catch (e) {
+    console.error(`Failed to extract workspace for ${conversationId}:`, e);
+    return null;
+  }
 }
 
 // Extract text content from a Cursor message
@@ -127,16 +200,28 @@ export async function syncCursor(options?: { incremental?: boolean }): Promise<C
 
     console.log(`Found ${total} Cursor conversations`);
 
-    // Get or create project for Cursor (do this once outside the loop)
-    const projectId = await queries.upsertProject(
-      source.id,
-      'cursor-main',
-      'cursor-main',
-      'Cursor Conversations'
-    );
+    // Cache for project IDs to avoid repeated upserts
+    const projectCache = new Map<string, string>();
 
     for (const conv of conversations) {
       try {
+        // Extract workspace path for this conversation
+        const workspacePath = await extractWorkspacePath(conv.conversationId);
+        const projectSlug = workspacePath || 'cursor-unknown';
+        const projectName = workspacePath || 'Unknown Workspace';
+
+        // Get or create project ID (with caching)
+        let projectId = projectCache.get(projectSlug);
+        if (!projectId) {
+          projectId = await queries.upsertProject(
+            source.id,
+            projectSlug,
+            projectSlug,
+            `Cursor: ${projectName}`
+          );
+          projectCache.set(projectSlug, projectId);
+        }
+
         // Check if session exists in our DB
         const existingSession = await queries.getSessionByExternalId(projectId, conv.conversationId);
 

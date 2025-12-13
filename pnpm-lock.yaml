@@ -15,8 +15,8 @@ importers:
         specifier: ^1.24.3
         version: 1.24.3(zod@3.25.76)
       '@redaphid/cursor-conversations':
-        specifier: link:../cursor-conversations
-        version: link:../cursor-conversations
+        specifier: ^1.0.0
+        version: 1.0.0
       chromadb:
         specifier: ^3.1.6
         version: 3.1.6
@@ -452,6 +452,11 @@ packages:
 
   '@protobufjs/utf8@1.1.0':
     resolution: {integrity: sha512-Vvn3zZrhQZkkBE8LSuW3em98c0FwgO4nxzv6OdSxPKJIEKY2bGbHn+mhGIPerzI4twdxaP8/0+06HBpwf345Lw==}
+
+  '@redaphid/cursor-conversations@1.0.0':
+    resolution: {integrity: sha512-lrVVBv7oeHDta0rKIKp7a5VuMjYMN/HTb6F2BelEyJRWgameWlXJFs7QsgBd61/6Bx40wCwtau5fZz8XlN0+dg==, tarball: https://npm.pkg.github.com/download/@redaphid/cursor-conversations/1.0.0/99a935dd3ec1765d87d0ec9b29b9a3b4fd6b50b6}
+    engines: {node: '>=20'}
+    hasBin: true
 
   '@rollup/rollup-android-arm-eabi@4.53.3':
     resolution: {integrity: sha512-mRSi+4cBjrRLoaal2PnqH82Wqyb+d3HsPUN/W+WslCXsZsyHa9ZeQQX/pQsZaVIWDkPcpV6jJ+3KLbTbgnwv8w==}
@@ -1986,6 +1991,15 @@ snapshots:
   '@protobufjs/pool@1.1.0': {}
 
   '@protobufjs/utf8@1.1.0': {}
+
+  '@redaphid/cursor-conversations@1.0.0':
+    dependencies:
+      '@modelcontextprotocol/sdk': 1.24.3(zod@3.25.76)
+      sql.js: 1.13.0
+      zod: 3.25.76
+    transitivePeerDependencies:
+      - '@cfworker/json-schema'
+      - supports-color
 
   '@rollup/rollup-android-arm-eabi@4.53.3':
     optional: true
