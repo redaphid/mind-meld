@@ -44,7 +44,7 @@
   "dependencies": {
     "@chroma-core/ollama": "^0.1.8",
     "@modelcontextprotocol/sdk": "^1.24.3",
-    "@redaphid/cursor-conversations": "link:../cursor-conversations",
+    "@redaphid/cursor-conversations": "^1.0.0",
     "chromadb": "^3.1.6",
     "commander": "^12.1.0",
     "dotenv": "^16.4.5",
