@@ -1,3 +1,4 @@
+import assert from 'node:assert'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
@@ -550,6 +551,7 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
     // Format output
     const output = finalResults.map((r, i) => {
       const projectLabel = projectIds.includes(r.session_id) ? ' [CURRENT PROJECT]' : ''
+      assert(r.timestamp, `Missing timestamp for session ${r.session_id}`)
       return `${i + 1}. **${r.title}**${projectLabel}
    Project: ${r.project_name} (${r.source})
    Path: ${r.project_path}
@@ -626,6 +628,8 @@ Use after search to dive deep into a relevant conversation.`,
        LIMIT $2`,
       [params.sessionId, limit]
     )
+
+    assert(session.started_at, `Missing started_at for session ${params.sessionId}`)
 
     const header = `# ${session.title ?? 'Untitled Session'}
 
@@ -708,6 +712,7 @@ server.prompt(
     contextText += `## Recent Sessions\n\n`
 
     for (const session of recentResult.rows) {
+      assert(session.started_at, `Missing started_at for session ${session.id}`)
       contextText += `- **${session.title ?? 'Untitled'}** (${session.started_at.toISOString().split('T')[0]}) - ${session.message_count} messages [ID: ${session.id}]\n`
     }
 

@@ -76,6 +76,8 @@ async function syncSession(
     cwd: session.cwd,
     rawFilePath: session.filePath,
     fileModifiedAt: session.fileModifiedAt,
+    startedAt: session.firstTimestamp,
+    endedAt: session.lastTimestamp,
   });
 
   let messagesInserted = 0;
@@ -179,6 +181,7 @@ export async function syncClaudeCode(options?: {
 
           const existingSession = await queries.getSessionByExternalId(projectId, sessionExternalId);
           if (
+            options?.incremental &&
             existingSession?.file_modified_at &&
             fileStat.mtime.getTime() === existingSession.file_modified_at.getTime()
           ) {

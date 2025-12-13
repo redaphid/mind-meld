@@ -239,12 +239,19 @@ export async function syncCursor(options?: { incremental?: boolean }): Promise<C
         // Get full conversation with messages
         const { messages } = await listMessages(conv.conversationId, { limit: 500 });
 
+        // Compute session timestamps from conversation dates
+        // Use createdAt as start, updatedAt as end
+        const startedAt = new Date(conv.createdAt)
+        const endedAt = new Date(conv.updatedAt)
+
         // Upsert session
         const sessionId = await queries.upsertSession({
           projectId,
           externalId: conv.conversationId,
           title: conv.preview?.slice(0, 100) || 'Untitled',
           fileModifiedAt: new Date(conv.updatedAt),
+          startedAt,
+          endedAt,
         });
 
         // Insert messages and track total content size

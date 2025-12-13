@@ -18,8 +18,8 @@ program
 program
   .command('sync')
   .description('Sync conversations from all sources')
-  .option('-i, --incremental', 'Only sync new/modified files', true)
-  .option('-f, --full', 'Full sync (ignore incremental)', false)
+  .option('-i, --incremental', 'Only sync new/modified files')
+  .option('-f, --full', 'Full sync (ignore incremental)')
   .option('-s, --source <source>', 'Only sync specific source (claude_code, cursor)')
   .option('--skip-embeddings', 'Skip embedding generation')
   .action(async (options) => {
@@ -28,8 +28,16 @@ program
         ? [options.source as 'claude_code' | 'cursor']
         : undefined;
 
+      // Determine incremental mode: false if --full is set, true if --incremental is set, default to true
+      const incremental = options.full ? false : (options.incremental !== undefined ? options.incremental : true);
+
+      console.log('DEBUG: options.full =', options.full);
+      console.log('DEBUG: options.incremental =', options.incremental);
+      console.log('DEBUG: options.skipEmbeddings =', options.skipEmbeddings);
+      console.log('DEBUG: computed incremental =', incremental);
+
       await runFullSync({
-        incremental: !options.full,
+        incremental,
         skipEmbeddings: options.skipEmbeddings,
         sources,
       });

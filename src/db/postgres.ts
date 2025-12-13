@@ -116,17 +116,22 @@ export const queries = {
     cwd?: string;
     rawFilePath?: string;
     fileModifiedAt?: Date;
+    startedAt?: Date;
+    endedAt?: Date;
   }) => {
     const result = await query<{ id: number }>(
       `INSERT INTO sessions (
         project_id, external_id, title, is_agent, parent_session_id, agent_id,
-        claude_version, model_used, git_branch, cwd, raw_file_path, file_modified_at, last_synced_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+        claude_version, model_used, git_branch, cwd, raw_file_path, file_modified_at,
+        started_at, ended_at, last_synced_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
       ON CONFLICT (project_id, external_id)
       DO UPDATE SET
         title = COALESCE($3, sessions.title),
         model_used = COALESCE($8, sessions.model_used),
         file_modified_at = $12,
+        started_at = COALESCE($13, sessions.started_at),
+        ended_at = COALESCE($14, sessions.ended_at),
         last_synced_at = NOW()
       RETURNING id`,
       [
@@ -142,6 +147,8 @@ export const queries = {
         params.cwd ?? null,
         params.rawFilePath ?? null,
         params.fileModifiedAt ?? null,
+        params.startedAt ?? null,
+        params.endedAt ?? null,
       ]
     );
     return result.rows[0].id;
