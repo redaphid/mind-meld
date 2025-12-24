@@ -136,8 +136,10 @@ services:
     depends_on:
       - mindmeld-mcp
     environment:
-      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is required}
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    profiles:
+      - tunnel  # Optional service - only runs with: docker compose --profile tunnel up
 
 networks:
   default:
