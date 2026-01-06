@@ -1,5 +1,23 @@
 import { Ollama } from 'ollama';
 import { config } from '../config.js';
+import { summarizeConversation } from './summarize.js';
+
+const SUMMARIZE_MODEL = process.env.SUMMARIZE_MODEL ?? 'qwen3:8b';
+
+// Rephrase text using completely different wording to avoid triggering NaN bugs
+async function rephraseText(text: string): Promise<string> {
+  const ollama = getOllamaClient()
+
+  const response = await ollama.generate({
+    model: SUMMARIZE_MODEL,
+    prompt: `Rephrase the following text using completely different words and sentence structure while preserving the exact meaning. Use simple, plain language. Do not add any introduction or explanation, just output the rephrased text:
+
+${text}`,
+    stream: false,
+  })
+
+  return response.response.trim()
+}
 
 let client: Ollama | null = null;
 
@@ -31,7 +49,8 @@ function sanitizeText(text: string): string {
 }
 
 // Generate embeddings for multiple texts in batch
-export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
+// Returns null for texts that cannot be embedded (Ollama bug)
+export async function generateEmbeddings(texts: string[]): Promise<(number[] | null)[]> {
   const ollama = getOllamaClient();
 
   // Sanitize all input texts
@@ -44,25 +63,116 @@ export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
     }
   }
 
-  const response = await ollama.embed({
-    model: config.embeddings.model,
-    input: sanitizedTexts,
-  });
-
-  // Verify no NaN values - if we get them, it's a bug we need to fix
-  response.embeddings.forEach((emb, idx) => {
-    const hasNaN = emb.some((val) => isNaN(val) || !isFinite(val))
-    if (hasNaN) {
-      throw new Error(
-        `Embedding contains NaN/Infinity at index ${idx}\n` +
-        `Original text length: ${texts[idx].length}\n` +
-        `Sanitized text: ${sanitizedTexts[idx].substring(0, 100)}...\n` +
-        `This should never happen - investigate the input text`
-      )
+  let response
+  try {
+    response = await ollama.embed({
+      model: config.embeddings.model,
+      input: sanitizedTexts,
+    })
+  } catch (error: any) {
+    // Ollama bge-m3 has a known bug that produces NaN for certain texts
+    // GitHub issue: https://github.com/ollama/ollama/issues/13572
+    // When batch fails with NaN, retry each text individually with summarization fallback
+    if (error.message?.includes('NaN') || error.error?.includes('NaN')) {
+      console.log('Batch failed with NaN error, retrying individually with summarization fallback...')
+      return await generateEmbeddingsWithFallback(texts, sanitizedTexts)
     }
-  })
+    throw error
+  }
 
-  return response.embeddings;
+  return response.embeddings
+}
+
+// Retry failed embeddings individually with summarization fallback
+async function generateEmbeddingsWithFallback(
+  originalTexts: string[],
+  sanitizedTexts: string[]
+): Promise<(number[] | null)[]> {
+  const ollama = getOllamaClient()
+  const embeddings: (number[] | null)[] = []
+
+  for (let i = 0; i < sanitizedTexts.length; i++) {
+    try {
+      // Try original text first
+      const response = await ollama.embed({
+        model: config.embeddings.model,
+        input: [sanitizedTexts[i]],
+      })
+
+      // Check for NaN
+      const hasNaN = response.embeddings[0].some((val) => isNaN(val) || !isFinite(val))
+      if (hasNaN) {
+        throw new Error('NaN in embedding')
+      }
+
+      embeddings.push(response.embeddings[0])
+    } catch (error: any) {
+      // If original fails with NaN, try summarizing
+      if (error.message?.includes('NaN') || error.error?.includes('NaN')) {
+        console.log(`  Text ${i} failed with NaN, trying with summarization...`)
+
+        try {
+          const summarized = await summarizeConversation([sanitizedTexts[i]])
+          console.log(`  Summarized to: ${summarized.substring(0, 100)}...`)
+
+          // Try embedding the summarized version
+          const response = await ollama.embed({
+            model: config.embeddings.model,
+            input: [summarized],
+          })
+
+          const hasNaN = response.embeddings[0].some((val) => isNaN(val) || !isFinite(val))
+          if (hasNaN) {
+            throw new Error('NaN in summarized embedding')
+          }
+
+          console.log(`  ✅ Summarization worked for text ${i}`)
+          embeddings.push(response.embeddings[0])
+        } catch (summaryError: any) {
+          // If summarization also fails with NaN, try rephrasing with completely different words
+          if (summaryError.message?.includes('NaN') || summaryError.error?.includes('NaN')) {
+            console.log(`  Summarization also produced NaN, trying with rephrasing...`)
+
+            try {
+              // Ask Ollama to rephrase using completely different wording
+              const rephrased = await rephraseText(sanitizedTexts[i])
+              console.log(`  Rephrased to: ${rephrased.substring(0, 100)}...`)
+
+              // Try embedding the rephrased version
+              const response = await ollama.embed({
+                model: config.embeddings.model,
+                input: [rephrased],
+              })
+
+              const hasNaN = response.embeddings[0].some((val) => isNaN(val) || !isFinite(val))
+              if (hasNaN) {
+                throw new Error('NaN in rephrased embedding')
+              }
+
+              console.log(`  ✅ Rephrasing worked for text ${i}`)
+              embeddings.push(response.embeddings[0])
+            } catch (rephraseError: any) {
+              // If even rephrasing fails, mark as un-embeddable and continue
+              console.error(`\n⚠️  Text ${i} failed even after rephrasing - will mark as un-embeddable`)
+              console.error(`   Error: ${rephraseError.message || rephraseError}`)
+              console.error(`   Original text length: ${sanitizedTexts[i].length}`)
+              console.error(`   Original text (first 200 chars): ${sanitizedTexts[i].substring(0, 200)}\n`)
+              embeddings.push(null) // Return null to mark as un-embeddable
+            }
+          } else {
+            // Non-NaN error from summarization
+            console.error(`\n🚨 CRITICAL: Text ${i} summarization failed with non-NaN error!`)
+            console.error(`   Error: ${summaryError.message || summaryError}`)
+            throw summaryError
+          }
+        }
+      } else {
+        throw error
+      }
+    }
+  }
+
+  return embeddings
 }
 
 // Check if embedding model is available

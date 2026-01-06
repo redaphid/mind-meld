@@ -14,6 +14,8 @@ Mindmeld syncs conversations from Claude Code and Cursor into a unified PostgreS
 
 ## Quick Start
 
+### Local Setup (All Services on This Machine)
+
 ```bash
 # Start services
 docker compose up -d
@@ -27,6 +29,41 @@ cp .env.example .env
 # Run initial sync
 pnpm run sync
 ```
+
+### Remote Database Setup (Postgres/Chroma on Remote Machine)
+
+**Use case:** Run Postgres and Chroma on a server while syncing from your laptop.
+
+**On remote machine:**
+```bash
+# Start only database services
+docker compose up -d postgres chroma
+
+# Note the machine's IP or hostname
+```
+
+**On local machine (where Claude Code/Cursor are installed):**
+```bash
+# Install dependencies
+pnpm install
+
+# Copy environment config
+cp .env.example .env
+
+# Edit .env to point to remote databases:
+# POSTGRES_HOST=192.168.1.100  # Your remote machine IP
+# CHROMA_HOST=192.168.1.100
+# OLLAMA_URL=http://localhost:11434  # Keep Ollama local for speed
+
+# Run sync (uses remote databases)
+pnpm run sync
+```
+
+**Important notes:**
+- Postgres and Chroma must be accessible from your machine (check firewalls)
+- Ollama should stay local for best embedding performance
+- The sync container can run on either machine (it just needs network access to both databases)
+- Data persists on whichever machine runs Postgres/Chroma
 
 ## Commands
 

@@ -779,6 +779,89 @@ server.tool(
   }
 )
 
+// Get session transcript
+server.tool(
+  'getSessionTranscript',
+  'Get the full transcript of a Claude Code or Cursor session by ID or title search',
+  {
+    searchTerm: z.string().describe('Session external_id or title search term'),
+  },
+  async (params) => {
+    // Try to find session by external_id first, then by title search
+    const sessionResult = await query<{
+      id: number
+      external_id: string
+      title: string
+      project_path: string
+      source_name: string
+      started_at: Date
+      message_count: number
+    }>(
+      `SELECT s.id, s.external_id, s.title, p.path as project_path,
+              src.name as source_name, s.started_at, s.message_count
+       FROM sessions s
+       JOIN projects p ON s.project_id = p.id
+       JOIN sources src ON p.source_id = src.id
+       WHERE s.external_id = $1
+          OR s.title ILIKE $2
+       ORDER BY s.started_at DESC
+       LIMIT 1`,
+      [params.searchTerm, `%${params.searchTerm}%`]
+    )
+
+    if (sessionResult.rows.length === 0) {
+      return {
+        content: [{ type: 'text', text: `No session found matching: ${params.searchTerm}` }],
+        isError: true,
+      }
+    }
+
+    const session = sessionResult.rows[0]
+
+    // Get all messages for this session
+    const messagesResult = await query<{
+      sequence_num: number
+      role: string
+      content_text: string | null
+      content_json: any | null
+      timestamp: Date
+      model: string | null
+      tool_name: string | null
+    }>(
+      `SELECT sequence_num, role, content_text, content_json, timestamp, model, tool_name
+       FROM messages
+       WHERE session_id = $1
+       ORDER BY sequence_num`,
+      [session.id]
+    )
+
+    // Format transcript
+    let transcript = `# ${session.title}\n\n`
+    transcript += `**Session ID:** ${session.external_id}\n`
+    transcript += `**Source:** ${session.source_name}\n`
+    transcript += `**Project:** ${session.project_path}\n`
+    transcript += `**Started:** ${session.started_at.toLocaleString()}\n`
+    transcript += `**Messages:** ${session.message_count}\n\n`
+    transcript += `---\n\n`
+
+    for (const msg of messagesResult.rows) {
+      const timestamp = msg.timestamp.toLocaleTimeString()
+      const model = msg.model ? ` [${msg.model}]` : ''
+      const tool = msg.tool_name ? ` (tool: ${msg.tool_name})` : ''
+
+      transcript += `## [${timestamp}] ${msg.role.toUpperCase()}${model}${tool}\n\n`
+
+      if (msg.content_text) {
+        transcript += `${msg.content_text}\n\n`
+      } else if (msg.content_json) {
+        transcript += `*[JSON content]*\n\n`
+      }
+    }
+
+    return { content: [{ type: 'text', text: transcript }] }
+  }
+)
+
 // Start server
 const transport = new StdioServerTransport()
 await server.connect(transport)

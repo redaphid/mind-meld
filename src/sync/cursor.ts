@@ -181,7 +181,7 @@ export async function syncCursor(options?: { incremental?: boolean }): Promise<C
     console.log(`Found ${total} Cursor conversations`);
 
     // Cache for project IDs to avoid repeated upserts
-    const projectCache = new Map<string, string>();
+    const projectCache = new Map<string, number>();
 
     for (const conv of conversations) {
       try {
@@ -202,8 +202,11 @@ export async function syncCursor(options?: { incremental?: boolean }): Promise<C
           projectCache.set(projectSlug, projectId);
         }
 
+        // TypeScript doesn't know projectId is defined after the if check
+        const definiteProjectId: number = projectId;
+
         // Check if session exists in our DB
-        const existingSession = await queries.getSessionByExternalId(projectId, conv.conversationId);
+        const existingSession = await queries.getSessionByExternalId(definiteProjectId, conv.conversationId);
 
         // Incremental mode: skip if session exists and hasn't been updated
         if (options?.incremental && existingSession) {
@@ -226,7 +229,7 @@ export async function syncCursor(options?: { incremental?: boolean }): Promise<C
 
         // Upsert session
         const sessionId = await queries.upsertSession({
-          projectId,
+          projectId: definiteProjectId,
           externalId: conv.conversationId,
           title: conv.preview?.slice(0, 100) || 'Untitled',
           fileModifiedAt: new Date(conv.updatedAt),

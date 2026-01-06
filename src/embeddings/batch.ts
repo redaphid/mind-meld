@@ -21,7 +21,18 @@ interface MessageToEmbed {
   model: string | null;
 }
 
-// Get candidate messages for embedding - only those not yet embedded
+// Mark a message as un-embeddable (Ollama bug workaround)
+export async function markUnembeddable(messageId: number): Promise<void> {
+  await query(
+    `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed)
+     VALUES ($1, 'UNEMBEDDABLE', 'unembeddable-' || $2, 'none', 0, 0)
+     ON CONFLICT (message_id, chroma_collection) DO NOTHING`,
+    [messageId, messageId.toString()]
+  )
+  console.log(`  ⚠️  Marked message ${messageId} as un-embeddable`)
+}
+
+// Get candidate messages for embedding - only those not yet embedded and not marked as un-embeddable
 async function getMessagesToEmbed(limit: number): Promise<MessageToEmbed[]> {
   const result = await query<MessageToEmbed>(
     `SELECT m.id, m.session_id, m.content_text, m.role, m.timestamp,
@@ -30,10 +41,12 @@ async function getMessagesToEmbed(limit: number): Promise<MessageToEmbed[]> {
      JOIN sessions s ON m.session_id = s.id
      JOIN projects p ON s.project_id = p.id
      JOIN sources src ON p.source_id = src.id
-     LEFT JOIN embeddings e ON e.message_id = m.id
+     LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'
+     LEFT JOIN embeddings skip ON skip.message_id = m.id AND skip.chroma_collection = 'UNEMBEDDABLE'
      WHERE m.content_text IS NOT NULL
        AND LENGTH(m.content_text) > 10
        AND e.id IS NULL
+       AND skip.id IS NULL
      ORDER BY m.id
      LIMIT $1`,
     [limit]
@@ -86,46 +99,70 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
       }
       const embeddings = await generateEmbeddings(texts);
 
-      // Prepare data for Chroma
-      const chromaData = {
-        ids: messagesToEmbed.map((m) => `msg-${m.id}`),
-        embeddings,
-        documents: texts,
-        metadatas: messagesToEmbed.map((m) => ({
-          source: m.source_name,
-          project_path: m.project_path,
-          session_id: m.session_id.toString(),
-          message_id: m.id.toString(),
-          role: m.role,
-          timestamp: m.timestamp.getTime(),
-          model: m.model ?? '',
-          has_tool_use: m.role === 'tool',
-          token_count: m.content_text.length,
-        })),
-      };
+      // Separate successful embeddings from failed ones (null)
+      const successful: Array<{ index: number; embedding: number[] }> = [];
+      const failed: number[] = [];
 
-      // Upsert to Chroma (update if exists, insert if not)
-      await upsertEmbeddings(config.chroma.collections.messages, chromaData);
-
-      // Upsert to PostgreSQL
-      for (let i = 0; i < messagesToEmbed.length; i++) {
-        await query(
-          `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           ON CONFLICT (message_id, chroma_collection)
-           DO UPDATE SET content_chars_at_embed = $6, embedding_model = $4`,
-          [
-            messagesToEmbed[i].id,
-            config.chroma.collections.messages,
-            `msg-${messagesToEmbed[i].id}`,
-            config.embeddings.model,
-            config.embeddings.dimensions,
-            messagesToEmbed[i].content_text.length,
-          ]
-        );
+      for (let i = 0; i < embeddings.length; i++) {
+        if (embeddings[i] === null) {
+          failed.push(i);
+        } else {
+          successful.push({ index: i, embedding: embeddings[i]! });
+        }
       }
 
-      stats.processed += messagesToEmbed.length;
+      // Mark failed messages as un-embeddable
+      for (const idx of failed) {
+        await markUnembeddable(messagesToEmbed[idx].id);
+        stats.skipped++;
+      }
+
+      // Only process successful embeddings
+      if (successful.length > 0) {
+        const chromaData = {
+          ids: successful.map((s) => `msg-${messagesToEmbed[s.index].id}`),
+          embeddings: successful.map((s) => s.embedding),
+          documents: successful.map((s) => texts[s.index]),
+          metadatas: successful.map((s) => ({
+            source: messagesToEmbed[s.index].source_name,
+            project_path: messagesToEmbed[s.index].project_path,
+            session_id: messagesToEmbed[s.index].session_id.toString(),
+            message_id: messagesToEmbed[s.index].id.toString(),
+            role: messagesToEmbed[s.index].role,
+            timestamp: messagesToEmbed[s.index].timestamp.getTime(),
+            model: messagesToEmbed[s.index].model ?? '',
+            has_tool_use: messagesToEmbed[s.index].role === 'tool',
+            token_count: messagesToEmbed[s.index].content_text.length,
+          })),
+        };
+
+        // Upsert to Chroma (update if exists, insert if not)
+        await upsertEmbeddings(config.chroma.collections.messages, chromaData);
+
+        // Upsert to PostgreSQL
+        for (const s of successful) {
+          await query(
+            `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (message_id, chroma_collection)
+             DO UPDATE SET content_chars_at_embed = $6, embedding_model = $4`,
+            [
+              messagesToEmbed[s.index].id,
+              config.chroma.collections.messages,
+              `msg-${messagesToEmbed[s.index].id}`,
+              config.embeddings.model,
+              config.embeddings.dimensions,
+              messagesToEmbed[s.index].content_text.length,
+            ]
+          );
+        }
+
+        stats.processed += successful.length;
+      }
+
+      if (failed.length > 0) {
+        console.log(`Marked ${failed.length} messages as un-embeddable`);
+      }
       console.log(`Embedded ${stats.processed} messages total`);
     } catch (e) {
       console.error('Batch embedding failed:', e);
@@ -232,10 +269,16 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
       // Generate embedding from summary or full text
       const embeddings = await generateEmbeddings([textForEmbedding.slice(0, 8000)])
 
+      // Skip session if embedding failed
+      if (embeddings[0] === null) {
+        console.log(`⚠️  Session ${session.id} could not be embedded - skipping`)
+        continue
+      }
+
       // Upsert to Chroma sessions collection (update if exists)
       await upsertEmbeddings(config.chroma.collections.sessions, {
         ids: [`session-${session.id}`],
-        embeddings,
+        embeddings: [embeddings[0]],
         documents: [textForEmbedding.slice(0, 2000)],
         metadatas: [
           {
