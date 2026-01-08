@@ -786,6 +786,7 @@ server.tool(
   'Get the full transcript of a Claude Code or Cursor session by ID or title search',
   {
     searchTerm: z.string().describe('Session external_id or title search term'),
+    summarize: z.boolean().optional().describe('Return session summary instead of full transcript (default: false)'),
   },
   async (params) => {
     // Try to find session by external_id first, then by title search
@@ -797,9 +798,10 @@ server.tool(
       source_name: string
       started_at: Date
       message_count: number
+      summary: string | null
     }>(
       `SELECT s.id, s.external_id, s.title, p.path as project_path,
-              src.name as source_name, s.started_at, s.message_count
+              src.name as source_name, s.started_at, s.message_count, s.summary
        FROM sessions s
        JOIN projects p ON s.project_id = p.id
        JOIN sources src ON p.source_id = src.id
@@ -818,6 +820,27 @@ server.tool(
     }
 
     const session = sessionResult.rows[0]
+
+    // Return summary if requested
+    if (params.summarize) {
+      let output = `# ${session.title} (Summary)\n\n`
+      output += `**Session ID:** ${session.id}\n`
+      output += `**External ID:** ${session.external_id}\n`
+      output += `**Source:** ${session.source_name}\n`
+      output += `**Project:** ${session.project_path}\n`
+      output += `**Started:** ${session.started_at.toLocaleString()}\n`
+      output += `**Messages:** ${session.message_count}\n\n`
+      output += `---\n\n`
+      output += `## Summary\n\n`
+
+      if (session.summary) {
+        output += session.summary
+      } else {
+        output += `*Summary not yet generated for this session. Use \`getSession\` with \`messageLimit\` as a fallback.*`
+      }
+
+      return { content: [{ type: 'text', text: output }] }
+    }
 
     // Get all messages for this session
     const messagesResult = await query<{
