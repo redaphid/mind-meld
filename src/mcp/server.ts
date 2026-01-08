@@ -783,10 +783,21 @@ server.tool(
 // Get session transcript
 server.tool(
   'getSessionTranscript',
-  'Get the full transcript of a Claude Code or Cursor session by ID or title search',
+  `Get the full transcript of a Claude Code or Cursor session by ID or title search.
+
+By default, returns a **summary** of the session to avoid token overflow.
+Use \`full: true\` to get the complete transcript (warning: may be very large).
+
+**Search behavior:**
+- First tries exact match on session external_id
+- Falls back to ILIKE search on session title
+
+**Output modes:**
+- Default (summary): Session metadata + AI-generated summary (~1-3k chars)
+- Full transcript: All messages with timestamps and roles (can be 50k+ chars)`,
   {
     searchTerm: z.string().describe('Session external_id or title search term'),
-    summarize: z.boolean().optional().describe('Return session summary instead of full transcript (default: false)'),
+    full: z.boolean().optional().describe('Return full transcript instead of summary (default: false, returns summary)'),
   },
   async (params) => {
     // Try to find session by external_id first, then by title search
@@ -821,8 +832,8 @@ server.tool(
 
     const session = sessionResult.rows[0]
 
-    // Return summary if requested
-    if (params.summarize) {
+    // Return summary by default (unless full transcript requested)
+    if (!params.full) {
       let output = `# ${session.title} (Summary)\n\n`
       output += `**Session ID:** ${session.id}\n`
       output += `**External ID:** ${session.external_id}\n`
