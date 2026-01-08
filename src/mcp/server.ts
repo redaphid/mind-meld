@@ -553,6 +553,7 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
       const projectLabel = projectIds.includes(r.session_id) ? ' [CURRENT PROJECT]' : ''
       assert(r.timestamp, `Missing timestamp for session ${r.session_id}`)
       return `${i + 1}. **${r.title}**${projectLabel}
+   Session ID: ${r.session_id}
    Project: ${r.project_name} (${r.source})
    Path: ${r.project_path}
    Date: ${r.timestamp.toISOString().split('T')[0]}
