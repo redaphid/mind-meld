@@ -9,10 +9,12 @@ set -e
 /bin/ollama serve &
 OLLAMA_PID=$!
 
-# Wait for ollama to be ready
+# Wait for ollama to be ready (use ollama list instead of curl)
 echo "Waiting for Ollama to start..."
-until curl -s http://localhost:11434/api/tags > /dev/null 2>&1; do
-  sleep 1
+sleep 3
+until ollama list > /dev/null 2>&1; do
+  echo "Still waiting for Ollama..."
+  sleep 2
 done
 echo "Ollama is ready"
 
