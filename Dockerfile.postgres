@@ -1,0 +1,4 @@
+FROM postgres:16-alpine
+
+# Copy init scripts into the entrypoint directory
+COPY init-db/*.sql /docker-entrypoint-initdb.d/

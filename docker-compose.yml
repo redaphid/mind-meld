@@ -6,7 +6,7 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: ghcr.io/redaphid/mindmeld-postgres:latest
     container_name: mindmeld-postgres
     restart: unless-stopped
     environment:
@@ -17,7 +17,6 @@ services:
       - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - mindmeld-postgres:/var/lib/postgresql/data
-      - ./init-db:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mindmeld -d conversations"]
       interval: 10s

@@ -25,6 +25,8 @@ jobs:
     strategy:
       matrix:
         include:
+          - dockerfile: Dockerfile.postgres
+            image: postgres
           - dockerfile: Dockerfile.sync
             image: sync
           - dockerfile: Dockerfile.centroids
