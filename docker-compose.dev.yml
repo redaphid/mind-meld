@@ -1,0 +1,21 @@
+# Development override - builds images locally instead of pulling from ghcr.io
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+
+services:
+  sync:
+    build:
+      context: .
+      dockerfile: Dockerfile.sync
+    image: mindmeld-sync:dev
+
+  centroid-compute:
+    build:
+      context: .
+      dockerfile: Dockerfile.centroids
+    image: mindmeld-centroids:dev
+
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.http
+    image: mindmeld-mcp:dev

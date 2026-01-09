@@ -1,3 +1,9 @@
+# Mindmeld - Unified Conversation Index
+# Quick start: docker compose up -d
+#
+# Required: Set CLAUDE_CODE_PATH and CURSOR_GLOBALSTATE_PATH in .env
+# See .env.example for all options
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -5,13 +11,13 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: mindmeld
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindmeld}
       POSTGRES_DB: conversations
     ports:
-      - "${POSTGRES_PORT:?POSTGRES_PORT is required}:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
-      - ${DATA_DIR:?DATA_DIR is required}/postgres:/var/lib/postgresql/data
-      - ./init-db:/docker-entrypoint-initdb.d
+      - mindmeld-postgres:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mindmeld -d conversations"]
       interval: 10s
@@ -28,16 +34,31 @@ services:
       ANONYMIZED_TELEMETRY: "FALSE"
       CHROMA_SERVER_CORS_ALLOW_ORIGINS: '["*"]'
     ports:
-      - "${CHROMA_PORT:?CHROMA_PORT is required}:8000"
+      - "${CHROMA_PORT:-8001}:8000"
     volumes:
-      - ${DATA_DIR:?DATA_DIR is required}/chroma:/data
+      - mindmeld-chroma:/data
     healthcheck:
       test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8000"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # Run migrations on every startup (idempotent)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mindmeld-ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - mindmeld-ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Run migrations on startup
   migrate:
     image: postgres:16-alpine
     container_name: mindmeld-migrate
@@ -47,7 +68,7 @@ services:
     environment:
       PGHOST: postgres
       PGUSER: mindmeld
-      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-mindmeld}
       PGDATABASE: conversations
     volumes:
       - ./init-db:/migrations:ro
@@ -55,9 +76,7 @@ services:
     restart: "no"
 
   sync:
-    build:
-      context: .
-      dockerfile: Dockerfile.sync
+    image: ghcr.io/redaphid/mindmeld-sync:latest
     container_name: mindmeld-sync
     restart: unless-stopped
     depends_on:
@@ -70,24 +89,21 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindmeld}
       CHROMA_HOST: chroma
       CHROMA_PORT: 8000
-      OLLAMA_URL: ${OLLAMA_URL:?OLLAMA_URL is required}
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
       EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-50}
-      SUMMARIZE_MODEL: ${SUMMARIZE_MODEL:-qwen3:7b}
+      SUMMARIZE_MODEL: ${SUMMARIZE_MODEL:-qwen3:4b}
       SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-3600}
     volumes:
-      - ${CLAUDE_CODE_PATH:?CLAUDE_CODE_PATH is required}:/root/.claude:ro
-      - ${CURSOR_GLOBALSTATE_PATH:?CURSOR_GLOBALSTATE_PATH is required}:/root/.config/Cursor/User/globalStorage:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - ${CLAUDE_CODE_PATH:-~/.claude}:/root/.claude:ro
+      - ${CURSOR_GLOBALSTATE_PATH:-~/.cursor/User/globalStorage}:/root/.config/Cursor/User/globalStorage:ro
 
   centroid-compute:
-    build:
-      context: .
-      dockerfile: Dockerfile.centroids
+    image: ghcr.io/redaphid/mindmeld-centroids:latest
     container_name: mindmeld-centroids
     restart: unless-stopped
     depends_on:
@@ -100,18 +116,15 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindmeld}
       CHROMA_HOST: chroma
       CHROMA_PORT: 8000
-      OLLAMA_URL: ${OLLAMA_URL:?OLLAMA_URL is required}
-      CENTROID_INTERVAL_SECONDS: ${CENTROID_INTERVAL_SECONDS:-25200}  # 7 hours default
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      CENTROID_INTERVAL_SECONDS: ${CENTROID_INTERVAL_SECONDS:-25200}
 
-  mindmeld-mcp:
-    build:
-      context: .
-      dockerfile: Dockerfile.http
-    container_name: mindmeld-http
+  mcp:
+    image: ghcr.io/redaphid/mindmeld-mcp:latest
+    container_name: mindmeld-mcp
     restart: unless-stopped
     depends_on:
       postgres:
@@ -123,26 +136,29 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindmeld}
       CHROMA_HOST: chroma
       CHROMA_PORT: 8000
-      OLLAMA_URL: ${OLLAMA_URL:?OLLAMA_URL is required}
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
       MCP_PORT: 3000
     ports:
-      - "${MCP_HTTP_PORT:-3000}:3000"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "${MCP_HTTP_PORT:-3847}:3000"
 
+  # Optional: Cloudflare tunnel for remote access
   cloudflared:
     image: cloudflare/cloudflared:latest
     container_name: mindmeld-cloudflared
     restart: unless-stopped
     depends_on:
-      - mindmeld-mcp
-    environment:
-      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+      - mcp
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     profiles:
-      - tunnel  # Optional service - only runs with: docker compose --profile tunnel up
+      - tunnel
+
+volumes:
+  mindmeld-postgres:
+  mindmeld-chroma:
+  mindmeld-ollama:
 
 networks:
   default:
