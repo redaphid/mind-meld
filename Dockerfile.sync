@@ -1,17 +1,15 @@
 # Build stage - compile binary with Bun
 FROM oven/bun:1 AS builder
 
-# Build arg for GitHub npm registry auth
-ARG GITHUB_TOKEN
-
 WORKDIR /app
 
 # Copy package files
 COPY package.json ./
 
-# Install dependencies with GitHub npm auth
-RUN echo "@redaphid:registry=https://npm.pkg.github.com" > .npmrc && \
-    echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> .npmrc && \
+# Install dependencies with GitHub npm auth via build secret
+RUN --mount=type=secret,id=github_token \
+    echo "@redaphid:registry=https://npm.pkg.github.com" > .npmrc && \
+    echo "//npm.pkg.github.com/:_authToken=$(cat /run/secrets/github_token)" >> .npmrc && \
     bun install && \
     rm -f .npmrc
 
