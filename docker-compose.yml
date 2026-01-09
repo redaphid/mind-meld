@@ -58,23 +58,6 @@ services:
       retries: 3
       start_period: 60s
 
-  # Run migrations on startup
-  migrate:
-    image: postgres:16-alpine
-    container_name: mindmeld-migrate
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      PGHOST: postgres
-      PGUSER: mindmeld
-      PGPASSWORD: ${POSTGRES_PASSWORD:-mindmeld}
-      PGDATABASE: conversations
-    volumes:
-      - ./init-db:/migrations:ro
-    entrypoint: ["sh", "-c", "for f in /migrations/*.sql; do echo Running: $$f; psql -f $$f; done"]
-    restart: "no"
-
   sync:
     image: ghcr.io/redaphid/mindmeld-sync:latest
     container_name: mindmeld-sync
@@ -84,8 +67,6 @@ services:
         condition: service_healthy
       chroma:
         condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -111,8 +92,6 @@ services:
         condition: service_healthy
       chroma:
         condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -131,8 +110,6 @@ services:
         condition: service_healthy
       chroma:
         condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
