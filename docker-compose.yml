@@ -1,8 +1,11 @@
 # Mindmeld - Unified Conversation Index
-# Quick start: docker compose up -d
 #
-# Required: Set CLAUDE_CODE_PATH and CURSOR_GLOBALSTATE_PATH in .env
-# See .env.example for all options
+# Quick start:
+#   1. Install Ollama: brew install ollama
+#   2. Pull models: ollama pull bge-m3 && ollama pull qwen3:4b
+#   3. Run: docker compose up -d
+#
+# That's it! Paths auto-detect on macOS. Linux users: see .env.example for paths.
 
 services:
   postgres:
@@ -42,21 +45,6 @@ services:
       timeout: 5s
       retries: 5
 
-  ollama:
-    image: ghcr.io/redaphid/mindmeld-ollama:latest
-    container_name: mindmeld-ollama
-    restart: unless-stopped
-    ports:
-      - "${OLLAMA_PORT:-11434}:11434"
-    volumes:
-      - mindmeld-ollama:/root/.ollama
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
   sync:
     image: ghcr.io/redaphid/mindmeld-sync:latest
     container_name: mindmeld-sync
@@ -72,7 +60,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindmeld}
       CHROMA_HOST: chroma
       CHROMA_PORT: 8000
-      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
       EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-50}
@@ -98,7 +86,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindmeld}
       CHROMA_HOST: chroma
       CHROMA_PORT: 8000
-      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       CENTROID_INTERVAL_SECONDS: ${CENTROID_INTERVAL_SECONDS:-25200}
 
   mcp:
@@ -116,7 +104,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindmeld}
       CHROMA_HOST: chroma
       CHROMA_PORT: 8000
-      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       MCP_PORT: 3000
     ports:
       - "${MCP_HTTP_PORT:-3847}:3000"
@@ -135,7 +123,6 @@ services:
 volumes:
   mindmeld-postgres:
   mindmeld-chroma:
-  mindmeld-ollama:
 
 networks:
   default:

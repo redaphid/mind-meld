@@ -4,29 +4,39 @@
 
 Mindmeld syncs conversations from Claude Code and Cursor into a unified PostgreSQL + Chroma database for full-text and semantic search across all AI conversations.
 
-## Ports (Non-Standard to Avoid Conflicts)
+## Quick Start (Docker)
 
-| Service    | Port     | Default        |
-| ---------- | -------- | -------------- |
-| PostgreSQL | **5433** | 5432           |
-| Chroma     | **8001** | 8000           |
-| Ollama     | 11434    | 11434 (shared) |
-
-## Quick Start
-
-### Local Setup (All Services on This Machine)
+**See [docs/DOCKER.md](docs/DOCKER.md) for full setup instructions.**
 
 ```bash
-# Start services
-docker compose up -d
+# 1. Install Ollama with required models
+brew install ollama
+ollama pull bge-m3 && ollama pull qwen3:4b
 
+# 2. Start services
+docker compose up -d
+```
+
+That's it for macOS. Linux users: set `CURSOR_GLOBALSTATE_PATH` in `.env`.
+
+## Ports (Non-Standard to Avoid Conflicts)
+
+| Service    | Port     | Purpose                    |
+| ---------- | -------- | -------------------------- |
+| PostgreSQL | **5433** | Metadata + full-text search |
+| Chroma     | **8001** | Vector embeddings          |
+| MCP        | **3847** | HTTP API for Claude Code   |
+
+## Local Development Setup
+
+```bash
 # Install dependencies
 pnpm install
 
 # Copy and configure environment
 cp .env.example .env
 
-# Run initial sync
+# Run manual sync
 pnpm run sync
 ```
 
