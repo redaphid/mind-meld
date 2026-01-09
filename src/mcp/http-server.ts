@@ -5,6 +5,7 @@ import { createMcpExpressApp } from '@modelcontextprotocol/sdk/server/express.js
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
+import { search, formatSearchResults } from './search.js'
 
 const getServer = () => {
   const server = new McpServer({
@@ -12,20 +13,31 @@ const getServer = () => {
     version: '0.1.0',
   })
 
-  // Register search tool (simplified - full implementation in server.ts)
+  // Register search tool
   server.tool(
     'search',
     'Search past AI conversations',
     {
-      query: z.string(),
+      query: z.string().optional(),
       limit: z.number().optional(),
+      cwd: z.string().optional(),
+      mode: z.enum(['semantic', 'text', 'hybrid']).optional(),
+      source: z.enum(['claude_code', 'cursor']).optional(),
+      since: z.string().optional(),
     },
     async (params) => {
-      // Stub implementation - full version in server.ts
+      const results = await search({
+        query: params.query,
+        limit: params.limit,
+        cwd: params.cwd,
+        mode: params.mode,
+        source: params.source,
+        since: params.since,
+      })
       return {
         content: [{
           type: 'text',
-          text: `Search for: ${params.query} (HTTP server - stub implementation)`,
+          text: formatSearchResults(results),
         }],
       }
     }
