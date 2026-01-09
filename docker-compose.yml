@@ -80,7 +80,8 @@ services:
       SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-3600}
     volumes:
       - ${CLAUDE_CODE_PATH:-~/.claude}:/root/.claude:ro
-      - ${CURSOR_GLOBALSTATE_PATH:-~/.cursor/User/globalStorage}:/root/.config/Cursor/User/globalStorage:ro
+      # macOS default path - Linux users: set CURSOR_GLOBALSTATE_PATH=~/.cursor/User/globalStorage
+      - "${CURSOR_GLOBALSTATE_PATH:-~/Library/Application Support/Cursor/User/globalStorage}:/root/.config/Cursor/User/globalStorage:ro"
 
   centroid-compute:
     image: ghcr.io/redaphid/mindmeld-centroids:latest
