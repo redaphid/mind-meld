@@ -2,13 +2,19 @@ FROM node:20-alpine
 
 WORKDIR /app
 
+# Build arg for GitHub npm registry auth
+ARG GITHUB_TOKEN
+
 # Copy package files
 COPY package.json pnpm-lock.yaml ./
 
 # Install pnpm and dependencies
 RUN corepack enable && \
     corepack prepare pnpm@latest --activate && \
-    pnpm install --frozen-lockfile
+    echo "@redaphid:registry=https://npm.pkg.github.com" > .npmrc && \
+    echo "//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}" >> .npmrc && \
+    pnpm install --frozen-lockfile && \
+    rm -f .npmrc
 
 # Copy source code
 COPY . .
