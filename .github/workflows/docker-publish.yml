@@ -27,6 +27,8 @@ jobs:
         include:
           - dockerfile: Dockerfile.postgres
             image: postgres
+          - dockerfile: Dockerfile.ollama
+            image: ollama
           - dockerfile: Dockerfile.sync
             image: sync
           - dockerfile: Dockerfile.centroids
