@@ -28,9 +28,15 @@ SELECT COUNT(*) FROM embeddings WHERE created_at > NOW() - INTERVAL '2 hours'
 # Check if embedding is stalled (less than 50 new embeddings in last 2 hours during active sync)
 CONTAINER_UPTIME=$(docker inspect --format='{{.State.StartedAt}}' $CONTAINER 2>/dev/null)
 if [[ -n "$CONTAINER_UPTIME" ]] && [[ "$RECENT_EMBEDDINGS" -lt 50 ]]; then
-    # Check if there are pending embeddings
+    # Check if there are REAL pending embeddings (exclude empty messages and already-marked unembeddable)
     PENDING=$(docker exec $POSTGRES_CONTAINER psql -U mindmeld -d conversations -t -c "
-    SELECT COUNT(*) FROM messages m LEFT JOIN embeddings e ON e.message_id = m.id WHERE e.id IS NULL
+    SELECT COUNT(*) FROM messages m
+    LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'
+    LEFT JOIN embeddings skip ON skip.message_id = m.id AND skip.chroma_collection = 'UNEMBEDDABLE'
+    WHERE m.content_text IS NOT NULL
+      AND LENGTH(m.content_text) > 10
+      AND e.id IS NULL
+      AND skip.id IS NULL
     " 2>/dev/null | tr -d ' ')
 
     if [[ "$PENDING" -gt 1000 ]]; then
