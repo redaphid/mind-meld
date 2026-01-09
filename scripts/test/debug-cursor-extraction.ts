@@ -1,4 +1,4 @@
-import { setDatabasePath, listConversations, queryAll } from '@redaphid/cursor-conversations';
+import { setDatabasePath, listConversations, queryAll } from '@hypnodroid/cursor-conversations';
 import { homedir } from 'os';
 
 // Our extraction function

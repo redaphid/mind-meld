@@ -11,12 +11,12 @@ importers:
       '@chroma-core/ollama':
         specifier: ^0.1.8
         version: 0.1.8(chromadb@3.1.6)
+      '@hypnodroid/cursor-conversations':
+        specifier: ^1.0.2
+        version: 1.0.2
       '@modelcontextprotocol/sdk':
         specifier: ^1.24.3
         version: 1.24.3(zod@3.25.76)
-      '@redaphid/cursor-conversations':
-        specifier: ^1.0.0
-        version: 1.0.0
       '@types/express':
         specifier: ^5.0.6
         version: 5.0.6
@@ -397,6 +397,11 @@ packages:
     engines: {node: '>=6'}
     hasBin: true
 
+  '@hypnodroid/cursor-conversations@1.0.2':
+    resolution: {integrity: sha512-Tq6weulRMrYhNAG8wLQFmnb8W8NSTMchiodWWbJF43qyw7LZHOkAHkPBJ27mwZdcUbrTbbbdzRe5TqEyq87pbQ==}
+    engines: {node: '>=20'}
+    hasBin: true
+
   '@isaacs/balanced-match@4.0.1':
     resolution: {integrity: sha512-yzMTt9lEb8Gv7zRioUilSglI0c0smZ9k5D65677DLWLtWJaXIS3CqcGyUFByYKlnUj6TkjLVs54fBl6+TiGQDQ==}
     engines: {node: 20 || >=22}
@@ -458,11 +463,6 @@ packages:
 
   '@protobufjs/utf8@1.1.0':
     resolution: {integrity: sha512-Vvn3zZrhQZkkBE8LSuW3em98c0FwgO4nxzv6OdSxPKJIEKY2bGbHn+mhGIPerzI4twdxaP8/0+06HBpwf345Lw==}
-
-  '@redaphid/cursor-conversations@1.0.0':
-    resolution: {integrity: sha512-lrVVBv7oeHDta0rKIKp7a5VuMjYMN/HTb6F2BelEyJRWgameWlXJFs7QsgBd61/6Bx40wCwtau5fZz8XlN0+dg==, tarball: https://npm.pkg.github.com/download/@redaphid/cursor-conversations/1.0.0/99a935dd3ec1765d87d0ec9b29b9a3b4fd6b50b6}
-    engines: {node: '>=20'}
-    hasBin: true
 
   '@rollup/rollup-android-arm-eabi@4.53.3':
     resolution: {integrity: sha512-mRSi+4cBjrRLoaal2PnqH82Wqyb+d3HsPUN/W+WslCXsZsyHa9ZeQQX/pQsZaVIWDkPcpV6jJ+3KLbTbgnwv8w==}
@@ -1961,6 +1961,15 @@ snapshots:
       protobufjs: 7.5.4
       yargs: 17.7.2
 
+  '@hypnodroid/cursor-conversations@1.0.2':
+    dependencies:
+      '@modelcontextprotocol/sdk': 1.24.3(zod@3.25.76)
+      sql.js: 1.13.0
+      zod: 3.25.76
+    transitivePeerDependencies:
+      - '@cfworker/json-schema'
+      - supports-color
+
   '@isaacs/balanced-match@4.0.1': {}
 
   '@isaacs/brace-expansion@5.0.0':
@@ -2024,15 +2033,6 @@ snapshots:
   '@protobufjs/pool@1.1.0': {}
 
   '@protobufjs/utf8@1.1.0': {}
-
-  '@redaphid/cursor-conversations@1.0.0':
-    dependencies:
-      '@modelcontextprotocol/sdk': 1.24.3(zod@3.25.76)
-      sql.js: 1.13.0
-      zod: 3.25.76
-    transitivePeerDependencies:
-      - '@cfworker/json-schema'
-      - supports-color
 
   '@rollup/rollup-android-arm-eabi@4.53.3':
     optional: true

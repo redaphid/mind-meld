@@ -1,4 +1,4 @@
-import { setDatabasePath, listConversations, listMessages, queryAll } from '@redaphid/cursor-conversations';
+import { setDatabasePath, listConversations, listMessages, queryAll } from '@hypnodroid/cursor-conversations';
 import { homedir } from 'os';
 
 (async () => {

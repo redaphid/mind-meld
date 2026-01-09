@@ -6,12 +6,8 @@ WORKDIR /app
 # Copy package files
 COPY package.json ./
 
-# Install dependencies with GitHub npm auth via build secret
-RUN --mount=type=secret,id=github_token \
-    echo "@redaphid:registry=https://npm.pkg.github.com" > .npmrc && \
-    echo "//npm.pkg.github.com/:_authToken=$(cat /run/secrets/github_token)" >> .npmrc && \
-    bun install && \
-    rm -f .npmrc
+# Install dependencies
+RUN bun install
 
 # Copy source
 COPY . .

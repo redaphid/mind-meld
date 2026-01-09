@@ -1,4 +1,4 @@
-import { setDatabasePath, listConversations, listMessages } from '@redaphid/cursor-conversations';
+import { setDatabasePath, listConversations, listMessages } from '@hypnodroid/cursor-conversations';
 import { homedir } from 'os';
 
 // Parse Lexical editor richText JSON into plain text

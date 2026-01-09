@@ -1,5 +1,5 @@
-import { setDatabasePath, queryAll } from '@redaphid/cursor-conversations'
-import { getConversationSummary, getMessageData } from '@redaphid/cursor-conversations/tools'
+import { setDatabasePath, queryAll } from '@hypnodroid/cursor-conversations'
+import { getConversationSummary, getMessageData } from '@hypnodroid/cursor-conversations/tools'
 import { homedir } from 'os'
 import { copyFile, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'

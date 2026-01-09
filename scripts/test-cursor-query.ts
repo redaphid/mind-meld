@@ -1,4 +1,4 @@
-import { setDatabasePath, queryAll } from '@redaphid/cursor-conversations'
+import { setDatabasePath, queryAll } from '@hypnodroid/cursor-conversations'
 import { homedir } from 'os'
 import { copyFile, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'

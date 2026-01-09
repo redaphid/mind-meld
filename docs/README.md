@@ -37,7 +37,7 @@ A unified conversation indexer that syncs Claude Code and Cursor conversations i
 ### Data Sources
 
 - **Claude Code**: Parses JSONL conversation files from `~/.claude/projects/`
-- **Cursor**: Reads SQLite state database via `@redaphid/cursor-conversations`
+- **Cursor**: Reads SQLite state database via `@hypnodroid/cursor-conversations`
 
 ### Storage
 

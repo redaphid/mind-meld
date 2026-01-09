@@ -1,4 +1,4 @@
-import { setDatabasePath, listConversations, listMessages } from '@redaphid/cursor-conversations';
+import { setDatabasePath, listConversations, listMessages } from '@hypnodroid/cursor-conversations';
 import { homedir } from 'os';
 
 // Our current extraction logic
