@@ -6,8 +6,8 @@ WORKDIR /app
 # Copy package files
 COPY package.json ./
 
-# Install dependencies
-RUN bun install
+# Install dependencies (ignore preinstall script that enforces pnpm)
+RUN bun install --ignore-scripts
 
 # Copy source
 COPY . .
