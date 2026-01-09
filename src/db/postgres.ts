@@ -167,6 +167,24 @@ export const queries = {
     return result.rows[0] ?? null;
   },
 
+  // Check for session by external_id across ALL projects for a source (for deduplication)
+  getSessionByExternalIdGlobal: async (sourceId: number, externalId: string) => {
+    const result = await query<{
+      id: number;
+      project_id: number;
+      file_modified_at: Date | null;
+      content_chars: number;
+      message_count: number;
+    }>(
+      `SELECT s.id, s.project_id, s.file_modified_at, s.content_chars, s.message_count
+       FROM sessions s
+       JOIN projects p ON s.project_id = p.id
+       WHERE p.source_id = $1 AND s.external_id = $2`,
+      [sourceId, externalId]
+    );
+    return result.rows[0] ?? null;
+  },
+
   // Get the latest file_modified_at across all sessions for a source (for incremental sync)
   getLatestFileModified: async (sourceId: number): Promise<Date | null> => {
     const result = await query<{ max_modified: Date | null }>(

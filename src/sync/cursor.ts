@@ -203,20 +203,24 @@ export async function syncCursor(options?: { incremental?: boolean }): Promise<C
         }
 
         // TypeScript doesn't know projectId is defined after the if check
-        const definiteProjectId: number = projectId;
+        let definiteProjectId: number = projectId;
 
-        // Check if session exists in our DB
-        const existingSession = await queries.getSessionByExternalId(definiteProjectId, conv.conversationId);
+        // Check if session exists GLOBALLY across all projects (prevents duplicates)
+        const existingGlobal = await queries.getSessionByExternalIdGlobal(source.id, conv.conversationId);
 
-        // Incremental mode: skip if session exists and hasn't been updated
-        if (options?.incremental && existingSession) {
-          const storedModifiedAt = existingSession.file_modified_at?.getTime() ?? 0;
-          if (conv.updatedAt <= storedModifiedAt) {
-            // Conversation hasn't been updated since we last synced it
-            stats.skipped++;
-            continue;
+        if (existingGlobal) {
+          // Session already exists - use its existing project assignment to prevent duplicates
+          definiteProjectId = existingGlobal.project_id;
+
+          // Incremental mode: skip if session hasn't been updated
+          if (options?.incremental) {
+            const storedModifiedAt = existingGlobal.file_modified_at?.getTime() ?? 0;
+            if (conv.updatedAt <= storedModifiedAt) {
+              stats.skipped++;
+              continue;
+            }
+            console.log(`  Re-syncing ${conv.conversationId}: updatedAt ${conv.updatedAt} > stored ${storedModifiedAt}`);
           }
-          console.log(`  Re-syncing ${conv.conversationId}: updatedAt ${conv.updatedAt} > stored ${storedModifiedAt}`);
         }
 
         // Get full conversation with messages
