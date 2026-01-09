@@ -1,4 +1,35 @@
 FROM ollama/ollama:latest
 
-# Pre-download embedding model during build
-RUN /bin/ollama serve & sleep 5 && ollama pull bge-m3 && ollama pull qwen3:4b && pkill ollama
+# Startup script that ensures models are downloaded before serving
+COPY <<'EOF' /entrypoint.sh
+#!/bin/bash
+set -e
+
+# Start ollama in background
+/bin/ollama serve &
+OLLAMA_PID=$!
+
+# Wait for ollama to be ready
+echo "Waiting for Ollama to start..."
+until curl -s http://localhost:11434/api/tags > /dev/null 2>&1; do
+  sleep 1
+done
+echo "Ollama is ready"
+
+# Pull models if not already present
+for model in bge-m3 qwen3:4b; do
+  if ! ollama list | grep -q "^${model}"; then
+    echo "Pulling ${model}..."
+    ollama pull ${model}
+  else
+    echo "${model} already present"
+  fi
+done
+
+echo "All models ready, Ollama serving..."
+wait $OLLAMA_PID
+EOF
+
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

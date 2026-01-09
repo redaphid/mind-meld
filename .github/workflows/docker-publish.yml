@@ -31,8 +31,7 @@ jobs:
             platforms: linux/amd64,linux/arm64
           - dockerfile: Dockerfile.ollama
             image: ollama
-            # amd64 only - model download too slow under QEMU for arm64
-            platforms: linux/amd64
+            platforms: linux/amd64,linux/arm64
           - dockerfile: Dockerfile.sync
             image: sync
             platforms: linux/amd64,linux/arm64
