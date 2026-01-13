@@ -21,13 +21,13 @@ That's it for macOS. Your conversations sync automatically every hour.
 
 ## Connect to Claude Code
 
-Add to `~/.claude/mcp_settings.json`:
+Add to `~/.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "mindmeld": {
-      "type": "streamableHttp",
+      "type": "http",
       "url": "http://localhost:3847/mcp"
     }
   }
