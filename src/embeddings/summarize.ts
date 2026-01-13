@@ -47,6 +47,7 @@ DETAILED SUMMARY:`;
       model: SUMMARIZE_MODEL,
       prompt,
       stream: false,
+      think: false,
       options: {
         temperature: 0.3,
         num_predict: MAX_SUMMARY_TOKENS,
@@ -104,6 +105,7 @@ COMBINED SUMMARY:`;
         model: SUMMARIZE_MODEL,
         prompt,
         stream: false,
+        think: false,
         options: {
           temperature: 0.3,
           num_predict: MAX_SUMMARY_TOKENS,
