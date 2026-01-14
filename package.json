@@ -29,6 +29,7 @@
     "sync:cursor": "tsx src/index.ts sync --source cursor",
     "sync:embeddings": "tsx src/index.ts embeddings",
     "compute:centroids": "tsx scripts/compute-centroids.ts",
+    "mark:warmups": "tsx scripts/mark-warmups.ts",
     "search": "tsx scripts/search.ts",
     "stats": "tsx scripts/stats.ts",
     "db:migrate": "tsx scripts/migrate.ts",

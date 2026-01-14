@@ -1,0 +1,25 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json pnpm-lock.yaml ./
+
+# Install pnpm and dependencies
+RUN corepack enable && \
+    corepack prepare pnpm@latest --activate && \
+    pnpm install --frozen-lockfile --prod=false
+
+# Copy source code
+COPY . .
+
+# Default to 6 hours (21600 seconds)
+ENV WARMUP_INTERVAL_SECONDS=21600
+
+# Run warmup detection in a loop
+CMD while true; do \
+      echo "=== Warmup detection starting at $(date -Iseconds) ===" && \
+      pnpm mark:warmups && \
+      echo "=== Warmup detection complete, sleeping ${WARMUP_INTERVAL_SECONDS}s ===" && \
+      sleep ${WARMUP_INTERVAL_SECONDS}; \
+    done

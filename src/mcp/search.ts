@@ -239,7 +239,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
              FROM sessions s
              JOIN projects p ON s.project_id = p.id
              JOIN sources src ON p.source_id = src.id
-             WHERE s.id = $1`,
+             WHERE s.id = $1 AND s.deleted_at IS NULL`,
             [sessionId]
           )
 
@@ -294,6 +294,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         JOIN projects p ON s.project_id = p.id
         JOIN sources src ON p.source_id = src.id
         WHERE to_tsvector('english', m.content_text) @@ plainto_tsquery('english', $1)
+          AND s.deleted_at IS NULL
           AND ($2::text IS NULL OR src.name = $2)
           AND ($3::timestamptz IS NULL OR s.started_at >= $3)
         ORDER BY m.session_id, rank DESC

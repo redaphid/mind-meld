@@ -89,6 +89,23 @@ services:
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       CENTROID_INTERVAL_SECONDS: ${CENTROID_INTERVAL_SECONDS:-25200}
 
+  warmup-filter:
+    image: ghcr.io/redaphid/mindmeld-warmups:latest
+    container_name: mindmeld-warmups
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindmeld}
+      CHROMA_HOST: chroma
+      CHROMA_PORT: 8000
+      WARMUP_INTERVAL_SECONDS: ${WARMUP_INTERVAL_SECONDS:-21600}
+
   mcp:
     image: ghcr.io/redaphid/mindmeld-mcp:latest
     container_name: mindmeld-mcp

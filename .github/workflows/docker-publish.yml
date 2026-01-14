@@ -38,6 +38,9 @@ jobs:
           - dockerfile: Dockerfile.centroids
             image: centroids
             platforms: linux/amd64,linux/arm64
+          - dockerfile: Dockerfile.warmups
+            image: warmups
+            platforms: linux/amd64,linux/arm64
           - dockerfile: Dockerfile.http
             image: mcp
             platforms: linux/amd64,linux/arm64
