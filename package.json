@@ -22,7 +22,7 @@
     "preinstall": "npx only-allow pnpm",
     "build": "tsc",
     "build:binary": "bun build --compile src/index.ts --outfile out/mindmeld",
-    "dev": "tsx watch src/index.ts",
+    "dev": "tsx watch src/mcp/http-server.ts",
     "start": "node dist/index.js",
     "sync": "tsx src/index.ts sync",
     "sync:claude": "tsx src/index.ts sync --source claude_code",
