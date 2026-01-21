@@ -9,7 +9,11 @@ import { ChromaClient } from 'chromadb'
 import { query } from '../src/db/postgres.js'
 import { normalizeVector, cosineSimilarity } from '../src/utils/vector-math.js'
 
+// Primary threshold: pure warmups
 const WARMUP_DISTANCE_THRESHOLD = 0.25
+// Extended threshold for short sessions (warmup-like intro but abandoned)
+const WARMUP_DISTANCE_EXTENDED = 0.35
+const SHORT_SESSION_THRESHOLD = 3 // message count
 const BATCH_SIZE = 500
 
 const client = new ChromaClient({ path: 'http://localhost:8001' })
@@ -94,9 +98,9 @@ const run = async () => {
   if (uncheckedCount === 0) {
     console.log('No new sessions to check')
   } else {
-    // Get all unchecked session IDs
-    const uncheckedSessions = await query<{ id: number }>(
-      `SELECT s.id FROM sessions s
+    // Get all unchecked session IDs with message counts
+    const uncheckedSessions = await query<{ id: number; message_count: number }>(
+      `SELECT s.id, s.message_count FROM sessions s
        WHERE s.warmup_distance IS NULL
          AND s.deleted_at IS NULL
          AND EXISTS (
@@ -105,6 +109,12 @@ const run = async () => {
              AND e.chroma_id = 'session-' || s.id::text
          )`
     )
+
+    // Build lookup for message counts
+    const messageCountMap = new Map<number, number>()
+    for (const row of uncheckedSessions.rows) {
+      messageCountMap.set(row.id, row.message_count)
+    }
 
     // Get embeddings from Chroma
     const sessionIds = uncheckedSessions.rows.map(r => `session-${r.id}`)
@@ -127,11 +137,16 @@ const run = async () => {
       const sessionId = parseInt(chromaId.replace('session-', ''), 10)
       const similarity = cosineSimilarity(embedding, warmupCentroid)
       const distance = 1 - similarity
+      const messageCount = messageCountMap.get(sessionId) ?? 0
+
+      // Warmup if: pure warmup (< 0.25) OR short session in extended range (0.25-0.35)
+      const isPureWarmup = distance < WARMUP_DISTANCE_THRESHOLD
+      const isShortWarmup = distance < WARMUP_DISTANCE_EXTENDED && messageCount <= SHORT_SESSION_THRESHOLD
 
       updates.push({
         sessionId,
         distance,
-        isWarmup: distance < WARMUP_DISTANCE_THRESHOLD
+        isWarmup: isPureWarmup || isShortWarmup
       })
     }
 
@@ -161,8 +176,24 @@ const run = async () => {
     console.log(`Marked ${markedWarmup} new warmups`)
   }
 
-  // Step 3: Soft-delete warmups
-  console.log('\nStep 3: Soft-deleting warmups...')
+  // Step 3: Re-evaluate previously checked sessions with new criteria
+  console.log('\nStep 3: Re-evaluating short sessions in extended range...')
+  const reEvalResult = await query(
+    `UPDATE sessions
+     SET is_warmup = true
+     WHERE warmup_distance IS NOT NULL
+       AND warmup_distance >= $1
+       AND warmup_distance < $2
+       AND message_count <= $3
+       AND is_warmup = false
+       AND deleted_at IS NULL
+     RETURNING id`,
+    [WARMUP_DISTANCE_THRESHOLD, WARMUP_DISTANCE_EXTENDED, SHORT_SESSION_THRESHOLD]
+  )
+  console.log(`Re-marked ${reEvalResult.rowCount} short sessions as warmups`)
+
+  // Step 4: Soft-delete all warmups
+  console.log('\nStep 4: Soft-deleting warmups...')
   const deleteResult = await query(
     `UPDATE sessions
      SET deleted_at = now()
@@ -171,8 +202,8 @@ const run = async () => {
   )
   console.log(`Soft-deleted ${deleteResult.rowCount} warmup sessions`)
 
-  // Step 4: Clean up empty sessions >1 day old
-  console.log('\nStep 4: Cleaning up empty sessions >1 day old...')
+  // Step 5: Clean up empty sessions >1 day old
+  console.log('\nStep 5: Cleaning up empty sessions >1 day old...')
   const emptyResult = await query(
     `UPDATE sessions
      SET is_warmup = true, deleted_at = now()

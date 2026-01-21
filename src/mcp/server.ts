@@ -124,6 +124,51 @@ const findProjectsByPath = async (cwd: string) => {
   return result.rows
 }
 
+// Common session info type for DRY queries
+type SessionInfo = {
+  id: number
+  title: string | null
+  project_name: string
+  project_path: string
+  source_name: string
+  started_at: Date
+  message_count: number
+  project_id: number
+}
+
+// Base query for active (non-deleted) sessions
+const SESSION_BASE_QUERY = `
+  SELECT s.id, s.title, p.name as project_name, p.path as project_path,
+         src.name as source_name, s.started_at, s.message_count, p.id as project_id
+  FROM sessions s
+  JOIN projects p ON s.project_id = p.id
+  JOIN sources src ON p.source_id = src.id
+  WHERE s.deleted_at IS NULL`
+
+// Get active session by ID (excludes soft-deleted)
+const getActiveSessionById = async (sessionId: number): Promise<SessionInfo | null> => {
+  const result = await query<SessionInfo>(
+    `${SESSION_BASE_QUERY} AND s.id = $1`,
+    [sessionId]
+  )
+  return result.rows[0] ?? null
+}
+
+// Get active session by message ID (excludes soft-deleted)
+const getActiveSessionByMessageId = async (messageId: number): Promise<SessionInfo | null> => {
+  const result = await query<SessionInfo>(
+    `SELECT s.id, s.title, p.name as project_name, p.path as project_path,
+            src.name as source_name, s.started_at, s.message_count, p.id as project_id
+     FROM messages m
+     JOIN sessions s ON m.session_id = s.id
+     JOIN projects p ON s.project_id = p.id
+     JOIN sources src ON p.source_id = src.id
+     WHERE m.id = $1 AND s.deleted_at IS NULL`,
+    [messageId]
+  )
+  return result.rows[0] ?? null
+}
+
 /**
  * Resolve session centroids from weighted IDs
  * Fetches centroid vectors from database and validates them
@@ -315,28 +360,10 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
             const distance = chromaResults.distances?.[0]?.[i] ?? 1
             const score = 1 - distance // Convert distance to similarity
 
-            // Get session details from postgres
-            const sessionResult = await query<{
-              id: number
-              title: string
-              project_name: string
-              project_path: string
-              source_name: string
-              started_at: Date
-              message_count: number
-              project_id: number
-            }>(
-              `SELECT s.id, s.title, p.name as project_name, p.path as project_path,
-                      src.name as source_name, s.started_at, s.message_count, p.id as project_id
-               FROM sessions s
-               JOIN projects p ON s.project_id = p.id
-               JOIN sources src ON p.source_id = src.id
-               WHERE s.id = $1`,
-              [sessionId]
-            )
+            // Get session details (excludes soft-deleted)
+            const session = await getActiveSessionById(sessionId)
 
-            if (sessionResult.rows[0]) {
-              const session = sessionResult.rows[0]
+            if (session) {
 
               // Apply filters
               if (params.source && session.source_name !== params.source) continue
@@ -378,31 +405,11 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
               const distance = messageResults.distances?.[0]?.[i] ?? 1
               const score = 1 - distance
 
-              // Get session for this message
-              const msgSessionResult = await query<{
-                session_id: number
-                session_title: string
-                project_name: string
-                project_path: string
-                source_name: string
-                started_at: Date
-                message_count: number
-                project_id: number
-              }>(
-                `SELECT s.id as session_id, s.title as session_title, p.name as project_name,
-                        p.path as project_path, src.name as source_name, s.started_at,
-                        s.message_count, p.id as project_id
-                 FROM messages m
-                 JOIN sessions s ON m.session_id = s.id
-                 JOIN projects p ON s.project_id = p.id
-                 JOIN sources src ON p.source_id = src.id
-                 WHERE m.id = $1`,
-                [messageId]
-              )
+              // Get session for this message (excludes soft-deleted)
+              const msgSession = await getActiveSessionByMessageId(messageId)
 
-              if (msgSessionResult.rows[0]) {
-                const msgSession = msgSessionResult.rows[0]
-                const sessionId = msgSession.session_id
+              if (msgSession) {
+                const sessionId = msgSession.id
 
                 // Skip if we already have this session from session-level search
                 if (sessionIds.has(sessionId)) continue
@@ -425,27 +432,9 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
 
             // Add message-sourced sessions to results
             for (const [sessionId, { score, snippet }] of messageSessions.entries()) {
-              const sessionResult = await query<{
-                id: number
-                title: string
-                project_name: string
-                project_path: string
-                source_name: string
-                started_at: Date
-                message_count: number
-                project_id: number
-              }>(
-                `SELECT s.id, s.title, p.name as project_name, p.path as project_path,
-                        src.name as source_name, s.started_at, s.message_count, p.id as project_id
-                 FROM sessions s
-                 JOIN projects p ON s.project_id = p.id
-                 JOIN sources src ON p.source_id = src.id
-                 WHERE s.id = $1`,
-                [sessionId]
-              )
+              const session = await getActiveSessionById(sessionId)
 
-              if (sessionResult.rows[0]) {
-                const session = sessionResult.rows[0]
+              if (session) {
                 const projectBoost = projectIds.includes(session.project_id) ? 0.5 : 0
 
                 results.push({
@@ -605,7 +594,7 @@ Use after search to dive deep into a relevant conversation.`,
        FROM sessions s
        JOIN projects p ON s.project_id = p.id
        JOIN sources src ON p.source_id = src.id
-       WHERE s.id = $1`,
+       WHERE s.id = $1 AND s.deleted_at IS NULL`,
       [params.sessionId]
     )
 
@@ -697,7 +686,7 @@ server.prompt(
       `SELECT s.id, s.title, p.name as project_name, s.started_at, s.message_count
        FROM sessions s
        JOIN projects p ON s.project_id = p.id
-       WHERE p.id = ANY($1::int[])
+       WHERE p.id = ANY($1::int[]) AND s.deleted_at IS NULL
        ORDER BY s.started_at DESC
        LIMIT 10`,
       [projectIds]
@@ -816,8 +805,8 @@ Use \`full: true\` to get the complete transcript (warning: may be very large).
        FROM sessions s
        JOIN projects p ON s.project_id = p.id
        JOIN sources src ON p.source_id = src.id
-       WHERE s.external_id = $1
-          OR s.title ILIKE $2
+       WHERE (s.external_id = $1 OR s.title ILIKE $2)
+         AND s.deleted_at IS NULL
        ORDER BY s.started_at DESC
        LIMIT 1`,
       [params.searchTerm, `%${params.searchTerm}%`]
