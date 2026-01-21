@@ -1,6 +1,5 @@
 import { syncClaudeCode, syncClaudeHistory } from './claude-code.js';
 import { syncCursor } from './cursor.js';
-import { syncHuddles } from './huddle.js';
 import { generatePendingEmbeddings, updateAggregateEmbeddings } from '../embeddings/batch.js';
 import { query } from '../db/postgres.js';
 
@@ -17,10 +16,6 @@ export interface FullSyncResult {
     conversationsProcessed: number;
     messagesInserted: number;
   };
-  huddle: {
-    huddlesProcessed: number;
-    messagesInserted: number;
-  };
   embeddings: {
     messagesEmbedded: number;
     sessionsUpdated: number;
@@ -31,7 +26,7 @@ export interface FullSyncResult {
 export async function runFullSync(options?: {
   incremental?: boolean;
   skipEmbeddings?: boolean;
-  sources?: ('claude_code' | 'cursor' | 'huddle')[];
+  sources?: ('claude_code' | 'cursor')[];
 }): Promise<FullSyncResult> {
   const startTime = new Date();
   const errors: string[] = [];
@@ -46,12 +41,11 @@ export async function runFullSync(options?: {
     durationMs: 0,
     claudeCode: { projectsProcessed: 0, sessionsProcessed: 0, messagesInserted: 0 },
     cursor: { conversationsProcessed: 0, messagesInserted: 0 },
-    huddle: { huddlesProcessed: 0, messagesInserted: 0 },
     embeddings: { messagesEmbedded: 0, sessionsUpdated: 0 },
     errors: [],
   };
 
-  const sourcesToSync = options?.sources ?? ['claude_code', 'cursor', 'huddle'];
+  const sourcesToSync = options?.sources ?? ['claude_code', 'cursor'];
 
   // Sync Claude Code
   if (sourcesToSync.includes('claude_code')) {
@@ -88,23 +82,6 @@ export async function runFullSync(options?: {
     }
   }
 
-  // Sync Huddles (Slack transcripts)
-  if (sourcesToSync.includes('huddle')) {
-    try {
-      console.log('\n--- Syncing Slack Huddles ---');
-      const huddleStats = await syncHuddles({ incremental: options?.incremental });
-      result.huddle = {
-        huddlesProcessed: huddleStats.huddlesProcessed,
-        messagesInserted: huddleStats.messagesInserted,
-      };
-      errors.push(...huddleStats.errors);
-    } catch (e) {
-      const error = `Huddle sync failed: ${e}`;
-      console.error(error);
-      errors.push(error);
-    }
-  }
-
   // Generate embeddings
   if (!options?.skipEmbeddings) {
     try {
@@ -132,7 +109,6 @@ export async function runFullSync(options?: {
   console.log(`  Duration: ${(result.durationMs / 1000).toFixed(1)}s`);
   console.log(`  Claude Code: ${result.claudeCode.sessionsProcessed} sessions, ${result.claudeCode.messagesInserted} messages`);
   console.log(`  Cursor: ${result.cursor.conversationsProcessed} conversations, ${result.cursor.messagesInserted} messages`);
-  console.log(`  Huddles: ${result.huddle.huddlesProcessed} huddles, ${result.huddle.messagesInserted} messages`);
   console.log(`  Embeddings: ${result.embeddings.messagesEmbedded} embedded`);
   if (errors.length > 0) {
     console.log(`  Errors: ${errors.length}`);

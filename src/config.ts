@@ -69,10 +69,6 @@ export const config = {
       path: expandPath(getEnv('CURSOR_PATH', '~/.cursor/chats')),
       name: 'cursor',
     },
-    huddle: {
-      path: expandPath(getEnv('HUDDLE_PATH', '~/mechs/slack-closed-captions/huddles')),
-      name: 'huddle',
-    },
   },
 
   // Sync
