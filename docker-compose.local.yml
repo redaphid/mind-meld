@@ -1,0 +1,149 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mindmeld-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mindmeld
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: conversations
+    ports:
+      - "${POSTGRES_PORT:?POSTGRES_PORT is required}:5432"
+    volumes:
+      - ${DATA_DIR:?DATA_DIR is required}/postgres:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mindmeld -d conversations"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: mindmeld-chroma
+    restart: unless-stopped
+    environment:
+      CHROMA_SERVER_AUTHN_PROVIDER: ""
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+      CHROMA_SERVER_CORS_ALLOW_ORIGINS: '["*"]'
+    ports:
+      - "${CHROMA_PORT:?CHROMA_PORT is required}:8000"
+    volumes:
+      - ${DATA_DIR:?DATA_DIR is required}/chroma:/data
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/8000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Run migrations on every startup (idempotent)
+  migrate:
+    image: postgres:16-alpine
+    container_name: mindmeld-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: mindmeld
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      PGDATABASE: conversations
+    volumes:
+      - ./init-db:/migrations:ro
+    entrypoint: ["sh", "-c", "for f in /migrations/*.sql; do echo Running: $$f; psql -f $$f; done"]
+    restart: "no"
+
+  sync:
+    build:
+      context: .
+      dockerfile: Dockerfile.sync
+    container_name: mindmeld-sync
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      CHROMA_HOST: chroma
+      CHROMA_PORT: 8000
+      OLLAMA_URL: ${OLLAMA_URL:?OLLAMA_URL is required}
+      SUMMARIZE_MODEL: ${SUMMARIZE_MODEL:-qwen3:4b}
+      SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-3600}
+    volumes:
+      - ${CLAUDE_CODE_PATH:?CLAUDE_CODE_PATH is required}:/root/.claude:ro
+      - ${CURSOR_GLOBALSTATE_PATH:?CURSOR_GLOBALSTATE_PATH is required}:/root/.config/Cursor/User/globalStorage:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  centroid-compute:
+    build:
+      context: .
+      dockerfile: Dockerfile.centroids
+    container_name: mindmeld-centroids
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      CHROMA_HOST: chroma
+      CHROMA_PORT: 8000
+      OLLAMA_URL: ${OLLAMA_URL:?OLLAMA_URL is required}
+      CENTROID_INTERVAL_SECONDS: ${CENTROID_INTERVAL_SECONDS:-25200}  # 7 hours default
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  mindmeld-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.http
+    container_name: mindmeld-http
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      CHROMA_HOST: chroma
+      CHROMA_PORT: 8000
+      OLLAMA_URL: ${OLLAMA_URL:?OLLAMA_URL is required}
+      MCP_PORT: 3000
+    ports:
+      - "${MCP_HTTP_PORT:-3000}:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: mindmeld-cloudflared
+    restart: unless-stopped
+    depends_on:
+      - mindmeld-mcp
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    profiles:
+      - tunnel  # Optional service - only runs with: docker compose --profile tunnel up
+
+networks:
+  default:
+    name: mindmeld-network

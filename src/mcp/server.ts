@@ -272,7 +272,7 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
     cwd: z.string().optional().describe('Current working directory - conversations from matching projects get boosted'),
     mode: z.enum(['semantic', 'text', 'hybrid']).optional().describe('Search mode: semantic (default), text, or hybrid'),
     limit: z.number().optional().describe('Max results to return (default 20)'),
-    source: z.enum(['claude_code', 'cursor']).optional().describe('Filter to specific source'),
+    source: z.string().optional().describe('Filter to specific source'),
     since: z.string().optional().describe('Only include conversations since this time (e.g., "7d", "2024-01-01")'),
     projectOnly: z.boolean().optional().describe('Only search conversations from the CWD project'),
     likeSession: z.array(z.string()).optional().describe('Boost results similar to these session IDs (format: ["123"] or ["123:1.5"] for weighted)'),

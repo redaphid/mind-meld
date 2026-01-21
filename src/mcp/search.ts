@@ -20,7 +20,7 @@ export type SearchParams = {
   cwd?: string
   mode?: 'semantic' | 'text' | 'hybrid'
   limit?: number
-  source?: 'claude_code' | 'cursor'
+  source?: string
   since?: string
   projectOnly?: boolean
   likeSession?: string[]

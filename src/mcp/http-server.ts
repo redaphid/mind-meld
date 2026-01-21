@@ -50,7 +50,7 @@ const getServer = () => {
       limit: z.number().optional(),
       cwd: z.string().optional(),
       mode: z.enum(['semantic', 'text', 'hybrid']).optional(),
-      source: z.enum(['claude_code', 'cursor']).optional(),
+      source: z.string().optional(),
       since: z.string().optional(),
     },
     async (params) => {
