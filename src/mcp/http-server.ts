@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import express from 'express'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import { createMcpExpressApp } from '@modelcontextprotocol/sdk/server/express.js'
+import { hostHeaderValidation } from '@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js'
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool, queries } from '../db/postgres.js'
@@ -135,7 +135,9 @@ const getServer = () => {
 
 const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3000
 
-const app = createMcpExpressApp()
+const app = express()
+app.use(express.json())
+app.use(hostHeaderValidation(['localhost', '127.0.0.1', 'mcp']))
 
 // Add JSON body parsing for non-MCP endpoints
 app.use('/api', express.json())
