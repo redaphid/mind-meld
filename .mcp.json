@@ -1,8 +1,19 @@
 {
   "mcpServers": {
     "mindmeld": {
-      "type": "http",
-      "url": "http://localhost:3847/mcp"
+      "type": "stdio",
+      "command": "npx",
+      "args": ["tsx", "/Users/hypnodroid/Projects/sibi/claude-convos-mcp/src/mcp/server.ts"],
+      "env": {
+        "POSTGRES_HOST": "localhost",
+        "POSTGRES_PORT": "5433",
+        "POSTGRES_USER": "mindmeld",
+        "POSTGRES_PASSWORD": "mindmeld",
+        "POSTGRES_DB": "conversations",
+        "CHROMA_HOST": "localhost",
+        "CHROMA_PORT": "8001",
+        "OLLAMA_URL": "http://localhost:11434"
+      }
     }
   }
 }
