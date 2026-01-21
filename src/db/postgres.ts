@@ -81,6 +81,17 @@ export const queries = {
     return result.rows[0] ?? null;
   },
 
+  getOrCreateSource: async (name: string, displayName?: string) => {
+    const result = await query<{ id: number; name: string }>(
+      `INSERT INTO sources (name, display_name)
+       VALUES ($1, $2)
+       ON CONFLICT (name) DO UPDATE SET name = $1
+       RETURNING id, name`,
+      [name, displayName ?? name]
+    );
+    return result.rows[0];
+  },
+
   // Projects
   upsertProject: async (sourceId: number, externalId: string, path: string, name: string) => {
     const result = await query<{ id: number }>(

@@ -5,6 +5,7 @@ import { program } from 'commander';
 import { runFullSync, getSyncStatus } from './sync/orchestrator.js';
 import { syncClaudeCode } from './sync/claude-code.js';
 import { syncCursor } from './sync/cursor.js';
+import { syncHuddles } from './sync/huddle.js';
 import { generatePendingEmbeddings, updateAggregateEmbeddings } from './embeddings/batch.js';
 import { closePool, query } from './db/postgres.js';
 import { getCollectionStats, listCollections } from './db/chroma.js';
@@ -12,7 +13,7 @@ import { config } from './config.js';
 
 program
   .name('mindmeld')
-  .description('Unified conversation index for Claude Code and Cursor')
+  .description('Unified conversation index for Claude Code, Cursor, and Slack Huddles')
   .version('0.1.0');
 
 program
@@ -20,12 +21,12 @@ program
   .description('Sync conversations from all sources')
   .option('-i, --incremental', 'Only sync new/modified files')
   .option('-f, --full', 'Full sync (ignore incremental)')
-  .option('-s, --source <source>', 'Only sync specific source (claude_code, cursor)')
+  .option('-s, --source <source>', 'Only sync specific source (claude_code, cursor, huddle)')
   .option('--skip-embeddings', 'Skip embedding generation')
   .action(async (options) => {
     try {
       const sources = options.source
-        ? [options.source as 'claude_code' | 'cursor']
+        ? [options.source as 'claude_code' | 'cursor' | 'huddle']
         : undefined;
 
       // Determine incremental mode: false if --full is set, true if --incremental is set, default to true
@@ -113,7 +114,7 @@ program
   .command('search <query>')
   .description('Search conversations')
   .option('-l, --limit <number>', 'Maximum results', '20')
-  .option('-s, --source <source>', 'Filter by source (claude_code, cursor)')
+  .option('-s, --source <source>', 'Filter by source (claude_code, cursor, huddle)')
   .action(async (searchQuery, options) => {
     try {
       const result = await query(
@@ -153,6 +154,7 @@ program
     console.log(`Ollama: ${config.ollama.url}`);
     console.log(`\nClaude Code path: ${config.sources.claudeCode.path}`);
     console.log(`Cursor path: ${config.sources.cursor.path}`);
+    console.log(`Huddle path: ${config.sources.huddle.path}`);
     console.log(`\nEmbedding model: ${config.embeddings.model}`);
     console.log(`Embedding dimensions: ${config.embeddings.dimensions}`);
     console.log(`Batch size: ${config.embeddings.batchSize}`);

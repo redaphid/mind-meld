@@ -1,11 +1,39 @@
 import { randomUUID } from 'node:crypto'
+import express from 'express'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { createMcpExpressApp } from '@modelcontextprotocol/sdk/server/express.js'
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { query, closePool } from '../db/postgres.js'
+import { query, closePool, queries } from '../db/postgres.js'
 import { search, formatSearchResults } from './search.js'
+
+// Zod schema for ingestion payload
+const IngestMessageSchema = z.object({
+  externalId: z.string(),
+  role: z.string(),
+  content: z.string(),
+  timestamp: z.string().transform(s => new Date(s)),
+  sequenceNum: z.number(),
+  metadata: z.record(z.unknown()).optional(),
+})
+
+const IngestPayloadSchema = z.object({
+  source: z.string(),
+  sourceDisplayName: z.string().optional(),
+  project: z.object({
+    externalId: z.string(),
+    name: z.string(),
+    path: z.string().optional(),
+  }),
+  session: z.object({
+    externalId: z.string(),
+    title: z.string(),
+    startedAt: z.string().transform(s => new Date(s)),
+    endedAt: z.string().transform(s => new Date(s)).optional(),
+  }),
+  messages: z.array(IngestMessageSchema),
+})
 
 const getServer = () => {
   const server = new McpServer({
@@ -108,6 +136,9 @@ const getServer = () => {
 const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3000
 
 const app = createMcpExpressApp()
+
+// Add JSON body parsing for non-MCP endpoints
+app.use('/api', express.json())
 
 // Map to store transports by session ID
 const transports: Record<string, StreamableHTTPServerTransport> = {}
@@ -235,6 +266,73 @@ app.delete('/mcp', mcpDeleteHandler)
 // Health check endpoint
 app.get('/health', (req: any, res: any) => {
   res.json({ status: 'ok', name: 'mindmeld', version: '0.1.0' })
+})
+
+// Ingestion endpoint - allows external scripts to push data
+app.post('/api/ingest', async (req: any, res: any) => {
+  try {
+    const payload = IngestPayloadSchema.parse(req.body)
+
+    // Get or create source
+    const source = await queries.getOrCreateSource(payload.source, payload.sourceDisplayName)
+
+    // Upsert project
+    const projectId = await queries.upsertProject(
+      source.id,
+      payload.project.externalId,
+      payload.project.path ?? '',
+      payload.project.name
+    )
+
+    // Upsert session
+    const sessionId = await queries.upsertSession({
+      projectId,
+      externalId: payload.session.externalId,
+      title: payload.session.title,
+      startedAt: payload.session.startedAt,
+      endedAt: payload.session.endedAt,
+    })
+
+    // Insert messages
+    let messagesInserted = 0
+    for (const msg of payload.messages) {
+      const msgId = await queries.insertMessage({
+        sessionId,
+        externalId: msg.externalId,
+        role: msg.role,
+        contentText: msg.content,
+        contentJson: msg.metadata,
+        timestamp: msg.timestamp,
+        sequenceNum: msg.sequenceNum,
+      })
+      if (msgId) messagesInserted++
+    }
+
+    // Update session stats
+    await queries.updateSessionStats(sessionId)
+
+    res.json({
+      success: true,
+      sourceId: source.id,
+      projectId,
+      sessionId,
+      messagesInserted,
+    })
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({
+        success: false,
+        error: 'Validation failed',
+        details: error.errors,
+      })
+      return
+    }
+    console.error('[API] Ingest error:', error)
+    res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
 })
 
 // Start server
