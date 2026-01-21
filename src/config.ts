@@ -29,7 +29,7 @@ export const config = {
     host: getEnv('POSTGRES_HOST', 'localhost'),
     port: getEnvInt('POSTGRES_PORT', 5433),
     user: getEnv('POSTGRES_USER', 'mindmeld'),
-    password: getEnv('POSTGRES_PASSWORD', 'mindmeld_dev'),
+    password: getEnv('POSTGRES_PASSWORD', 'mindmeld'),
     database: getEnv('POSTGRES_DB', 'conversations'),
   },
 

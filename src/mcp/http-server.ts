@@ -6,6 +6,7 @@ import { hostHeaderValidation } from '@modelcontextprotocol/sdk/server/middlewar
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool, queries } from '../db/postgres.js'
+import { runMigrations } from '../db/migrations.js'
 import { search, formatSearchResults } from './search.js'
 
 // Zod schema for ingestion payload
@@ -136,11 +137,10 @@ const getServer = () => {
 const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3000
 
 const app = express()
-app.use(express.json())
 app.use(hostHeaderValidation(['localhost', '127.0.0.1', 'mcp']))
 
-// Add JSON body parsing for non-MCP endpoints
-app.use('/api', express.json())
+// JSON body parsing with larger limit for transcript ingestion
+app.use(express.json({ limit: '10mb' }))
 
 // Map to store transports by session ID
 const transports: Record<string, StreamableHTTPServerTransport> = {}
@@ -337,11 +337,21 @@ app.post('/api/ingest', async (req: any, res: any) => {
   }
 })
 
-// Start server
-app.listen(MCP_PORT, () => {
-  console.log(`[MCP HTTP] Mindmeld server listening on http://localhost:${MCP_PORT}`)
-  console.log(`[MCP HTTP] Endpoint: http://localhost:${MCP_PORT}/mcp`)
-  console.log(`[MCP HTTP] Health: http://localhost:${MCP_PORT}/health`)
+// Start server with migrations
+const start = async () => {
+  console.log('[MCP HTTP] Running database migrations...')
+  await runMigrations()
+
+  app.listen(MCP_PORT, () => {
+    console.log(`[MCP HTTP] Mindmeld server listening on http://localhost:${MCP_PORT}`)
+    console.log(`[MCP HTTP] Endpoint: http://localhost:${MCP_PORT}/mcp`)
+    console.log(`[MCP HTTP] Health: http://localhost:${MCP_PORT}/health`)
+  })
+}
+
+start().catch(error => {
+  console.error('[MCP HTTP] Failed to start:', error)
+  process.exit(1)
 })
 
 // Handle shutdown
