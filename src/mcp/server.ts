@@ -507,8 +507,8 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
         LIMIT $${params.projectOnly && projectIds.length > 0 ? (params.excludeTerms ? 6 : 5) : (params.excludeTerms ? 5 : 4)}`,
         params.projectOnly && projectIds.length > 0
           ? (params.excludeTerms
-              ? [params.query, params.source ?? null, sinceDate, projectIds, params.excludeTerms]
-              : [params.query, params.source ?? null, sinceDate, projectIds])
+              ? [params.query, params.source ?? null, sinceDate, projectIds, params.excludeTerms, limit * 2]
+              : [params.query, params.source ?? null, sinceDate, projectIds, limit * 2])
           : (params.excludeTerms
               ? [params.query, params.source ?? null, sinceDate, params.excludeTerms, limit * 2]
               : [params.query, params.source ?? null, sinceDate, limit * 2])

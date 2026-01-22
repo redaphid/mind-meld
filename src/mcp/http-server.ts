@@ -53,6 +53,7 @@ const getServer = () => {
       mode: z.enum(['semantic', 'text', 'hybrid']).optional(),
       source: z.string().optional(),
       since: z.string().optional(),
+      projectOnly: z.boolean().optional(),
     },
     async (params) => {
       const results = await search({
@@ -62,6 +63,7 @@ const getServer = () => {
         mode: params.mode,
         source: params.source,
         since: params.since,
+        projectOnly: params.projectOnly,
       })
       return {
         content: [{

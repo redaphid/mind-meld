@@ -272,6 +272,10 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
 
   // Full-text search via Postgres
   if ((mode === 'text' || mode === 'hybrid') && params.query) {
+    const projectFilter = params.projectOnly && projectIds.length > 0
+      ? `AND s.project_id = ANY($4::int[])`
+      : ''
+
     const ftsResult = await query<{
       session_id: number
       title: string
@@ -297,6 +301,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
           AND s.deleted_at IS NULL
           AND ($2::text IS NULL OR src.name = $2)
           AND ($3::timestamptz IS NULL OR s.started_at >= $3)
+          ${projectFilter}
         ORDER BY m.session_id, rank DESC
       )
       SELECT rm.session_id, s.title, p.name as project_name, p.path as project_path,
@@ -307,8 +312,10 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       JOIN projects p ON s.project_id = p.id
       JOIN sources src ON p.source_id = src.id
       ORDER BY rm.rank DESC
-      LIMIT $4`,
-      [params.query, params.source ?? null, sinceDate, limit * 2]
+      LIMIT $${params.projectOnly && projectIds.length > 0 ? 5 : 4}`,
+      params.projectOnly && projectIds.length > 0
+        ? [params.query, params.source ?? null, sinceDate, projectIds, limit * 2]
+        : [params.query, params.source ?? null, sinceDate, limit * 2]
     )
 
     for (const row of ftsResult.rows) {
