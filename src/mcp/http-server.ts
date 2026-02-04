@@ -7,7 +7,8 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool, queries } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
-import { search, formatSearchResults } from './search.js'
+import { search, formatSearchResults, findProjectsByPath } from './search.js'
+import { getSession, formatSession } from './session.js'
 import { getSyncStatus } from '../sync/orchestrator.js'
 import { getCollectionStats } from '../db/chroma.js'
 import { config } from '../config.js'
@@ -16,7 +17,6 @@ import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const { version } = require('../../package.json')
 
-// Zod schema for ingestion payload
 const IngestMessageSchema = z.object({
   externalId: z.string(),
   role: z.string(),
@@ -46,128 +46,52 @@ const IngestPayloadSchema = z.object({
 const getServer = () => {
   const server = new McpServer({
     name: 'mindmeld',
-    version: '0.1.0',
+    version: '0.2.0',
   })
 
-  // Register search tool
   server.tool(
     'search',
     'Search past AI conversations',
     {
       query: z.string().optional(),
+      negativeQuery: z.string().optional(),
+      excludeTerms: z.string().optional(),
       limit: z.number().optional(),
       cwd: z.string().optional(),
       mode: z.enum(['semantic', 'text', 'hybrid']).optional(),
       source: z.string().optional(),
       since: z.string().optional(),
       projectOnly: z.boolean().optional(),
+      likeSession: z.array(z.string()).optional(),
+      unlikeSession: z.array(z.string()).optional(),
+      likeProject: z.array(z.string()).optional(),
+      unlikeProject: z.array(z.string()).optional(),
     },
     async (params) => {
-      const results = await search({
-        query: params.query,
-        limit: params.limit,
-        cwd: params.cwd,
-        mode: params.mode,
-        source: params.source,
-        since: params.since,
-        projectOnly: params.projectOnly,
-      })
+      const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
+      const projectIds = matchingProjects.map((p) => p.id)
+      const results = await search(params)
       return {
-        content: [{
-          type: 'text',
-          text: formatSearchResults(results),
-        }],
+        content: [{ type: 'text', text: formatSearchResults(results, projectIds) }],
       }
     }
   )
 
-  // Register getSession tool
   server.tool(
     'getSession',
-    'Get conversation session. Returns summary by default; pass messageLimit to get raw messages.',
+    'Get conversation session by ID. Returns metadata, summary, and all messages. Optional offset/limit for pagination.',
     {
       sessionId: z.number().describe('Session ID from search results'),
-      messageLimit: z.number().optional().describe('If set, return this many raw messages instead of the summary'),
+      offset: z.number().optional().describe('Start at this message index (0-based)'),
+      limit: z.number().optional().describe('Number of messages to return'),
     },
     async (params) => {
-      const sessionResult = await query<{
-        id: number
-        title: string
-        summary: string
-        project_name: string
-        project_path: string
-        source_name: string
-        started_at: Date
-        ended_at: Date
-        message_count: number
-        model_used: string
-        git_branch: string
-      }>(
-        `SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
-                src.name as source_name, s.started_at, s.ended_at, s.message_count,
-                s.model_used, s.git_branch
-         FROM sessions s
-         JOIN projects p ON s.project_id = p.id
-         JOIN sources src ON p.source_id = src.id
-         WHERE s.id = $1 AND s.deleted_at IS NULL`,
-        [params.sessionId]
-      )
-
-      if (!sessionResult.rows[0]) {
-        return { content: [{ type: 'text', text: 'Session not found.' }] }
-      }
-
-      const session = sessionResult.rows[0]
-
-      const header = `# ${session.title ?? 'Untitled Session'}
-
-**Project:** ${session.project_name}
-**Path:** ${session.project_path}
-**Source:** ${session.source_name}
-**Model:** ${session.model_used ?? 'Unknown'}
-**Branch:** ${session.git_branch ?? 'N/A'}
-**Date:** ${session.started_at?.toISOString().split('T')[0] ?? 'Unknown'}
-**Messages:** ${session.message_count}
-
----
-`
-
-      if (params.messageLimit == null) {
-        const body = session.summary ?? 'No summary available for this session.'
-        return { content: [{ type: 'text', text: `${header}\n${body}` }] }
-      }
-
-      const messagesResult = await query<{
-        role: string
-        content_text: string
-        tool_name: string
-        timestamp: Date
-      }>(
-        `SELECT role, content_text, tool_name, timestamp
-         FROM messages
-         WHERE session_id = $1
-         ORDER BY timestamp ASC
-         LIMIT $2`,
-        [params.sessionId, params.messageLimit]
-      )
-
-      const messages = messagesResult.rows.map((m) => {
-        const roleLabel = m.role === 'user' ? '**User:**' : m.role === 'assistant' ? '**Claude:**' : `**${m.role}:**`
-        const toolLabel = m.tool_name ? ` [Tool: ${m.tool_name}]` : ''
-        const content = m.content_text?.slice(0, 2000) ?? '[No content]'
-        return `${roleLabel}${toolLabel}\n${content}`
-      }).join('\n\n---\n\n')
-
-      return {
-        content: [{
-          type: 'text',
-          text: header + messages,
-        }],
-      }
+      const result = await getSession(params)
+      if (!result) return { content: [{ type: 'text', text: 'Session not found.' }] }
+      return { content: [{ type: 'text', text: formatSession(result) }] }
     }
   )
 
-  // Register stats tool
   server.tool(
     'stats',
     'Get conversation statistics',
@@ -185,9 +109,8 @@ const getServer = () => {
       )
 
       let output = `# Mindmeld Statistics\n\n`
-      for (const row of stats.rows) {
+      for (const row of stats.rows)
         output += `**${row.source_name}:** ${row.session_count} sessions\n`
-      }
 
       return { content: [{ type: 'text', text: output }] }
     }
@@ -200,144 +123,95 @@ const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 300
 
 const app = express()
 app.use(hostHeaderValidation(['localhost', '127.0.0.1', 'mcp']))
-
-// JSON body parsing with larger limit for transcript ingestion
 app.use(express.json({ limit: '10mb' }))
 
-// Map to store transports by session ID
 const transports: Record<string, StreamableHTTPServerTransport> = {}
 
-// MCP POST endpoint
 const mcpPostHandler = async (req: any, res: any) => {
   const sessionId = req.headers['mcp-session-id'] as string | undefined
-
-  if (sessionId) {
-    console.log(`[MCP HTTP] Request for session: ${sessionId}`)
-  } else {
-    console.log('[MCP HTTP] New connection request')
-  }
 
   try {
     let transport: StreamableHTTPServerTransport
 
     if (sessionId && transports[sessionId]) {
-      // Reuse existing transport
       transport = transports[sessionId]
     } else if (!sessionId && isInitializeRequest(req.body)) {
-      // New initialization request
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => {
-          console.log(`[MCP HTTP] Session initialized: ${id}`)
           transports[id] = transport
         },
         onsessionclosed: (id) => {
-          console.log(`[MCP HTTP] Session closed: ${id}`)
           delete transports[id]
         }
       })
 
       transport.onclose = () => {
         const sid = transport.sessionId
-        if (sid && transports[sid]) {
-          console.log(`[MCP HTTP] Transport closed for session ${sid}`)
-          delete transports[sid]
-        }
+        if (sid && transports[sid]) delete transports[sid]
       }
 
-      // Connect server to transport
       const server = getServer()
       await server.connect(transport)
       await transport.handleRequest(req, res, req.body)
       return
     } else {
-      // Invalid request
       res.status(400).json({
         jsonrpc: '2.0',
-        error: {
-          code: -32000,
-          message: 'Bad Request: No valid session ID provided'
-        },
+        error: { code: -32000, message: 'Bad Request: No valid session ID provided' },
         id: null
       })
       return
     }
 
-    // Handle request with existing transport
     await transport.handleRequest(req, res, req.body)
   } catch (error) {
     console.error('[MCP HTTP] Error handling request:', error)
     if (!res.headersSent) {
       res.status(500).json({
         jsonrpc: '2.0',
-        error: {
-          code: -32603,
-          message: 'Internal server error'
-        },
+        error: { code: -32603, message: 'Internal server error' },
         id: null
       })
     }
   }
 }
 
-// MCP GET endpoint (for SSE streams)
 const mcpGetHandler = async (req: any, res: any) => {
   const sessionId = req.headers['mcp-session-id'] as string
-
   if (!sessionId || !transports[sessionId]) {
     res.status(400).send('Invalid or missing session ID')
     return
   }
-
-  const lastEventId = req.headers['last-event-id']
-  if (lastEventId) {
-    console.log(`[MCP HTTP] Client reconnecting with Last-Event-ID: ${lastEventId}`)
-  } else {
-    console.log(`[MCP HTTP] New SSE stream for session ${sessionId}`)
-  }
-
-  const transport = transports[sessionId]
-  await transport.handleRequest(req, res)
+  await transports[sessionId].handleRequest(req, res)
 }
 
-// MCP DELETE endpoint (session termination)
 const mcpDeleteHandler = async (req: any, res: any) => {
   const sessionId = req.headers['mcp-session-id'] as string
-
   if (!sessionId || !transports[sessionId]) {
     res.status(400).send('Invalid or missing session ID')
     return
   }
-
-  console.log(`[MCP HTTP] Session termination request: ${sessionId}`)
-
   try {
-    const transport = transports[sessionId]
-    await transport.handleRequest(req, res)
+    await transports[sessionId].handleRequest(req, res)
   } catch (error) {
     console.error('[MCP HTTP] Error handling session termination:', error)
-    if (!res.headersSent) {
-      res.status(500).send('Error processing session termination')
-    }
+    if (!res.headersSent) res.status(500).send('Error processing session termination')
   }
 }
 
-// Register routes
 app.post('/mcp', mcpPostHandler)
 app.get('/mcp', mcpGetHandler)
 app.delete('/mcp', mcpDeleteHandler)
 
-// Health check endpoint
 app.get('/health', (req: any, res: any) => {
   res.json({ status: 'ok', name: 'mindmeld', version })
 })
 
-// Detailed status endpoint
 app.get('/status', async (req: any, res: any) => {
   try {
     const syncStatus = await getSyncStatus()
 
-    // Recently processed sessions (synced within last 10 minutes)
     const recentlyProcessed = await query<{
       id: number
       title: string
@@ -355,14 +229,12 @@ app.get('/status', async (req: any, res: any) => {
       LIMIT 10
     `)
 
-    // Pending message embeddings
     const pendingMessages = await query<{ count: string }>(`
       SELECT COUNT(*) as count FROM messages m
       LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'
       WHERE m.content_text IS NOT NULL AND LENGTH(m.content_text) > 10 AND e.id IS NULL
     `)
 
-    // Sessions needing embedding update
     const pendingSessions = await query<{ count: string }>(`
       SELECT COUNT(*) as count FROM sessions s
       LEFT JOIN embeddings e ON e.chroma_collection = 'convo-sessions' AND e.chroma_id = 'session-' || s.id::text
@@ -371,7 +243,6 @@ app.get('/status', async (req: any, res: any) => {
         AND (e.id IS NULL OR s.content_chars > COALESCE(e.content_chars_at_embed, 0))
     `)
 
-    // Latest non-briefing session
     const latestSession = await query<{
       started_at: string
       title: string
@@ -386,7 +257,6 @@ app.get('/status', async (req: any, res: any) => {
       LIMIT 1
     `)
 
-    // Chroma collection stats (may be unavailable)
     let chromaCollections: { name: string, count: number }[] = []
     try {
       const collectionNames = Object.values(config.chroma.collections)
@@ -394,7 +264,7 @@ app.get('/status', async (req: any, res: any) => {
         collectionNames.map(name => getCollectionStats(name))
       )
     } catch {
-      // Chroma unavailable — return empty
+      // Chroma unavailable
     }
 
     const latest = latestSession.rows[0]
@@ -417,9 +287,7 @@ app.get('/status', async (req: any, res: any) => {
         messages: parseInt(pendingMessages.rows[0]?.count ?? '0', 10),
         sessions: parseInt(pendingSessions.rows[0]?.count ?? '0', 10),
       },
-      chroma: {
-        collections: chromaCollections,
-      },
+      chroma: { collections: chromaCollections },
       latestSession: latest
         ? { startedAt: latest.started_at, title: latest.title, project: latest.project }
         : null,
@@ -433,15 +301,12 @@ app.get('/status', async (req: any, res: any) => {
   }
 })
 
-// Ingestion endpoint - allows external scripts to push data
 app.post('/api/ingest', async (req: any, res: any) => {
   try {
     const payload = IngestPayloadSchema.parse(req.body)
 
-    // Get or create source
     const source = await queries.getOrCreateSource(payload.source, payload.sourceDisplayName)
 
-    // Upsert project
     const projectId = await queries.upsertProject(
       source.id,
       payload.project.externalId,
@@ -449,7 +314,6 @@ app.post('/api/ingest', async (req: any, res: any) => {
       payload.project.name
     )
 
-    // Upsert session
     const sessionId = await queries.upsertSession({
       projectId,
       externalId: payload.session.externalId,
@@ -458,7 +322,6 @@ app.post('/api/ingest', async (req: any, res: any) => {
       endedAt: payload.session.endedAt,
     })
 
-    // Insert messages
     let messagesInserted = 0
     for (const msg of payload.messages) {
       const msgId = await queries.insertMessage({
@@ -473,23 +336,12 @@ app.post('/api/ingest', async (req: any, res: any) => {
       if (msgId) messagesInserted++
     }
 
-    // Update session stats
     await queries.updateSessionStats(sessionId)
 
-    res.json({
-      success: true,
-      sourceId: source.id,
-      projectId,
-      sessionId,
-      messagesInserted,
-    })
+    res.json({ success: true, sourceId: source.id, projectId, sessionId, messagesInserted })
   } catch (error) {
     if (error instanceof z.ZodError) {
-      res.status(400).json({
-        success: false,
-        error: 'Validation failed',
-        details: error.errors,
-      })
+      res.status(400).json({ success: false, error: 'Validation failed', details: error.errors })
       return
     }
     console.error('[API] Ingest error:', error)
@@ -500,15 +352,11 @@ app.post('/api/ingest', async (req: any, res: any) => {
   }
 })
 
-// Start server with migrations
 const start = async () => {
-  console.log('[MCP HTTP] Running database migrations...')
   await runMigrations()
 
   app.listen(MCP_PORT, () => {
     console.log(`[MCP HTTP] Mindmeld server listening on http://localhost:${MCP_PORT}`)
-    console.log(`[MCP HTTP] Endpoint: http://localhost:${MCP_PORT}/mcp`)
-    console.log(`[MCP HTTP] Health: http://localhost:${MCP_PORT}/health`)
   })
 }
 
@@ -517,24 +365,15 @@ start().catch(error => {
   process.exit(1)
 })
 
-// Handle shutdown
 process.on('SIGINT', async () => {
-  console.log('[MCP HTTP] Shutting down...')
-
-  // Close all transports
   for (const sessionId in transports) {
     try {
-      console.log(`[MCP HTTP] Closing transport for session ${sessionId}`)
       await transports[sessionId].close()
       delete transports[sessionId]
     } catch (error) {
       console.error(`[MCP HTTP] Error closing transport ${sessionId}:`, error)
     }
   }
-
-  // Close database pool
   await closePool()
-
-  console.log('[MCP HTTP] Shutdown complete')
   process.exit(0)
 })

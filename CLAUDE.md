@@ -301,4 +301,10 @@ pnpm run dev
 pnpm run type-check
 ```
 
+## No Truncation Policy
+
+Never truncate strings returned to API consumers. This includes `.slice()`, `substring()`, or SQL `LEFT()`/`SUBSTRING()` on data returned by MCP tools or HTTP endpoints. If content is too large, use summaries (LLM-generated) or pagination (offset/limit) instead. Truncation silently destroys information and makes results useless for downstream LLMs.
+
+Acceptable truncation: debug logging (`console.log`), embedding model input limits (model constraint, not a choice).
+
 MANDATORY PROTOCOL: when a session is started in this project, run `pnpm run dev` in a background thread, if you aren't already. This allows Claude code to connect to it

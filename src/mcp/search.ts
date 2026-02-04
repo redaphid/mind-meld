@@ -7,7 +7,6 @@ import { subtractVectors, normalizeVector, addVectors, scaleVector } from '../ut
 
 const ollama = new Ollama({ host: config.ollama.url })
 
-// Rocchio algorithm dampening factor for negative weights
 const UNLIKE_DAMPENING = 0.2
 
 type WeightedId = { id: string; weight: number }
@@ -35,7 +34,7 @@ export type SearchResult = {
   project_path: string
   source: string
   title: string
-  snippet: string
+  summary: string | null
   timestamp: Date
   score: number
   message_count: number
@@ -47,21 +46,15 @@ const parseWeightedIds = (params: string[]): WeightedId[] =>
       const trimmed = item.trim()
       const colonIndex = trimmed.lastIndexOf(':')
       if (colonIndex > 0) {
-        const possibleWeight = trimmed.slice(colonIndex + 1)
-        const weight = Number.parseFloat(possibleWeight)
-        if (!Number.isNaN(weight)) {
-          return { id: trimmed.slice(0, colonIndex), weight }
-        }
+        const weight = Number.parseFloat(trimmed.slice(colonIndex + 1))
+        if (!Number.isNaN(weight)) return { id: trimmed.slice(0, colonIndex), weight }
       }
       return { id: trimmed, weight: 1.0 }
     })
     .filter((item) => item.id.length > 0)
 
-const getQueryEmbedding = async (text: string): Promise<number[]> => {
-  const response = await ollama.embed({
-    model: config.embeddings.model,
-    input: text,
-  })
+const getQueryEmbedding = async (text: string) => {
+  const response = await ollama.embed({ model: config.embeddings.model, input: text })
   return response.embeddings[0]
 }
 
@@ -72,38 +65,26 @@ const composeQueryVector = async (
   unlikeSessionCentroids: ResolvedCentroid[] = [],
   likeProjectCentroids: ResolvedCentroid[] = [],
   unlikeProjectCentroids: ResolvedCentroid[] = []
-): Promise<number[]> => {
-  let queryVector = queryText
+) => {
+  let vec = queryText
     ? await getQueryEmbedding(queryText)
     : new Array(1024).fill(0)
 
-  if (negativeQuery) {
-    const negativeEmbedding = await getQueryEmbedding(negativeQuery)
-    queryVector = subtractVectors(queryVector, negativeEmbedding)
-  }
+  if (negativeQuery) vec = subtractVectors(vec, await getQueryEmbedding(negativeQuery))
 
-  for (const { centroid, weight } of likeSessionCentroids) {
-    queryVector = addVectors(queryVector, scaleVector(centroid, weight))
-  }
+  for (const { centroid, weight } of likeSessionCentroids)
+    vec = addVectors(vec, scaleVector(centroid, weight))
+  for (const { centroid, weight } of unlikeSessionCentroids)
+    vec = subtractVectors(vec, scaleVector(centroid, weight * UNLIKE_DAMPENING))
+  for (const { centroid, weight } of likeProjectCentroids)
+    vec = addVectors(vec, scaleVector(centroid, weight))
+  for (const { centroid, weight } of unlikeProjectCentroids)
+    vec = subtractVectors(vec, scaleVector(centroid, weight * UNLIKE_DAMPENING))
 
-  for (const { centroid, weight } of unlikeSessionCentroids) {
-    const effectiveWeight = weight * UNLIKE_DAMPENING
-    queryVector = subtractVectors(queryVector, scaleVector(centroid, effectiveWeight))
-  }
-
-  for (const { centroid, weight } of likeProjectCentroids) {
-    queryVector = addVectors(queryVector, scaleVector(centroid, weight))
-  }
-
-  for (const { centroid, weight } of unlikeProjectCentroids) {
-    const effectiveWeight = weight * UNLIKE_DAMPENING
-    queryVector = subtractVectors(queryVector, scaleVector(centroid, effectiveWeight))
-  }
-
-  return normalizeVector(queryVector)
+  return normalizeVector(vec)
 }
 
-const findProjectsByPath = async (cwd: string) => {
+export const findProjectsByPath = async (cwd: string) => {
   const result = await query<{
     id: number
     path: string
@@ -121,148 +102,169 @@ const findProjectsByPath = async (cwd: string) => {
   return result.rows
 }
 
-const resolveSessionCentroids = async (weightedIds: WeightedId[]): Promise<ResolvedCentroid[]> => {
+type SessionRow = {
+  id: number
+  title: string | null
+  summary: string | null
+  project_name: string
+  project_path: string
+  source_name: string
+  started_at: Date
+  message_count: number
+  project_id: number
+}
+
+const SESSION_QUERY = `
+  SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
+         src.name as source_name, s.started_at, s.message_count, p.id as project_id
+  FROM sessions s
+  JOIN projects p ON s.project_id = p.id
+  JOIN sources src ON p.source_id = src.id
+  WHERE s.deleted_at IS NULL`
+
+const getSessionById = async (sessionId: number) => {
+  const result = await query<SessionRow>(`${SESSION_QUERY} AND s.id = $1`, [sessionId])
+  return result.rows[0] ?? null
+}
+
+const getSessionByMessageId = async (messageId: number) => {
+  const result = await query<SessionRow>(
+    `SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
+            src.name as source_name, s.started_at, s.message_count, p.id as project_id
+     FROM messages m
+     JOIN sessions s ON m.session_id = s.id
+     JOIN projects p ON s.project_id = p.id
+     JOIN sources src ON p.source_id = src.id
+     WHERE m.id = $1 AND s.deleted_at IS NULL`,
+    [messageId]
+  )
+  return result.rows[0] ?? null
+}
+
+const resolveCentroids = async (table: 'sessions' | 'projects', weightedIds: WeightedId[]) => {
   if (weightedIds.length === 0) return []
   const resolved: ResolvedCentroid[] = []
 
   for (const { id, weight } of weightedIds) {
-    const sessionId = parseInt(id)
-    if (isNaN(sessionId)) continue
+    const numId = parseInt(id)
+    if (isNaN(numId)) continue
 
     const result = await query<{ centroid_vector: string | null }>(
-      `SELECT centroid_vector FROM sessions WHERE id = $1 AND centroid_vector IS NOT NULL`,
-      [sessionId]
+      `SELECT centroid_vector FROM ${table} WHERE id = $1 AND centroid_vector IS NOT NULL`,
+      [numId]
     )
 
     if (result.rows[0]?.centroid_vector) {
-      const centroid = JSON.parse(result.rows[0].centroid_vector) as number[]
-      resolved.push({ id, weight, centroid })
+      resolved.push({ id, weight, centroid: JSON.parse(result.rows[0].centroid_vector) })
     }
   }
   return resolved
 }
 
-const resolveProjectCentroids = async (weightedIds: WeightedId[]): Promise<ResolvedCentroid[]> => {
-  if (weightedIds.length === 0) return []
-  const resolved: ResolvedCentroid[] = []
+const toResult = (session: SessionRow, score: number, projectIds: number[]): SearchResult => ({
+  session_id: session.id,
+  project_name: session.project_name,
+  project_path: session.project_path,
+  source: session.source_name,
+  title: session.title ?? 'Untitled',
+  summary: session.summary,
+  timestamp: session.started_at,
+  score: score + (projectIds.includes(session.project_id) ? 0.5 : 0),
+  message_count: session.message_count,
+})
 
-  for (const { id, weight } of weightedIds) {
-    const projectId = parseInt(id)
-    if (isNaN(projectId)) continue
+const passesFilters = (
+  session: SessionRow,
+  params: { source?: string; projectOnly?: boolean },
+  sinceDate: Date | null,
+  projectIds: number[]
+) => {
+  if (params.source && session.source_name !== params.source) return false
+  if (sinceDate && session.started_at < sinceDate) return false
+  if (params.projectOnly && !projectIds.includes(session.project_id)) return false
+  return true
+}
 
-    const result = await query<{ centroid_vector: string | null }>(
-      `SELECT centroid_vector FROM projects WHERE id = $1 AND centroid_vector IS NOT NULL`,
-      [projectId]
-    )
-
-    if (result.rows[0]?.centroid_vector) {
-      const centroid = JSON.parse(result.rows[0].centroid_vector) as number[]
-      resolved.push({ id, weight, centroid })
-    }
+const parseSinceDate = (since?: string) => {
+  if (!since) return null
+  const match = since.match(/^(\d+)([dhwm])$/)
+  if (match) {
+    const [, num, unit] = match
+    const ms = { d: 86400000, h: 3600000, w: 604800000, m: 2592000000 }[unit] ?? 86400000
+    return new Date(Date.now() - parseInt(num) * ms)
   }
-  return resolved
+  return new Date(since)
 }
 
 export const search = async (params: SearchParams): Promise<SearchResult[]> => {
   const limit = params.limit ?? 20
   const mode = params.mode ?? 'hybrid'
 
-  if (!params.query && !params.likeSession && !params.likeProject && !params.unlikeSession && !params.unlikeProject) {
-    throw new Error('Must provide either query or centroid parameters')
-  }
+  if (!params.query && !params.likeSession && !params.likeProject && !params.unlikeSession && !params.unlikeProject)
+    throw new Error('Must provide either query or centroid parameters (likeSession, likeProject, etc.)')
 
   const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
   const projectIds = matchingProjects.map((p) => p.id)
+  const sinceDate = parseSinceDate(params.since)
 
-  const likeSessionIds = params.likeSession ? parseWeightedIds(params.likeSession) : []
-  const unlikeSessionIds = params.unlikeSession ? parseWeightedIds(params.unlikeSession) : []
-  const likeProjectIds = params.likeProject ? parseWeightedIds(params.likeProject) : []
-  const unlikeProjectIds = params.unlikeProject ? parseWeightedIds(params.unlikeProject) : []
-
-  const [likeSessionCentroids, unlikeSessionCentroids, likeProjectCentroids, unlikeProjectCentroids] = await Promise.all([
-    resolveSessionCentroids(likeSessionIds),
-    resolveSessionCentroids(unlikeSessionIds),
-    resolveProjectCentroids(likeProjectIds),
-    resolveProjectCentroids(unlikeProjectIds),
-  ])
-
-  let sinceDate: Date | null = null
-  if (params.since) {
-    const match = params.since.match(/^(\d+)([dhwm])$/)
-    if (match) {
-      const [, num, unit] = match
-      const ms = { d: 86400000, h: 3600000, w: 604800000, m: 2592000000 }[unit] ?? 86400000
-      sinceDate = new Date(Date.now() - parseInt(num) * ms)
-    } else {
-      sinceDate = new Date(params.since)
-    }
-  }
+  const [likeSessionCentroids, unlikeSessionCentroids, likeProjectCentroids, unlikeProjectCentroids] =
+    await Promise.all([
+      resolveCentroids('sessions', params.likeSession ? parseWeightedIds(params.likeSession) : []),
+      resolveCentroids('sessions', params.unlikeSession ? parseWeightedIds(params.unlikeSession) : []),
+      resolveCentroids('projects', params.likeProject ? parseWeightedIds(params.likeProject) : []),
+      resolveCentroids('projects', params.unlikeProject ? parseWeightedIds(params.unlikeProject) : []),
+    ])
 
   const results: SearchResult[] = []
+  const seenSessionIds = new Set<number>()
 
-  // Semantic search via Chroma
+  const addResult = (r: SearchResult) => {
+    if (seenSessionIds.has(r.session_id)) return
+    seenSessionIds.add(r.session_id)
+    results.push(r)
+  }
+
   if (mode === 'semantic' || mode === 'hybrid') {
     try {
       const embedding = await composeQueryVector(
-        params.query,
-        params.negativeQuery,
-        likeSessionCentroids,
-        unlikeSessionCentroids,
-        likeProjectCentroids,
-        unlikeProjectCentroids
+        params.query, params.negativeQuery,
+        likeSessionCentroids, unlikeSessionCentroids,
+        likeProjectCentroids, unlikeProjectCentroids
       )
 
-      const chromaResults = await querySimilar(
-        config.chroma.collections.sessions,
-        embedding,
-        limit * 2
-      )
+      const sessionHits = await querySimilar(config.chroma.collections.sessions, embedding, limit * 2)
 
-      if (chromaResults.ids[0]) {
-        for (let i = 0; i < chromaResults.ids[0].length; i++) {
-          const sessionId = parseInt(chromaResults.ids[0][i].replace('session-', ''))
-          const distance = chromaResults.distances?.[0]?.[i] ?? 1
-          const score = 1 - distance
+      if (sessionHits.ids[0]) {
+        for (let i = 0; i < sessionHits.ids[0].length; i++) {
+          const sessionId = parseInt(sessionHits.ids[0][i].replace('session-', ''))
+          const score = 1 - (sessionHits.distances?.[0]?.[i] ?? 1)
+          const session = await getSessionById(sessionId)
+          if (!session) continue
+          if (!passesFilters(session, params, sinceDate, projectIds)) continue
+          addResult(toResult(session, score, projectIds))
+        }
+      }
 
-          const sessionResult = await query<{
-            id: number
-            title: string
-            project_name: string
-            project_path: string
-            source_name: string
-            started_at: Date
-            message_count: number
-            project_id: number
-          }>(
-            `SELECT s.id, s.title, p.name as project_name, p.path as project_path,
-                    src.name as source_name, s.started_at, s.message_count, p.id as project_id
-             FROM sessions s
-             JOIN projects p ON s.project_id = p.id
-             JOIN sources src ON p.source_id = src.id
-             WHERE s.id = $1 AND s.deleted_at IS NULL`,
-            [sessionId]
-          )
+      const messageHits = await querySimilar(config.chroma.collections.messages, embedding, limit * 3)
 
-          if (sessionResult.rows[0]) {
-            const session = sessionResult.rows[0]
-            if (params.source && session.source_name !== params.source) continue
-            if (sinceDate && session.started_at < sinceDate) continue
-            if (params.projectOnly && !projectIds.includes(session.project_id)) continue
+      if (messageHits.ids[0]) {
+        const bestBySession = new Map<number, number>()
 
-            const projectBoost = projectIds.includes(session.project_id) ? 0.5 : 0
+        for (let i = 0; i < messageHits.ids[0].length; i++) {
+          const messageId = parseInt(messageHits.ids[0][i].replace('msg-', ''))
+          const score = 1 - (messageHits.distances?.[0]?.[i] ?? 1)
+          const session = await getSessionByMessageId(messageId)
+          if (!session) continue
+          if (seenSessionIds.has(session.id)) continue
+          if (!passesFilters(session, params, sinceDate, projectIds)) continue
 
-            results.push({
-              session_id: session.id,
-              project_name: session.project_name,
-              project_path: session.project_path,
-              source: session.source_name,
-              title: session.title ?? 'Untitled',
-              snippet: chromaResults.documents?.[0]?.[i]?.slice(0, 300) ?? '',
-              timestamp: session.started_at,
-              score: score + projectBoost,
-              message_count: session.message_count,
-            })
-          }
+          const existing = bestBySession.get(session.id)
+          if (!existing || score > existing) bestBySession.set(session.id, score)
+        }
+
+        for (const [sessionId, score] of bestBySession) {
+          const session = await getSessionById(sessionId)
+          if (session) addResult(toResult(session, score, projectIds))
         }
       }
     } catch (e) {
@@ -270,69 +272,76 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
     }
   }
 
-  // Full-text search via Postgres
   if ((mode === 'text' || mode === 'hybrid') && params.query) {
-    const projectFilter = params.projectOnly && projectIds.length > 0
-      ? `AND s.project_id = ANY($4::int[])`
-      : ''
+    const conditions = [
+      `to_tsvector('english', m.content_text) @@ plainto_tsquery('english', $1)`,
+      `s.deleted_at IS NULL`,
+      `($2::text IS NULL OR src.name = $2)`,
+      `($3::timestamptz IS NULL OR s.started_at >= $3)`,
+    ]
+    const values: unknown[] = [params.query, params.source ?? null, sinceDate]
+    let nextParam = 4
+
+    if (params.projectOnly && projectIds.length > 0) {
+      conditions.push(`s.project_id = ANY($${nextParam++}::int[])`)
+      values.push(projectIds)
+    }
+
+    if (params.excludeTerms) {
+      conditions.push(`NOT to_tsvector('english', m.content_text) @@ plainto_tsquery('english', $${nextParam++})`)
+      values.push(params.excludeTerms)
+    }
+
+    values.push(limit * 2)
+    const limitParam = `$${nextParam}`
 
     const ftsResult = await query<{
       session_id: number
-      title: string
+      title: string | null
+      summary: string | null
       project_name: string
       project_path: string
       source_name: string
       started_at: Date
       message_count: number
-      snippet: string
       rank: number
       project_id: number
     }>(
       `WITH ranked_messages AS (
         SELECT DISTINCT ON (m.session_id)
           m.session_id,
-          ts_rank(to_tsvector('english', m.content_text), plainto_tsquery('english', $1)) as rank,
-          substring(m.content_text, 1, 300) as snippet
+          ts_rank(to_tsvector('english', m.content_text), plainto_tsquery('english', $1)) as rank
         FROM messages m
         JOIN sessions s ON m.session_id = s.id
         JOIN projects p ON s.project_id = p.id
         JOIN sources src ON p.source_id = src.id
-        WHERE to_tsvector('english', m.content_text) @@ plainto_tsquery('english', $1)
-          AND s.deleted_at IS NULL
-          AND ($2::text IS NULL OR src.name = $2)
-          AND ($3::timestamptz IS NULL OR s.started_at >= $3)
-          ${projectFilter}
+        WHERE ${conditions.join('\n          AND ')}
         ORDER BY m.session_id, rank DESC
       )
-      SELECT rm.session_id, s.title, p.name as project_name, p.path as project_path,
-             src.name as source_name, s.started_at, s.message_count, rm.snippet, rm.rank,
+      SELECT rm.session_id, s.title, s.summary, p.name as project_name, p.path as project_path,
+             src.name as source_name, s.started_at, s.message_count, rm.rank,
              p.id as project_id
       FROM ranked_messages rm
       JOIN sessions s ON rm.session_id = s.id
       JOIN projects p ON s.project_id = p.id
       JOIN sources src ON p.source_id = src.id
       ORDER BY rm.rank DESC
-      LIMIT $${params.projectOnly && projectIds.length > 0 ? 5 : 4}`,
-      params.projectOnly && projectIds.length > 0
-        ? [params.query, params.source ?? null, sinceDate, projectIds, limit * 2]
-        : [params.query, params.source ?? null, sinceDate, limit * 2]
+      LIMIT ${limitParam}`,
+      values
     )
 
     for (const row of ftsResult.rows) {
-      if (!results.find((r) => r.session_id === row.session_id)) {
-        const projectBoost = projectIds.includes(row.project_id) ? 0.5 : 0
-        results.push({
-          session_id: row.session_id,
-          project_name: row.project_name,
-          project_path: row.project_path,
-          source: row.source_name,
-          title: row.title ?? 'Untitled',
-          snippet: row.snippet,
-          timestamp: row.started_at,
-          score: row.rank + projectBoost,
-          message_count: row.message_count,
-        })
-      }
+      addResult({
+        session_id: row.session_id,
+        project_name: row.project_name,
+        project_path: row.project_path,
+        source: row.source_name,
+        title: row.title ?? 'Untitled',
+        summary: row.summary,
+        timestamp: row.started_at,
+        score: row.rank + (projectIds.includes(row.project_id) ? 0.5 : 0),
+        message_count: row.message_count,
+      })
     }
   }
 
@@ -340,12 +349,13 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
   return results.slice(0, limit)
 }
 
-export const formatSearchResults = (results: SearchResult[], projectIds: number[] = []): string => {
+export const formatSearchResults = (results: SearchResult[], projectIds: number[] = []) => {
   if (results.length === 0) return 'No matching conversations found.'
 
   const output = results.map((r, i) => {
     const projectLabel = projectIds.includes(r.session_id) ? ' [CURRENT PROJECT]' : ''
     assert(r.timestamp, `Missing timestamp for session ${r.session_id}`)
+    const summary = r.summary ?? 'No summary available'
     return `${i + 1}. **${r.title}**${projectLabel}
    Session ID: ${r.session_id}
    Project: ${r.project_name} (${r.source})
@@ -353,7 +363,7 @@ export const formatSearchResults = (results: SearchResult[], projectIds: number[
    Date: ${r.timestamp.toISOString().split('T')[0]}
    Messages: ${r.message_count}
    Score: ${r.score.toFixed(3)}
-   Preview: ${r.snippet.replace(/\n/g, ' ').slice(0, 200)}...`
+   Summary: ${summary}`
   }).join('\n\n')
 
   return `Found ${results.length} relevant conversations:\n\n${output}`
