@@ -32,8 +32,30 @@ export async function markUnembeddable(messageId: number): Promise<void> {
   console.log(`  ⚠️  Marked message ${messageId} as un-embeddable`)
 }
 
+// Patterns that indicate tool output, boilerplate, or noise — not worth embedding
+const NOISE_PATTERNS = [
+  /^\[Request interrupted/,
+  /^\[THINKING\]/,
+  /^No results found/,
+  /^No files found/,
+  /^No matches found/,
+  /^File created successfully/,
+  /^Updated task #/,
+  /^MCP (error|tool call)/,
+  /^To github\.com/,
+  /^Exit code \d/,
+  /^\s*(CREATE TABLE|COPY \d|DROP TABLE|ALTER TABLE|INSERT \d)/,
+  /^\s*\d+ rows? affected/,
+  /^\{"ok":false/,
+]
+
+const isNoise = (text: string) =>
+  text.length < 50 || NOISE_PATTERNS.some(p => p.test(text))
+
 // Get candidate messages for embedding - only those not yet embedded and not marked as un-embeddable
 async function getMessagesToEmbed(limit: number): Promise<MessageToEmbed[]> {
+  // Fetch more than needed since we filter in JS — noise rate is ~10-15%
+  const overfetch = Math.ceil(limit * 1.3)
   const result = await query<MessageToEmbed>(
     `SELECT m.id, m.session_id, m.content_text, m.role, m.timestamp,
             p.path as project_path, src.name as source_name, m.model
@@ -45,14 +67,35 @@ async function getMessagesToEmbed(limit: number): Promise<MessageToEmbed[]> {
      LEFT JOIN embeddings skip ON skip.message_id = m.id AND skip.chroma_collection = 'UNEMBEDDABLE'
      WHERE m.content_text IS NOT NULL
        AND LENGTH(m.content_text) > 10
+       AND m.role != 'tool'
        AND e.id IS NULL
        AND skip.id IS NULL
      ORDER BY m.id
      LIMIT $1`,
-    [limit]
+    [overfetch]
   );
 
-  return result.rows;
+  const kept: MessageToEmbed[] = []
+  const skippedIds: number[] = []
+
+  for (const row of result.rows) {
+    if (isNoise(row.content_text)) {
+      skippedIds.push(row.id)
+    } else {
+      kept.push(row)
+    }
+  }
+
+  // Mark noise as skipped so we don't re-evaluate it every batch
+  for (const id of skippedIds) {
+    await markUnembeddable(id)
+  }
+
+  if (skippedIds.length > 0) {
+    console.log(`Filtered ${skippedIds.length} noise messages`)
+  }
+
+  return kept.slice(0, limit)
 }
 
 // Generate embeddings for pending messages
@@ -235,11 +278,27 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
         `session-${session.id}`
       );
 
-      // Skip if Chroma already has this exact content_chars
+      // If Chroma already has this embedding with sufficient content_chars,
+      // just sync the Postgres record and skip the expensive summarize/embed
       if (chromaMetadata) {
         const chromaContentChars = chromaMetadata.content_chars as number | undefined;
         if (chromaContentChars && chromaContentChars >= session.content_chars) {
-          console.log(`  Session ${session.id}: Chroma up-to-date (${chromaContentChars} chars)`);
+          // Record in Postgres so this session stops appearing in pending queries
+          await query(
+            `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed)
+             SELECT MIN(m.id), $1, $2, $3, $4, $5
+             FROM messages m WHERE m.session_id = $6
+             ON CONFLICT (message_id, chroma_collection)
+             DO UPDATE SET content_chars_at_embed = $5`,
+            [
+              config.chroma.collections.sessions,
+              `session-${session.id}`,
+              config.embeddings.model,
+              config.embeddings.dimensions,
+              chromaContentChars,
+              session.id,
+            ]
+          )
           continue;
         }
       }
@@ -303,10 +362,12 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
       )
 
       // Record/update in PostgreSQL with content_chars_at_embed
+      // Use MIN(m.id) for deterministic message selection — using LIMIT 1 without ORDER BY
+      // picks a random message, creating duplicate records when the session grows
       await query(
         `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed)
-         SELECT m.id, $1, $2, $3, $4, $5
-         FROM messages m WHERE m.session_id = $6 LIMIT 1
+         SELECT MIN(m.id), $1, $2, $3, $4, $5
+         FROM messages m WHERE m.session_id = $6
          ON CONFLICT (message_id, chroma_collection)
          DO UPDATE SET content_chars_at_embed = $5`,
         [
