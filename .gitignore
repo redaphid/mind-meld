@@ -9,6 +9,9 @@ out/
 .env
 .env.local
 
+# Local Docker overrides
+docker-compose.override.yml
+
 # IDE
 .idea/
 .vscode/
