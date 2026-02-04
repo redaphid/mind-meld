@@ -8,6 +8,13 @@ import { z } from 'zod'
 import { query, closePool, queries } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
 import { search, formatSearchResults } from './search.js'
+import { getSyncStatus } from '../sync/orchestrator.js'
+import { getCollectionStats } from '../db/chroma.js'
+import { config } from '../config.js'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
+const { version } = require('../../package.json')
 
 // Zod schema for ingestion payload
 const IngestMessageSchema = z.object({
@@ -77,20 +84,32 @@ const getServer = () => {
   // Register getSession tool
   server.tool(
     'getSession',
-    'Get full conversation session',
+    'Get conversation session. Returns summary by default; pass messageLimit to get raw messages.',
     {
-      sessionId: z.number(),
-      messageLimit: z.number().optional(),
+      sessionId: z.number().describe('Session ID from search results'),
+      messageLimit: z.number().optional().describe('If set, return this many raw messages instead of the summary'),
     },
     async (params) => {
-      const limit = params.messageLimit ?? 50
-
       const sessionResult = await query<{
         id: number
         title: string
+        summary: string
+        project_name: string
+        project_path: string
+        source_name: string
+        started_at: Date
+        ended_at: Date
         message_count: number
+        model_used: string
+        git_branch: string
       }>(
-        `SELECT id, title, message_count FROM sessions WHERE id = $1`,
+        `SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
+                src.name as source_name, s.started_at, s.ended_at, s.message_count,
+                s.model_used, s.git_branch
+         FROM sessions s
+         JOIN projects p ON s.project_id = p.id
+         JOIN sources src ON p.source_id = src.id
+         WHERE s.id = $1 AND s.deleted_at IS NULL`,
         [params.sessionId]
       )
 
@@ -98,10 +117,51 @@ const getServer = () => {
         return { content: [{ type: 'text', text: 'Session not found.' }] }
       }
 
+      const session = sessionResult.rows[0]
+
+      const header = `# ${session.title ?? 'Untitled Session'}
+
+**Project:** ${session.project_name}
+**Path:** ${session.project_path}
+**Source:** ${session.source_name}
+**Model:** ${session.model_used ?? 'Unknown'}
+**Branch:** ${session.git_branch ?? 'N/A'}
+**Date:** ${session.started_at?.toISOString().split('T')[0] ?? 'Unknown'}
+**Messages:** ${session.message_count}
+
+---
+`
+
+      if (params.messageLimit == null) {
+        const body = session.summary ?? 'No summary available for this session.'
+        return { content: [{ type: 'text', text: `${header}\n${body}` }] }
+      }
+
+      const messagesResult = await query<{
+        role: string
+        content_text: string
+        tool_name: string
+        timestamp: Date
+      }>(
+        `SELECT role, content_text, tool_name, timestamp
+         FROM messages
+         WHERE session_id = $1
+         ORDER BY timestamp ASC
+         LIMIT $2`,
+        [params.sessionId, params.messageLimit]
+      )
+
+      const messages = messagesResult.rows.map((m) => {
+        const roleLabel = m.role === 'user' ? '**User:**' : m.role === 'assistant' ? '**Claude:**' : `**${m.role}:**`
+        const toolLabel = m.tool_name ? ` [Tool: ${m.tool_name}]` : ''
+        const content = m.content_text?.slice(0, 2000) ?? '[No content]'
+        return `${roleLabel}${toolLabel}\n${content}`
+      }).join('\n\n---\n\n')
+
       return {
         content: [{
           type: 'text',
-          text: `Session: ${sessionResult.rows[0].title} (${sessionResult.rows[0].message_count} messages)`,
+          text: header + messages,
         }],
       }
     }
@@ -269,7 +329,108 @@ app.delete('/mcp', mcpDeleteHandler)
 
 // Health check endpoint
 app.get('/health', (req: any, res: any) => {
-  res.json({ status: 'ok', name: 'mindmeld', version: '0.1.0' })
+  res.json({ status: 'ok', name: 'mindmeld', version })
+})
+
+// Detailed status endpoint
+app.get('/status', async (req: any, res: any) => {
+  try {
+    const syncStatus = await getSyncStatus()
+
+    // Recently processed sessions (synced within last 10 minutes)
+    const recentlyProcessed = await query<{
+      id: number
+      title: string
+      project: string
+      last_synced_at: string
+      message_count: number
+    }>(`
+      SELECT s.id, LEFT(s.title, 100) as title, p.name as project,
+             s.last_synced_at, s.message_count
+      FROM sessions s
+      JOIN projects p ON s.project_id = p.id
+      WHERE s.last_synced_at > NOW() - INTERVAL '10 minutes'
+        AND s.deleted_at IS NULL
+      ORDER BY s.last_synced_at DESC
+      LIMIT 10
+    `)
+
+    // Pending message embeddings
+    const pendingMessages = await query<{ count: string }>(`
+      SELECT COUNT(*) as count FROM messages m
+      LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'
+      WHERE m.content_text IS NOT NULL AND LENGTH(m.content_text) > 10 AND e.id IS NULL
+    `)
+
+    // Sessions needing embedding update
+    const pendingSessions = await query<{ count: string }>(`
+      SELECT COUNT(*) as count FROM sessions s
+      LEFT JOIN embeddings e ON e.chroma_collection = 'convo-sessions' AND e.chroma_id = 'session-' || s.id::text
+      WHERE s.deleted_at IS NULL
+        AND s.message_count > 0
+        AND (e.id IS NULL OR s.content_chars > COALESCE(e.content_chars_at_embed, 0))
+    `)
+
+    // Latest non-briefing session
+    const latestSession = await query<{
+      started_at: string
+      title: string
+      project: string
+    }>(`
+      SELECT s.started_at, s.title, p.name as project
+      FROM sessions s
+      JOIN projects p ON s.project_id = p.id
+      WHERE s.deleted_at IS NULL
+        AND s.title NOT ILIKE '%briefing%'
+      ORDER BY s.started_at DESC
+      LIMIT 1
+    `)
+
+    // Chroma collection stats (may be unavailable)
+    let chromaCollections: { name: string, count: number }[] = []
+    try {
+      const collectionNames = Object.values(config.chroma.collections)
+      chromaCollections = await Promise.all(
+        collectionNames.map(name => getCollectionStats(name))
+      )
+    } catch {
+      // Chroma unavailable — return empty
+    }
+
+    const latest = latestSession.rows[0]
+
+    res.json({
+      status: 'ok',
+      version,
+      sync: {
+        sources: syncStatus.sources,
+        recentlyProcessed: recentlyProcessed.rows.map(r => ({
+          sessionId: r.id,
+          title: r.title,
+          project: r.project,
+          lastSyncedAt: r.last_synced_at,
+          messageCount: r.message_count,
+        })),
+      },
+      totals: syncStatus.totals,
+      pendingEmbeddings: {
+        messages: parseInt(pendingMessages.rows[0]?.count ?? '0', 10),
+        sessions: parseInt(pendingSessions.rows[0]?.count ?? '0', 10),
+      },
+      chroma: {
+        collections: chromaCollections,
+      },
+      latestSession: latest
+        ? { startedAt: latest.started_at, title: latest.title, project: latest.project }
+        : null,
+    })
+  } catch (error) {
+    console.error('[API] Status error:', error)
+    res.status(500).json({
+      status: 'error',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
 })
 
 // Ingestion endpoint - allows external scripts to push data
