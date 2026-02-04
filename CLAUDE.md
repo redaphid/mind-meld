@@ -303,7 +303,16 @@ pnpm run type-check
 
 ## Deployment
 
-Use `/deploy` to commit, push, tag, build Docker images via CI, pull, and restart containers. See [.claude/commands/deploy.md](.claude/commands/deploy.md) for the full procedure.
+Use `/deploy` to run the full deployment dance:
+
+1. `pnpm run type-check` — abort if it fails
+2. Read version from package.json
+3. `git add -A && git commit`
+4. `git push origin main`
+5. `git tag v{version} && git push origin v{version}`
+6. Poll CI (`gh run list --repo redaphid/mind-meld`) every 15s until the Docker build completes
+7. `docker compose pull` then `docker compose up -d`
+8. Verify: `curl -s http://localhost:3847/health`
 
 ## No Truncation Policy
 
