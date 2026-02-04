@@ -303,7 +303,7 @@ pnpm run type-check
 
 ## Deployment
 
-Use `/deploy` to commit, push, tag, build Docker images via CI, pull, and restart containers.
+Use `/deploy` to commit, push, tag, build Docker images via CI, pull, and restart containers. See [.claude/commands/deploy.md](.claude/commands/deploy.md) for the full procedure.
 
 ## No Truncation Policy
 
