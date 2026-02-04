@@ -219,6 +219,22 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
   return stats;
 }
 
+// Mark a session as processed so it exits the pending queue even if embedding failed
+const markSessionProcessed = async (sessionId: number, summary: string, contentChars: number) => {
+  await query(
+    `UPDATE sessions SET summary = COALESCE(summary, $1), content_chars = $2 WHERE id = $3`,
+    [summary, contentChars, sessionId]
+  )
+  await query(
+    `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed)
+     SELECT MIN(m.id), $1, $2, $3, $4, $5
+     FROM messages m WHERE m.session_id = $6
+     ON CONFLICT (message_id, chroma_collection)
+     DO UPDATE SET content_chars_at_embed = $5`,
+    [config.chroma.collections.sessions, `session-${sessionId}`, config.embeddings.model, config.embeddings.dimensions, contentChars, sessionId]
+  )
+}
+
 // Update session-level embeddings with summarization for long conversations
 // Now also re-embeds sessions where content_chars has grown
 export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: number; sessionsReembedded: number }> {
@@ -255,6 +271,7 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
          OR s.content_chars > COALESCE(e.content_chars_at_embed, 0)  -- Content has grown
          OR COALESCE(s.content_chars, 0) = 0  -- content_chars not calculated yet
        )
+     ORDER BY s.id
      LIMIT 100`,
     [config.chroma.collections.sessions]
   );
@@ -311,15 +328,18 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
         [session.id]
       );
 
-      if (messages.rows.length === 0) continue;
+      if (messages.rows.length === 0) {
+        await markSessionProcessed(session.id, 'No embeddable content', 0)
+        continue
+      }
 
       // Format messages with role context
       const formattedMessages = messages.rows.map(
         (m) => `[${m.role.toUpperCase()}]: ${m.content_text}`
-      );
+      )
 
       // Calculate actual content chars
-      const actualContentChars = formattedMessages.reduce((sum, m) => sum + m.length, 0);
+      const actualContentChars = formattedMessages.reduce((sum, m) => sum + m.length, 0)
 
       // Summarize if needed (handles long conversations automatically)
       const textForEmbedding = await summarizeConversation(formattedMessages)
@@ -328,9 +348,8 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
       // Generate embedding from summary or full text
       const embeddings = await generateEmbeddings([textForEmbedding.slice(0, 8000)])
 
-      // Skip session if embedding failed
       if (embeddings[0] === null) {
-        console.log(`⚠️  Session ${session.id} could not be embedded - skipping`)
+        await markSessionProcessed(session.id, 'Embedding generation failed', actualContentChars)
         continue
       }
 
