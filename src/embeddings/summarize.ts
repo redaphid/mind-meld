@@ -1,6 +1,43 @@
-import { config } from '../config.js';
+import { config } from "../config.js";
 
-const SUMMARIZE_MODEL = process.env.SUMMARIZE_MODEL ?? 'qwen3:8b';
+const SUMMARIZE_MODEL = process.env.SUMMARIZE_MODEL ?? "qwen3:8b";
+
+// Fetch with timeout and retry on transient failures
+const fetchWithRetry = async (
+  url: string,
+  options: RequestInit,
+  label: string,
+): Promise<Response> => {
+  const { timeoutMs, maxRetries, retryDelayMs } = config.ollama;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      return response;
+    } catch (error: any) {
+      const isTimeout =
+        error.name === "TimeoutError" ||
+        error.code === "UND_ERR_HEADERS_TIMEOUT";
+      const isConnectionError =
+        error.code === "ECONNREFUSED" ||
+        error.code === "ENOTFOUND" ||
+        error.message?.includes("fetch failed");
+
+      if ((isTimeout || isConnectionError) && attempt < maxRetries) {
+        console.log(
+          `${label}: attempt ${attempt} failed (${error.message}), retrying in ${retryDelayMs / 1000}s...`,
+        );
+        await new Promise((r) => setTimeout(r, retryDelayMs));
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error(`${label}: all ${maxRetries} attempts failed`);
+};
 const MAX_CHARS_BEFORE_SUMMARIZE = 8000;
 // qwen3:8b has 40k token context (~160k chars), use most of it
 // Leave room for prompt template and output
@@ -14,10 +51,13 @@ interface OllamaGenerateResponse {
 }
 
 // Summarize a single chunk of text
-async function summarizeChunk(text: string, isChunkOfMany: boolean): Promise<string> {
+async function summarizeChunk(
+  text: string,
+  isChunkOfMany: boolean,
+): Promise<string> {
   const contextNote = isChunkOfMany
-    ? 'This is one chunk of a larger conversation. Preserve all technical details for later combination.'
-    : '';
+    ? "This is one chunk of a larger conversation. Preserve all technical details for later combination."
+    : "";
 
   const prompt = `You are summarizing a coding conversation between a user and an AI assistant.
 ${contextNote}
@@ -40,20 +80,24 @@ ${text}
 
 DETAILED SUMMARY:`;
 
-  const response = await fetch(`${config.ollama.url}/api/generate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: SUMMARIZE_MODEL,
-      prompt,
-      stream: false,
-      think: false,
-      options: {
-        temperature: 0.3,
-        num_predict: MAX_SUMMARY_TOKENS,
-      },
-    }),
-  });
+  const response = await fetchWithRetry(
+    `${config.ollama.url}/api/generate`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: SUMMARIZE_MODEL,
+        prompt,
+        stream: false,
+        think: false,
+        options: {
+          temperature: 0.3,
+          num_predict: MAX_SUMMARY_TOKENS,
+        },
+      }),
+    },
+    "summarizeChunk",
+  );
 
   if (!response.ok) {
     console.error(`Summarization failed: ${response.status}`);
@@ -64,14 +108,14 @@ DETAILED SUMMARY:`;
 
   // Clean up qwen3's thinking tags if present
   let summary = result.response;
-  summary = summary.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  summary = summary.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
   return summary;
 }
 
 // Combine multiple summaries into one
 async function combineSummaries(summaries: string[]): Promise<string> {
-  const combined = summaries.join('\n\n---\n\n');
+  const combined = summaries.join("\n\n---\n\n");
 
   // If combined summaries are short enough, return as-is
   if (combined.length <= MAX_CHARS_BEFORE_SUMMARIZE) {
@@ -80,7 +124,9 @@ async function combineSummaries(summaries: string[]): Promise<string> {
 
   // If combined summaries fit in one chunk, summarize them
   if (combined.length <= MAX_CHUNK_CHARS) {
-    console.log(`Combining ${summaries.length} chunk summaries (${combined.length} chars)...`);
+    console.log(
+      `Combining ${summaries.length} chunk summaries (${combined.length} chars)...`,
+    );
 
     const prompt = `You are combining multiple conversation summaries into a single comprehensive summary.
 Each section below is a summary from a different part of the same conversation.
@@ -98,20 +144,30 @@ ${combined}
 
 COMBINED SUMMARY:`;
 
-    const response = await fetch(`${config.ollama.url}/api/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: SUMMARIZE_MODEL,
-        prompt,
-        stream: false,
-        think: false,
-        options: {
-          temperature: 0.3,
-          num_predict: MAX_SUMMARY_TOKENS,
+    let response: Response;
+    try {
+      response = await fetchWithRetry(
+        `${config.ollama.url}/api/generate`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: SUMMARIZE_MODEL,
+            prompt,
+            stream: false,
+            think: false,
+            options: {
+              temperature: 0.3,
+              num_predict: MAX_SUMMARY_TOKENS,
+            },
+          }),
         },
-      }),
-    });
+        "combineSummaries",
+      );
+    } catch {
+      // Fall back to concatenation on persistent failure
+      return combined.slice(0, MAX_CHARS_BEFORE_SUMMARIZE * 3);
+    }
 
     if (!response.ok) {
       // Fall back to concatenation
@@ -120,14 +176,16 @@ COMBINED SUMMARY:`;
 
     const result = (await response.json()) as OllamaGenerateResponse;
     let summary = result.response;
-    summary = summary.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+    summary = summary.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
     console.log(`Combined to ${summary.length} chars`);
     return summary;
   }
 
   // Combined summaries are too long - recursively chunk and summarize
-  console.log(`Combined summaries too long (${combined.length} chars), chunking recursively...`);
+  console.log(
+    `Combined summaries too long (${combined.length} chars), chunking recursively...`,
+  );
   return summarizeConversation(summaries);
 }
 
@@ -158,8 +216,10 @@ function chunkMessages(messages: string[], maxChars: number): string[][] {
   return chunks;
 }
 
-export async function summarizeConversation(messages: string[]): Promise<string> {
-  const combined = messages.join('\n\n---\n\n');
+export async function summarizeConversation(
+  messages: string[],
+): Promise<string> {
+  const combined = messages.join("\n\n---\n\n");
 
   // If short enough, no summarization needed
   if (combined.length <= MAX_CHARS_BEFORE_SUMMARIZE) {
@@ -177,15 +237,17 @@ export async function summarizeConversation(messages: string[]): Promise<string>
   // Too long for one chunk - split and summarize each chunk
   const chunks = chunkMessages(messages, MAX_CHUNK_CHARS);
   console.log(
-    `Conversation too long (${combined.length} chars), splitting into ${chunks.length} chunks...`
+    `Conversation too long (${combined.length} chars), splitting into ${chunks.length} chunks...`,
   );
 
   const chunkSummaries: string[] = [];
 
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
-    const chunkText = chunk.join('\n\n---\n\n');
-    console.log(`Summarizing chunk ${i + 1}/${chunks.length} (${chunkText.length} chars)...`);
+    const chunkText = chunk.join("\n\n---\n\n");
+    console.log(
+      `Summarizing chunk ${i + 1}/${chunks.length} (${chunkText.length} chars)...`,
+    );
 
     try {
       const summary = await summarizeChunk(chunkText, true);
@@ -204,21 +266,29 @@ export async function summarizeConversation(messages: string[]): Promise<string>
 
 export async function ensureSummarizeModel(): Promise<void> {
   try {
-    const response = await fetch(`${config.ollama.url}/api/show`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: SUMMARIZE_MODEL }),
-    });
+    const response = await fetchWithRetry(
+      `${config.ollama.url}/api/show`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: SUMMARIZE_MODEL }),
+      },
+      "ensureSummarizeModel",
+    );
 
     if (!response.ok) {
       console.log(`Pulling summarization model ${SUMMARIZE_MODEL}...`);
-      await fetch(`${config.ollama.url}/api/pull`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: SUMMARIZE_MODEL }),
-      });
+      await fetchWithRetry(
+        `${config.ollama.url}/api/pull`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: SUMMARIZE_MODEL }),
+        },
+        "pullSummarizeModel",
+      );
     }
   } catch (e) {
-    console.error('Failed to ensure summarization model:', e);
+    console.error("Failed to ensure summarization model:", e);
   }
 }

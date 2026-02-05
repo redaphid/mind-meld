@@ -50,6 +50,9 @@ export const config = {
   // Ollama
   ollama: {
     url: getEnv("OLLAMA_URL", "http://localhost:11434"),
+    timeoutMs: getEnvInt("OLLAMA_TIMEOUT_MS", 120000), // 2 minutes
+    maxRetries: getEnvInt("OLLAMA_MAX_RETRIES", 3),
+    retryDelayMs: getEnvInt("OLLAMA_RETRY_DELAY_MS", 5000), // 5 seconds between retries
   },
 
   // Embeddings
