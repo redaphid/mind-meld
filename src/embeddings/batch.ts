@@ -1,8 +1,13 @@
-import { config } from '../config.js';
-import { query, queries } from '../db/postgres.js';
-import { addEmbeddings, upsertEmbeddings, getEmbeddingMetadata, getCollection } from '../db/chroma.js';
-import { generateEmbeddings, ensureEmbeddingModel } from './ollama.js';
-import { summarizeConversation, ensureSummarizeModel } from './summarize.js';
+import { config } from "../config.js";
+import { query, queries } from "../db/postgres.js";
+import {
+  addEmbeddings,
+  upsertEmbeddings,
+  getEmbeddingMetadata,
+  getCollection,
+} from "../db/chroma.js";
+import { generateEmbeddings, ensureEmbeddingModel } from "./ollama.js";
+import { summarizeConversation, ensureSummarizeModel } from "./summarize.js";
 
 export interface BatchEmbeddingStats {
   processed: number;
@@ -21,16 +26,26 @@ interface MessageToEmbed {
   model: string | null;
 }
 
-// Mark a message as un-embeddable (Ollama bug workaround)
-export async function markUnembeddable(messageId: number): Promise<void> {
+// Mark a message as un-embeddable with explicit failure tracking
+export const markUnembeddable = async (
+  messageId: number,
+  reason: "noise" | "nan",
+  detail?: string,
+) => {
   await query(
-    `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed)
-     VALUES ($1, 'UNEMBEDDABLE', 'unembeddable-' || $2, 'none', 0, 0)
-     ON CONFLICT (message_id, chroma_collection) DO NOTHING`,
-    [messageId, messageId.toString()]
-  )
-  console.log(`  ⚠️  Marked message ${messageId} as un-embeddable`)
-}
+    `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model,
+       dimensions, content_chars_at_embed, failure_reason, failure_detail, retry_count, updated_at)
+     VALUES ($1, 'UNEMBEDDABLE', 'unembeddable-' || $2, 'none', 0, 0, $3::varchar, $4,
+       CASE WHEN $3::varchar = 'nan' THEN 1 ELSE 0 END, NOW())
+     ON CONFLICT (message_id, chroma_collection)
+     DO UPDATE SET
+       failure_reason = $3::varchar,
+       failure_detail = COALESCE($4, embeddings.failure_detail),
+       retry_count = CASE WHEN $3::varchar = 'nan' THEN embeddings.retry_count + 1 ELSE embeddings.retry_count END,
+       updated_at = NOW()`,
+    [messageId, messageId.toString(), reason, detail ?? null],
+  );
+};
 
 // Patterns that indicate tool output, boilerplate, or noise — not worth embedding
 const NOISE_PATTERNS = [
@@ -47,15 +62,24 @@ const NOISE_PATTERNS = [
   /^\s*(CREATE TABLE|COPY \d|DROP TABLE|ALTER TABLE|INSERT \d)/,
   /^\s*\d+ rows? affected/,
   /^\{"ok":false/,
-]
+];
 
-const isNoise = (text: string) =>
-  text.length < 50 || NOISE_PATTERNS.some(p => p.test(text))
+const classifyNoise = (text: string): string | null => {
+  if (text.length < 50) return `too-short:${text.length}`;
+  const matched = NOISE_PATTERNS.find((p) => p.test(text));
+  if (matched) return `pattern:${matched.source}`;
+  return null;
+};
+
+interface GetMessagesResult {
+  messages: MessageToEmbed[];
+  exhausted: boolean; // true when raw query returned fewer than overfetch (no more in DB)
+}
 
 // Get candidate messages for embedding - only those not yet embedded and not marked as un-embeddable
-async function getMessagesToEmbed(limit: number): Promise<MessageToEmbed[]> {
+async function getMessagesToEmbed(limit: number): Promise<GetMessagesResult> {
   // Fetch more than needed since we filter in JS — noise rate is ~10-15%
-  const overfetch = Math.ceil(limit * 1.3)
+  const overfetch = Math.ceil(limit * 1.3);
   const result = await query<MessageToEmbed>(
     `SELECT m.id, m.session_id, m.content_text, m.role, m.timestamp,
             p.path as project_path, src.name as source_name, m.model
@@ -64,7 +88,13 @@ async function getMessagesToEmbed(limit: number): Promise<MessageToEmbed[]> {
      JOIN projects p ON s.project_id = p.id
      JOIN sources src ON p.source_id = src.id
      LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'
-     LEFT JOIN embeddings skip ON skip.message_id = m.id AND skip.chroma_collection = 'UNEMBEDDABLE'
+     LEFT JOIN embeddings skip ON skip.message_id = m.id
+       AND skip.chroma_collection = 'UNEMBEDDABLE'
+       AND NOT (
+         skip.failure_reason = 'nan'
+         AND skip.retry_count < $2
+         AND skip.updated_at < NOW() - make_interval(days => $3)
+       )
      WHERE m.content_text IS NOT NULL
        AND LENGTH(m.content_text) > 10
        AND m.role != 'tool'
@@ -72,30 +102,34 @@ async function getMessagesToEmbed(limit: number): Promise<MessageToEmbed[]> {
        AND skip.id IS NULL
      ORDER BY m.id
      LIMIT $1`,
-    [overfetch]
+    [overfetch, config.healing.retryLimit, config.healing.cooldownDays],
   );
 
-  const kept: MessageToEmbed[] = []
-  const skippedIds: number[] = []
+  const kept: MessageToEmbed[] = [];
+  const skipped: Array<{ id: number; detail: string }> = [];
 
   for (const row of result.rows) {
-    if (isNoise(row.content_text)) {
-      skippedIds.push(row.id)
+    const noiseDetail = classifyNoise(row.content_text);
+    if (noiseDetail) {
+      skipped.push({ id: row.id, detail: noiseDetail });
     } else {
-      kept.push(row)
+      kept.push(row);
     }
   }
 
   // Mark noise as skipped so we don't re-evaluate it every batch
-  for (const id of skippedIds) {
-    await markUnembeddable(id)
+  for (const { id, detail } of skipped) {
+    await markUnembeddable(id, "noise", detail);
   }
 
-  if (skippedIds.length > 0) {
-    console.log(`Filtered ${skippedIds.length} noise messages`)
+  if (skipped.length > 0) {
+    console.log(`Filtered ${skipped.length} noise messages`);
   }
 
-  return kept.slice(0, limit)
+  return {
+    messages: kept.slice(0, limit),
+    exhausted: result.rows.length < overfetch,
+  };
 }
 
 // Generate embeddings for pending messages
@@ -107,6 +141,19 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
     errors: 0,
   };
 
+  // Log how many NaN-blocked messages are eligible for healing
+  const healable = await query<{ count: string }>(
+    `SELECT COUNT(*) as count FROM embeddings
+     WHERE chroma_collection = 'UNEMBEDDABLE' AND failure_reason = 'nan'
+       AND retry_count < $1 AND updated_at < NOW() - make_interval(days => $2)`,
+    [config.healing.retryLimit, config.healing.cooldownDays],
+  );
+  if (Number(healable.rows[0].count) > 0) {
+    console.log(
+      `${healable.rows[0].count} NaN-blocked messages eligible for retry`,
+    );
+  }
+
   // Ensure models are available
   await ensureEmbeddingModel();
   await ensureSummarizeModel();
@@ -117,15 +164,18 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
 
   while (hasMore) {
     // Query only returns messages without embeddings in Postgres
-    const messagesToEmbed = await getMessagesToEmbed(batchSize);
+    const { messages: messagesToEmbed, exhausted } =
+      await getMessagesToEmbed(batchSize);
 
     if (messagesToEmbed.length === 0) {
-      hasMore = false;
-      break;
+      if (exhausted) break; // truly nothing left
+      continue; // all noise — keep going, more messages at higher IDs
     }
 
     totalProcessed += messagesToEmbed.length;
-    console.log(`Batch: ${messagesToEmbed.length} messages need embedding (${totalProcessed} total)...`);
+    console.log(
+      `Batch: ${messagesToEmbed.length} messages need embedding (${totalProcessed} total)...`,
+    );
 
     try {
       // Prepare texts for embedding - summarize if too long for embedding context
@@ -154,9 +204,13 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
         }
       }
 
-      // Mark failed messages as un-embeddable
+      // Mark failed messages as un-embeddable (NaN from Ollama)
       for (const idx of failed) {
-        await markUnembeddable(messagesToEmbed[idx].id);
+        await markUnembeddable(
+          messagesToEmbed[idx].id,
+          "nan",
+          "all fallbacks exhausted",
+        );
         stats.skipped++;
       }
 
@@ -173,8 +227,8 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
             message_id: messagesToEmbed[s.index].id.toString(),
             role: messagesToEmbed[s.index].role,
             timestamp: messagesToEmbed[s.index].timestamp.getTime(),
-            model: messagesToEmbed[s.index].model ?? '',
-            has_tool_use: messagesToEmbed[s.index].role === 'tool',
+            model: messagesToEmbed[s.index].model ?? "",
+            has_tool_use: messagesToEmbed[s.index].role === "tool",
             token_count: messagesToEmbed[s.index].content_text.length,
           })),
         };
@@ -196,7 +250,7 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
               config.embeddings.model,
               config.embeddings.dimensions,
               messagesToEmbed[s.index].content_text.length,
-            ]
+            ],
           );
         }
 
@@ -208,7 +262,7 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
       }
       console.log(`Embedded ${stats.processed} messages total`);
     } catch (e) {
-      console.error('Batch embedding failed:', e);
+      console.error("Batch embedding failed:", e);
       stats.errors++;
     }
 
@@ -216,28 +270,54 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 
+  // Clean up orphaned UNEMBEDDABLE rows for messages that were successfully healed
+  const cleaned = await query(
+    `DELETE FROM embeddings
+     WHERE chroma_collection = 'UNEMBEDDABLE'
+       AND message_id IN (
+         SELECT message_id FROM embeddings WHERE chroma_collection = 'convo-messages'
+       )`,
+  );
+  if (cleaned.rowCount && cleaned.rowCount > 0) {
+    console.log(`Cleaned ${cleaned.rowCount} healed UNEMBEDDABLE rows`);
+  }
+
   return stats;
 }
 
 // Mark a session as processed so it exits the pending queue even if embedding failed
-const markSessionProcessed = async (sessionId: number, summary: string, contentChars: number) => {
+const markSessionProcessed = async (
+  sessionId: number,
+  summary: string,
+  contentChars: number,
+) => {
   await query(
     `UPDATE sessions SET summary = COALESCE(summary, $1), content_chars = $2 WHERE id = $3`,
-    [summary, contentChars, sessionId]
-  )
+    [summary, contentChars, sessionId],
+  );
   await query(
     `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed)
      SELECT MIN(m.id), $1, $2, $3, $4, $5
      FROM messages m WHERE m.session_id = $6
      ON CONFLICT (message_id, chroma_collection)
      DO UPDATE SET content_chars_at_embed = $5`,
-    [config.chroma.collections.sessions, `session-${sessionId}`, config.embeddings.model, config.embeddings.dimensions, contentChars, sessionId]
-  )
-}
+    [
+      config.chroma.collections.sessions,
+      `session-${sessionId}`,
+      config.embeddings.model,
+      config.embeddings.dimensions,
+      contentChars,
+      sessionId,
+    ],
+  );
+};
 
 // Update session-level embeddings with summarization for long conversations
 // Now also re-embeds sessions where content_chars has grown
-export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: number; sessionsReembedded: number }> {
+export async function updateAggregateEmbeddings(): Promise<{
+  sessionsUpdated: number;
+  sessionsReembedded: number;
+}> {
   // Ensure summarization model is available
   await ensureSummarizeModel();
 
@@ -273,7 +353,7 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
        )
      ORDER BY s.id
      LIMIT 100`,
-    [config.chroma.collections.sessions]
+    [config.chroma.collections.sessions],
   );
 
   if (sessions.rows.length === 0) {
@@ -292,13 +372,15 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
       // Also verify Chroma has the embedding with correct content_chars
       const chromaMetadata = await getEmbeddingMetadata(
         config.chroma.collections.sessions,
-        `session-${session.id}`
+        `session-${session.id}`,
       );
 
       // If Chroma already has this embedding with sufficient content_chars,
       // just sync the Postgres record and skip the expensive summarize/embed
       if (chromaMetadata) {
-        const chromaContentChars = chromaMetadata.content_chars as number | undefined;
+        const chromaContentChars = chromaMetadata.content_chars as
+          | number
+          | undefined;
         if (chromaContentChars && chromaContentChars >= session.content_chars) {
           // Record in Postgres so this session stops appearing in pending queries
           await query(
@@ -314,8 +396,8 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
               config.embeddings.dimensions,
               chromaContentChars,
               session.id,
-            ]
-          )
+            ],
+          );
           continue;
         }
       }
@@ -325,32 +407,42 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
         `SELECT content_text, role FROM messages
          WHERE session_id = $1 AND content_text IS NOT NULL AND LENGTH(content_text) > 0
          ORDER BY sequence_num`,
-        [session.id]
+        [session.id],
       );
 
       if (messages.rows.length === 0) {
-        await markSessionProcessed(session.id, 'No embeddable content', 0)
-        continue
+        await markSessionProcessed(session.id, "No embeddable content", 0);
+        continue;
       }
 
       // Format messages with role context
       const formattedMessages = messages.rows.map(
-        (m) => `[${m.role.toUpperCase()}]: ${m.content_text}`
-      )
+        (m) => `[${m.role.toUpperCase()}]: ${m.content_text}`,
+      );
 
       // Calculate actual content chars
-      const actualContentChars = formattedMessages.reduce((sum, m) => sum + m.length, 0)
+      const actualContentChars = formattedMessages.reduce(
+        (sum, m) => sum + m.length,
+        0,
+      );
 
       // Summarize if needed (handles long conversations automatically)
-      const textForEmbedding = await summarizeConversation(formattedMessages)
-      const wasSummarized = textForEmbedding.length < formattedMessages.join('').length
+      const textForEmbedding = await summarizeConversation(formattedMessages);
+      const wasSummarized =
+        textForEmbedding.length < formattedMessages.join("").length;
 
       // Generate embedding from summary or full text
-      const embeddings = await generateEmbeddings([textForEmbedding.slice(0, 8000)])
+      const embeddings = await generateEmbeddings([
+        textForEmbedding.slice(0, 8000),
+      ]);
 
       if (embeddings[0] === null) {
-        await markSessionProcessed(session.id, 'Embedding generation failed', actualContentChars)
-        continue
+        await markSessionProcessed(
+          session.id,
+          "Embedding generation failed",
+          actualContentChars,
+        );
+        continue;
       }
 
       // Upsert to Chroma sessions collection (update if exists)
@@ -363,7 +455,7 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
             source: session.source_name,
             project_path: session.project_path,
             session_id: session.external_id,
-            title: session.title ?? '',
+            title: session.title ?? "",
             started_at: session.started_at?.getTime() ?? Date.now(),
             message_count: session.message_count,
             total_tokens: session.total_tokens,
@@ -372,13 +464,13 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
             embedded_at: Date.now(),
           },
         ],
-      })
+      });
 
       // Store summary in Postgres for FTS (always update - summary improves over time)
       await query(
         `UPDATE sessions SET summary = $1, content_chars = $2 WHERE id = $3`,
-        [textForEmbedding, actualContentChars, session.id]
-      )
+        [textForEmbedding, actualContentChars, session.id],
+      );
 
       // Record/update in PostgreSQL with content_chars_at_embed
       // Use MIN(m.id) for deterministic message selection — using LIMIT 1 without ORDER BY
@@ -396,15 +488,19 @@ export async function updateAggregateEmbeddings(): Promise<{ sessionsUpdated: nu
           config.embeddings.dimensions,
           actualContentChars,
           session.id,
-        ]
+        ],
       );
 
       if (isReembed) {
         reembeddings++;
-        console.log(`Re-embedded session ${session.id} (${session.existing_content_chars} → ${actualContentChars} chars)`);
+        console.log(
+          `Re-embedded session ${session.id} (${session.existing_content_chars} → ${actualContentChars} chars)`,
+        );
       } else {
         newEmbeddings++;
-        console.log(`Embedded session ${session.id} (${session.message_count} messages, ${actualContentChars} chars)`);
+        console.log(
+          `Embedded session ${session.id} (${session.message_count} messages, ${actualContentChars} chars)`,
+        );
       }
     } catch (e) {
       console.error(`Failed to update session ${session.id} embedding:`, e);
