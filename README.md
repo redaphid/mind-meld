@@ -5,11 +5,9 @@ Search your AI conversations across Claude Code and Cursor with semantic + full-
 ## Quick Start
 
 ```bash
-# 1. Install Ollama
-brew install ollama
-ollama pull bge-m3 && ollama pull qwen3:4b
+# 1. Install Ollama (https://ollama.com/download)
 
-# 2. Start Mindmeld
+# 2. Start Mindmeld (models are pulled automatically)
 git clone https://github.com/redaphid/mind-meld.git
 cd mind-meld
 docker compose up -d
@@ -63,7 +61,7 @@ Mindmeld uses your local Ollama (not Docker) because Docker Ollama runs CPU-only
 
 ## Troubleshooting
 
-**404 errors on summarization:** `ollama pull qwen3:4b`
+**404 errors on summarization:** Models should auto-pull, but you can manually run `ollama pull granite3-dense:2b`
 
 **Connection refused to Ollama:** `ollama serve` or start Ollama.app
 

@@ -33,9 +33,6 @@ jobs:
           - dockerfile: Dockerfile.postgres
             image: postgres
             platforms: linux/amd64,linux/arm64
-          - dockerfile: Dockerfile.ollama
-            image: ollama
-            platforms: linux/amd64,linux/arm64
           - dockerfile: Dockerfile.sync
             image: sync
             platforms: linux/amd64,linux/arm64

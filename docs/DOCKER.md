@@ -7,15 +7,12 @@ Index your Claude Code and Cursor conversations for semantic search.
 **Ollama** must be installed and running on your machine. The Docker containers connect to your host Ollama for embeddings and summarization.
 
 ```bash
-# Install Ollama
-brew install ollama
-
-# Pull required models
-ollama pull bge-m3      # Embeddings (~1.2GB)
-ollama pull qwen3:4b    # Summarization (~2.5GB)
+# Install Ollama (https://ollama.com/download)
 
 # Verify Ollama is running
 curl http://localhost:11434/api/tags
+
+# Models (bge-m3, granite3-dense:2b) are pulled automatically on first sync.
 ```
 
 ## Quick Start
@@ -43,7 +40,7 @@ docker compose ps
 
 # MCP responding?
 curl http://localhost:3847/health
-# → {"status":"ok","name":"mindmeld","version":"0.1.0"}
+# → {"status":"ok","name":"mindmeld","version":"..."}
 
 # Sync progress
 docker logs mindmeld-sync --tail 20
@@ -51,13 +48,13 @@ docker logs mindmeld-sync --tail 20
 
 ## Using with Claude Code
 
-Add to `~/.claude/mcp_settings.json`:
+Add to `~/.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "mindmeld": {
-      "type": "streamableHttp",
+      "type": "http",
       "url": "http://localhost:3847/mcp"
     }
   }
@@ -83,6 +80,7 @@ Host Ollama uses Metal acceleration on macOS (or CUDA on Linux), making it 10-50
 | chroma | 8001 | Vector embeddings |
 | sync | - | Hourly conversation sync |
 | centroids | - | 7-hourly centroid computation |
+| warmup-filter | - | Periodic embedding warmup |
 | mcp | 3847 | MCP search API |
 
 ## What Gets Indexed
@@ -109,7 +107,7 @@ OLLAMA_URL=http://192.168.1.100:11434
 
 # Embedding model
 EMBEDDING_MODEL=bge-m3
-SUMMARIZE_MODEL=qwen3:4b
+SUMMARIZE_MODEL=granite3-dense:2b
 
 # Sync frequency
 SYNC_INTERVAL_SECONDS=3600       # 1 hour
@@ -139,9 +137,9 @@ docker compose up -d
 
 ### Sync shows 404 errors on summarization
 
-Ollama doesn't have the required model:
+Models should auto-pull, but you can manually pull if needed:
 ```bash
-ollama pull qwen3:4b
+ollama pull granite3-dense:2b
 ```
 
 ### Sync shows connection refused to Ollama
@@ -180,7 +178,7 @@ MCP_HTTP_PORT=3848
 Your Machine
 ├── Ollama (host)            → Embeddings + Summarization (Metal/CUDA accelerated)
 │   ├── bge-m3              → 1024-dim embeddings
-│   └── qwen3:4b            → Conversation summaries
+│   └── granite3-dense:2b            → Conversation summaries
 │
 └── Docker
     ├── postgres (5433)      → Metadata + full-text search

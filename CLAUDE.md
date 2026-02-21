@@ -9,11 +9,9 @@ Mindmeld syncs conversations from Claude Code and Cursor into a unified PostgreS
 **See [docs/DOCKER.md](docs/DOCKER.md) for full setup instructions.**
 
 ```bash
-# 1. Install Ollama with required models
-brew install ollama
-ollama pull bge-m3 && ollama pull qwen3:4b
+# 1. Install Ollama (https://ollama.com/download)
 
-# 2. Start services
+# 2. Start services (models are pulled automatically)
 docker compose up -d
 ```
 
@@ -82,7 +80,7 @@ pnpm run sync              # Full sync (incremental by default)
 pnpm run sync -- --full    # Force full re-sync
 pnpm run sync -- -s cursor # Sync only Cursor
 
-pnpm run embeddings        # Generate pending embeddings
+pnpm run sync:embeddings        # Generate pending embeddings
 pnpm run compute:centroids # Compute session/project centroids for weighted search
 pnpm run search "query"    # Search conversations
 pnpm run stats             # Show sync statistics
@@ -151,7 +149,7 @@ Advanced semantic search using session and project centroids (average embeddings
 **Setup:**
 ```bash
 # 1. Generate embeddings first
-pnpm run embeddings
+pnpm run sync:embeddings
 
 # 2. Compute centroids (session and project averages)
 pnpm run compute:centroids

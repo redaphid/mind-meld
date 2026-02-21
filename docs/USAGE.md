@@ -30,7 +30,7 @@ cp .env.example .env
 pnpm run sync
 
 # 5. Generate embeddings (can take time on first run)
-pnpm run embeddings
+pnpm run sync:embeddings
 
 # 6. Compute search centroids
 pnpm run compute:centroids
@@ -255,7 +255,7 @@ STORAGE:
 
 EMBEDDING:
 └─ Ollama (11434)          → Local embedding generation
-                             (granite3-dense:2b by default)
+                             (bge-m3 by default)
 
 ACCESS:
 ├─ MCP Server (stdio)      → Claude Code integration
@@ -268,7 +268,7 @@ ACCESS:
 |------------|-------|---------------------------|
 | PostgreSQL | 5433  | Avoid conflicts with 5432 |
 | ChromaDB   | 8001  | Avoid conflicts with 8000 |
-| HTTP MCP   | 3000  | Configurable via env var  |
+| HTTP MCP   | 3847  | Configurable via env var  |
 | Ollama     | 11434 | Standard (shared)         |
 
 ## Data Flow
@@ -302,7 +302,7 @@ pnpm run sync -- --full    # Force full re-sync
 pnpm run sync -- -s cursor # Sync only Cursor
 
 # Embeddings
-pnpm run embeddings        # Generate pending embeddings
+pnpm run sync:embeddings        # Generate pending embeddings
 pnpm run compute:centroids # Compute session/project centroids
 
 # Search
@@ -313,7 +313,7 @@ pnpm run stats             # Show statistics
 pnpm run db:reset          # Reset and rebuild schema
 
 # Development
-pnpm run dev               # MCP server (stdio mode)
+pnpm run dev               # MCP HTTP server (watch mode)
 pnpm run type-check        # TypeScript validation
 ```
 
@@ -337,7 +337,7 @@ OLLAMA_URL=http://host.docker.internal:11434
 SUMMARIZE_MODEL=granite3-dense:2b
 SYNC_INTERVAL_SECONDS=3600
 CENTROID_INTERVAL_SECONDS=25200
-MCP_HTTP_PORT=3000
+MCP_HTTP_PORT=3847
 
 # Cloudflare Tunnel (optional)
 CLOUDFLARE_TUNNEL_TOKEN=your-tunnel-token
@@ -440,7 +440,7 @@ curl http://localhost:11434/api/tags
 pnpm run stats
 
 # Restart embedding generation
-pnpm run embeddings
+pnpm run sync:embeddings
 ```
 
 ### Search returns no results
@@ -475,12 +475,12 @@ To use a different Ollama model:
 ollama pull nomic-embed-text
 
 # Update .env
-EMBED_MODEL=nomic-embed-text
+EMBEDDING_MODEL=nomic-embed-text
 
 # Rebuild embeddings
 pnpm run db:reset
 pnpm run sync
-pnpm run embeddings
+pnpm run sync:embeddings
 ```
 
 ## Security Considerations
