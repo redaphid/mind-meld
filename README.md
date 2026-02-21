@@ -45,7 +45,7 @@ docker logs mindmeld-sync --tail 20  # Sync progress
 ## Docs
 
 - **[Docker Setup](docs/DOCKER.md)** - Full setup, troubleshooting, configuration
-- **[CLAUDE.md](CLAUDE.md)** - Development guide, architecture, API reference
+- **[Usage Guide](docs/USAGE.md)** - Search examples, MCP tools reference
 
 ## Services
 

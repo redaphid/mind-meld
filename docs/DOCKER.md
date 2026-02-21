@@ -46,32 +46,6 @@ curl http://localhost:3847/health
 docker logs mindmeld-sync --tail 20
 ```
 
-## Using with Claude Code
-
-Add to `~/.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "mindmeld": {
-      "type": "http",
-      "url": "http://localhost:3847/mcp"
-    }
-  }
-}
-```
-
-Then search your conversation history:
-```
-What was I working on yesterday?
-```
-
-## Why Host Ollama?
-
-Docker Ollama runs on CPU only (no GPU passthrough on macOS). This makes summarization extremely slow - 5+ minutes per conversation, often timing out.
-
-Host Ollama uses Metal acceleration on macOS (or CUDA on Linux), making it 10-50x faster. Models also persist across restarts and are shared with other Ollama usage.
-
 ## Services
 
 | Service | Port | Purpose |
@@ -113,6 +87,53 @@ SUMMARIZE_MODEL=granite3-dense:2b
 SYNC_INTERVAL_SECONDS=3600       # 1 hour
 CENTROID_INTERVAL_SECONDS=25200  # 7 hours
 ```
+
+### Custom Embedding Models
+
+To use a different Ollama model:
+
+```bash
+# Pull model
+ollama pull nomic-embed-text
+
+# Update .env
+EMBEDDING_MODEL=nomic-embed-text
+
+# Rebuild embeddings
+pnpm run db:reset
+pnpm run sync
+pnpm run sync:embeddings
+```
+
+## Remote Database Setup
+
+Run Postgres and Chroma on a server while syncing from your laptop.
+
+**On remote machine:**
+```bash
+# Start only database services
+docker compose up -d postgres chroma
+
+# Note the machine's IP or hostname
+```
+
+**On local machine (where Claude Code/Cursor are installed):**
+```bash
+pnpm install
+cp .env.example .env
+
+# Edit .env to point to remote databases:
+# POSTGRES_HOST=192.168.1.100  # Your remote machine IP
+# CHROMA_HOST=192.168.1.100
+# OLLAMA_URL=http://localhost:11434  # Keep Ollama local for speed
+
+pnpm run sync
+```
+
+**Notes:**
+- Postgres and Chroma must be accessible from your machine (check firewalls)
+- Ollama should stay local for best embedding performance
+- Data persists on whichever machine runs Postgres/Chroma
 
 ## Common Operations
 
