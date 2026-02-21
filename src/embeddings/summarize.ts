@@ -1,6 +1,6 @@
 import { config } from "../config.js";
 
-const SUMMARIZE_MODEL = process.env.SUMMARIZE_MODEL ?? "granite3-dense:8b";
+export const SUMMARIZE_MODEL = process.env.SUMMARIZE_MODEL ?? "granite3-dense:8b";
 
 // Fetch with timeout and retry on transient failures
 const fetchWithRetry = async (

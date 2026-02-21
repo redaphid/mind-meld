@@ -2,10 +2,8 @@ import assert from 'node:assert'
 import { query } from '../db/postgres.js'
 import { querySimilar } from '../db/chroma.js'
 import { config } from '../config.js'
-import { Ollama } from 'ollama'
+import { getOllamaClient } from '../embeddings/ollama.js'
 import { subtractVectors, normalizeVector, addVectors, scaleVector } from '../utils/vector-math.js'
-
-const ollama = new Ollama({ host: config.ollama.url })
 
 const UNLIKE_DAMPENING = 0.2
 
@@ -54,7 +52,7 @@ const parseWeightedIds = (params: string[]): WeightedId[] =>
     .filter((item) => item.id.length > 0)
 
 const getQueryEmbedding = async (text: string) => {
-  const response = await ollama.embed({ model: config.embeddings.model, input: text })
+  const response = await getOllamaClient().embed({ model: config.embeddings.model, input: text })
   return response.embeddings[0]
 }
 

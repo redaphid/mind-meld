@@ -1,6 +1,8 @@
 import { syncClaudeCode, syncClaudeHistory } from './claude-code.js';
 import { syncCursor } from './cursor.js';
 import { generatePendingEmbeddings, updateAggregateEmbeddings } from '../embeddings/batch.js';
+import { ensureEmbeddingModel } from '../embeddings/ollama.js';
+import { ensureSummarizeModel } from '../embeddings/summarize.js';
 import { query } from '../db/postgres.js';
 
 export interface FullSyncResult {
@@ -34,6 +36,14 @@ export async function runFullSync(options?: {
   console.log('='.repeat(60));
   console.log(`Starting full sync at ${startTime.toISOString()}`);
   console.log('='.repeat(60));
+
+  // Pull models to disk if not present (does NOT load into VRAM)
+  try {
+    await Promise.all([ensureEmbeddingModel(), ensureSummarizeModel()]);
+    console.log('Models verified');
+  } catch (e) {
+    console.warn('Model pull check failed (non-fatal):', e);
+  }
 
   const result: FullSyncResult = {
     startTime,

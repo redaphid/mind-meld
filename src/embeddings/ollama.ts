@@ -1,8 +1,6 @@
 import { Ollama } from "ollama";
 import { config } from "../config.js";
-import { summarizeConversation } from "./summarize.js";
-
-const SUMMARIZE_MODEL = process.env.SUMMARIZE_MODEL ?? "granite3-dense:8b";
+import { summarizeConversation, SUMMARIZE_MODEL } from "./summarize.js";
 
 // Fetch wrapper with timeout and retry for transient failures
 const fetchWithRetry: typeof fetch = async (input, init) => {
