@@ -2,7 +2,7 @@
   "mcpServers": {
     "mindmeld": {
       "type": "http",
-      "url": "http://localhost:3000/mcp"
+      "url": "http://localhost:3847/mcp"
     }
   }
 }
