@@ -12,6 +12,8 @@ import { getSession, formatSession } from './session.js'
 import { getSyncStatus } from '../sync/orchestrator.js'
 import { getCollectionStats } from '../db/chroma.js'
 import { config } from '../config.js'
+import { ensureEmbeddingModel } from '../embeddings/ollama.js'
+import { ensureSummarizeModel } from '../embeddings/summarize.js'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
@@ -354,6 +356,11 @@ app.post('/api/ingest', async (req: any, res: any) => {
 
 const start = async () => {
   await runMigrations()
+
+  // Pull models to disk if not present (does NOT load into VRAM)
+  Promise.all([ensureEmbeddingModel(), ensureSummarizeModel()])
+    .then(() => console.log('[MCP HTTP] Models verified'))
+    .catch(e => console.warn('[MCP HTTP] Model pull check failed (non-fatal):', e.message))
 
   app.listen(MCP_PORT, () => {
     console.log(`[MCP HTTP] Mindmeld server listening on http://localhost:${MCP_PORT}`)
