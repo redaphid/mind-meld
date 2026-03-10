@@ -182,11 +182,25 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
       const MAX_EMBED_CHARS = 8000;
       const texts: string[] = [];
       const wasSummarized: boolean[] = [];
-      for (const m of messagesToEmbed) {
+      const skippedIndices = new Set<number>();
+      for (let i = 0; i < messagesToEmbed.length; i++) {
+        const m = messagesToEmbed[i];
         if (m.content_text.length > MAX_EMBED_CHARS) {
-          const summary = await summarizeConversation([m.content_text]);
-          texts.push(summary);
-          wasSummarized.push(true);
+          try {
+            const summary = await summarizeConversation([m.content_text]);
+            if (summary.length < 20) {
+              console.error(`Summarization produced only ${summary.length} chars for message ${m.id}, truncating instead`);
+              texts.push(m.content_text.slice(0, MAX_EMBED_CHARS));
+              wasSummarized.push(false);
+            } else {
+              texts.push(summary);
+              wasSummarized.push(true);
+            }
+          } catch (e) {
+            console.error(`Summarization failed for message ${m.id}, truncating instead:`, e);
+            texts.push(m.content_text.slice(0, MAX_EMBED_CHARS));
+            wasSummarized.push(false);
+          }
         } else {
           texts.push(m.content_text);
           wasSummarized.push(false);
