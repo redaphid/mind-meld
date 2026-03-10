@@ -54,6 +54,7 @@ const findSession = async (params: GetSessionParams) => {
   }
 
   if (params.searchTerm) {
+    const numericId = /^\d+$/.test(params.searchTerm) ? parseInt(params.searchTerm, 10) : null
     const result = await query<SessionMetadata>(
       `SELECT s.id, s.external_id, s.title, s.summary, p.name as project_name, p.path as project_path,
               src.name as source_name, s.started_at, s.ended_at, s.message_count,
@@ -61,11 +62,11 @@ const findSession = async (params: GetSessionParams) => {
        FROM sessions s
        JOIN projects p ON s.project_id = p.id
        JOIN sources src ON p.source_id = src.id
-       WHERE (s.external_id = $1 OR s.title ILIKE $2)
+       WHERE (s.id = $3 OR s.external_id = $1 OR s.title ILIKE $2)
          AND s.deleted_at IS NULL
        ORDER BY s.started_at DESC
        LIMIT 1`,
-      [params.searchTerm, `%${params.searchTerm}%`]
+      [params.searchTerm, `%${params.searchTerm}%`, numericId]
     )
     return result.rows[0] ?? null
   }
