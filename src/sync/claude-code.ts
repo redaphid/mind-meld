@@ -157,8 +157,8 @@ export async function syncClaudeCode(options?: {
     }
 
     try {
-      // Upsert project
-      const projectId = await queries.upsertProject(
+      // Upsert project with decoded path as initial guess
+      let projectId = await queries.upsertProject(
         source.id,
         projectDirName,
         decodedPath,
@@ -166,6 +166,7 @@ export async function syncClaudeCode(options?: {
       );
 
       stats.projectsProcessed++;
+      let correctedFromCwd = false;
 
       // Discover and process session files
       const sessionFiles = await discoverSessionFiles(projectPath);
@@ -194,6 +195,20 @@ export async function syncClaudeCode(options?: {
           if (!session || session.messages.length === 0) {
             stats.skipped++;
             continue;
+          }
+
+          // Correct project path from session cwd (decodeProjectPath is lossy with hyphens)
+          if (!correctedFromCwd && session.cwd) {
+            const cwdName = extractProjectName(session.cwd);
+            if (session.cwd !== decodedPath) {
+              projectId = await queries.upsertProject(
+                source.id,
+                projectDirName,
+                session.cwd,
+                cwdName
+              );
+            }
+            correctedFromCwd = true;
           }
 
           // Sync to database
