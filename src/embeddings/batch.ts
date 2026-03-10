@@ -181,13 +181,15 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
       // Prepare texts for embedding - summarize if too long for embedding context
       const MAX_EMBED_CHARS = 8000;
       const texts: string[] = [];
+      const wasSummarized: boolean[] = [];
       for (const m of messagesToEmbed) {
         if (m.content_text.length > MAX_EMBED_CHARS) {
-          // Summarize long messages to preserve semantic content
           const summary = await summarizeConversation([m.content_text]);
           texts.push(summary);
+          wasSummarized.push(true);
         } else {
           texts.push(m.content_text);
+          wasSummarized.push(false);
         }
       }
       const embeddings = await generateEmbeddings(texts);
@@ -238,11 +240,12 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
 
         // Upsert to PostgreSQL
         for (const s of successful) {
+          const summarizeModel = wasSummarized[s.index] ? config.embeddings.summarizeModel : null;
           await query(
-            `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed)
-             VALUES ($1, $2, $3, $4, $5, $6)
+            `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed, summarize_model)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (message_id, chroma_collection)
-             DO UPDATE SET content_chars_at_embed = $6, embedding_model = $4`,
+             DO UPDATE SET content_chars_at_embed = $6, embedding_model = $4, summarize_model = $7`,
             [
               messagesToEmbed[s.index].id,
               config.chroma.collections.messages,
@@ -250,6 +253,7 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
               config.embeddings.model,
               config.embeddings.dimensions,
               messagesToEmbed[s.index].content_text.length,
+              summarizeModel,
             ],
           );
         }

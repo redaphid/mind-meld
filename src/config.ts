@@ -60,6 +60,7 @@ export const config = {
     model: getEnv("EMBEDDING_MODEL", "bge-m3"),
     dimensions: getEnvInt("EMBEDDING_DIMENSIONS", 1024),
     batchSize: getEnvInt("EMBEDDING_BATCH_SIZE", 100),
+    summarizeModel: getEnv("SUMMARIZE_MODEL", "qwen3:4b-instruct"),
   },
 
   // Source paths
