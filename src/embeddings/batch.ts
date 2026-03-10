@@ -164,85 +164,35 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
   let hasMore = true;
   let totalProcessed = 0;
   const MAX_EMBED_CHARS = 8000;
-
-  // Phase 1: Blast through short messages that don't need summarization
-  console.log("Phase 1: Embedding short messages (no summarization needed)...");
-  let shortHasMore = true;
-  while (shortHasMore) {
-    const { messages: shortMessages, exhausted } =
-      await getMessagesToEmbed(batchSize, MAX_EMBED_CHARS);
-
-    if (shortMessages.length === 0) {
-      shortHasMore = false;
-      break;
-    }
-
-    totalProcessed += shortMessages.length;
-    console.log(`Short batch: ${shortMessages.length} messages (${totalProcessed} total)...`);
-
-    try {
-      const texts = shortMessages.map((m) => m.content_text);
-      const embeddings = await generateEmbeddings(texts);
-
-      const successful: Array<{ index: number; embedding: number[] }> = [];
-      const failed: number[] = [];
-      for (let i = 0; i < embeddings.length; i++) {
-        if (embeddings[i] === null) failed.push(i);
-        else successful.push({ index: i, embedding: embeddings[i]! });
-      }
-
-      for (const idx of failed) {
-        await markUnembeddable(shortMessages[idx].id, "nan", "all fallbacks exhausted");
-        stats.skipped++;
-      }
-
-      if (successful.length > 0) {
-        const chromaData = {
-          ids: successful.map((s) => `msg-${shortMessages[s.index].id}`),
-          embeddings: successful.map((s) => s.embedding),
-          documents: successful.map((s) => texts[s.index]),
-          metadatas: successful.map((s) => ({
-            source: shortMessages[s.index].source_name,
-            project_path: shortMessages[s.index].project_path,
-            session_id: shortMessages[s.index].session_id.toString(),
-            message_id: shortMessages[s.index].id.toString(),
-            role: shortMessages[s.index].role,
-            timestamp: shortMessages[s.index].timestamp.getTime(),
-            model: shortMessages[s.index].model ?? "",
-            has_tool_use: shortMessages[s.index].role === "tool",
-            token_count: shortMessages[s.index].content_text.length,
-          })),
-        };
-        await upsertEmbeddings(config.chroma.collections.messages, chromaData);
-
-        for (const s of successful) {
-          await query(
-            `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed, summarize_model)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (message_id, chroma_collection)
-             DO UPDATE SET content_chars_at_embed = $6, embedding_model = $4, summarize_model = $7`,
-            [shortMessages[s.index].id, config.chroma.collections.messages, `msg-${shortMessages[s.index].id}`, config.embeddings.model, config.embeddings.dimensions, shortMessages[s.index].content_text.length, null],
-          );
-        }
-        stats.processed += successful.length;
-      }
-      console.log(`Embedded ${stats.processed} messages total`);
-    } catch (e) {
-      console.error("Short batch embedding failed:", e);
-      stats.errors++;
-    }
-
-    if (exhausted) shortHasMore = false;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-
-  console.log(`Phase 1 complete: ${stats.processed} short messages embedded`);
-  console.log("Phase 2: Embedding long messages (with summarization)...");
+  let shortExhausted = false;
 
   while (hasMore) {
-    // Query only returns messages without embeddings in Postgres
-    const { messages: messagesToEmbed, exhausted } =
-      await getMessagesToEmbed(batchSize);
+    // Prioritize short messages (no summarization needed, ~100x faster)
+    // Re-check for short messages every iteration in case new ones were synced
+    let messagesToEmbed: MessageToEmbed[];
+    let exhausted: boolean;
+    let isShortBatch = false;
+
+    if (!shortExhausted) {
+      const shortResult = await getMessagesToEmbed(batchSize, MAX_EMBED_CHARS);
+      if (shortResult.messages.length > 0) {
+        messagesToEmbed = shortResult.messages;
+        exhausted = shortResult.exhausted;
+        isShortBatch = true;
+      } else {
+        shortExhausted = true;
+        console.log("Short messages exhausted, processing long messages...");
+        const result = await getMessagesToEmbed(batchSize);
+        messagesToEmbed = result.messages;
+        exhausted = result.exhausted;
+      }
+    } else {
+      // Periodically re-check for short messages (new ones may have been synced)
+      if (totalProcessed % 500 === 0) shortExhausted = false;
+      const result = await getMessagesToEmbed(batchSize);
+      messagesToEmbed = result.messages;
+      exhausted = result.exhausted;
+    }
 
     if (messagesToEmbed.length === 0) {
       if (exhausted) break; // truly nothing left
