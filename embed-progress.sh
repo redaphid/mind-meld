@@ -1,8 +1,8 @@
 #!/bin/zsh
 # Embedding backfill progress monitor
 
-SHORT_Q="SELECT COUNT(*) FROM messages m LEFT JOIN embeddings e ON m.id = e.message_id AND e.chroma_collection = 'convo-messages' LEFT JOIN embeddings skip ON skip.message_id = m.id AND skip.chroma_collection = 'UNEMBEDDABLE' WHERE e.id IS NULL AND skip.id IS NULL AND m.role != 'tool' AND m.content_text IS NOT NULL AND LENGTH(m.content_text) > 10 AND LENGTH(m.content_text) <= 8000;"
-LONG_Q="SELECT COUNT(*) FROM messages m LEFT JOIN embeddings e ON m.id = e.message_id AND e.chroma_collection = 'convo-messages' LEFT JOIN embeddings skip ON skip.message_id = m.id AND skip.chroma_collection = 'UNEMBEDDABLE' WHERE e.id IS NULL AND skip.id IS NULL AND m.role != 'tool' AND m.content_text IS NOT NULL AND LENGTH(m.content_text) > 8000;"
+SHORT_Q="SELECT COUNT(*) FROM messages m LEFT JOIN embeddings e ON m.id = e.message_id AND e.chroma_collection = 'convo-messages' LEFT JOIN embeddings skip ON skip.message_id = m.id AND skip.chroma_collection = 'UNEMBEDDABLE' WHERE e.id IS NULL AND skip.id IS NULL AND m.role <> 'tool' AND m.content_text IS NOT NULL AND LENGTH(m.content_text) > 10 AND LENGTH(m.content_text) <= 8000;"
+LONG_Q="SELECT COUNT(*) FROM messages m LEFT JOIN embeddings e ON m.id = e.message_id AND e.chroma_collection = 'convo-messages' LEFT JOIN embeddings skip ON skip.message_id = m.id AND skip.chroma_collection = 'UNEMBEDDABLE' WHERE e.id IS NULL AND skip.id IS NULL AND m.role <> 'tool' AND m.content_text IS NOT NULL AND LENGTH(m.content_text) > 8000;"
 DONE_Q="SELECT COUNT(*) FROM embeddings WHERE failure_reason IS NULL;"
 RATE_Q="SELECT COUNT(*) FROM embeddings WHERE created_at > NOW() - INTERVAL '1 hour';"
 LAST_Q="SELECT EXTRACT(EPOCH FROM NOW() - MAX(created_at))::int FROM embeddings;"
