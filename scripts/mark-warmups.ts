@@ -5,6 +5,7 @@
  * 1. Title contains "warmup" (case insensitive) = warmup
  * 2. Message count <= 3 = warmup (short sessions rarely have value)
  * 3. Empty sessions (0 messages) older than 1 day = warmup
+ * 4. Recurring sessions: same first line appears 20+ times = automated cron job
  *
  * Note: We tried semantic similarity (cosine distance from warmup centroid)
  * but it performed worse than these simple rules:
@@ -59,8 +60,28 @@ const run = async () => {
   )
   console.log(`Marked ${emptyResult.rowCount} empty sessions`)
 
-  // Step 4: Soft-delete all warmups
-  console.log('\nStep 4: Soft-deleting warmups...')
+  // Step 4: Mark recurring automated sessions (same first line 20+ times = cron job)
+  // Fingerprints the first line of the title — catches repeated prompt templates
+  // without being specific to any tool or machine.
+  console.log('\nStep 4: Marking recurring automated sessions...')
+  const recurringResult = await query(
+    `UPDATE sessions
+     SET is_warmup = true
+     WHERE is_warmup = false
+       AND deleted_at IS NULL
+       AND SPLIT_PART(title, E'\n', 1) IN (
+         SELECT SPLIT_PART(title, E'\n', 1)
+         FROM sessions
+         WHERE deleted_at IS NULL
+         GROUP BY SPLIT_PART(title, E'\n', 1)
+         HAVING COUNT(*) >= 20
+       )
+     RETURNING id`
+  )
+  console.log(`Marked ${recurringResult.rowCount} recurring automated sessions`)
+
+  // Step 5: Soft-delete all warmups
+  console.log('\nStep 5: Soft-deleting warmups...')
   const deleteResult = await query(
     `UPDATE sessions
      SET deleted_at = now()

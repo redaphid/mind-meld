@@ -202,6 +202,31 @@ server.tool(
   }
 )
 
+server.tool(
+  'reportUselessSession',
+  `Soft-delete a session that pollutes search results.
+
+Use this when search returns results that are clearly noise — automated runs,
+monitoring jobs, repeated boilerplate sessions, or anything that isn't a real
+interactive conversation. Soft-deletes the session so it stops appearing in search.
+
+Call this proactively whenever you get useless results back from search.`,
+  {
+    sessionId: z.number().describe('Session ID to soft-delete'),
+    reason: z.string().optional().describe('Why this session is useless (for logging)'),
+  },
+  async ({ sessionId, reason }) => {
+    const result = await query(
+      `UPDATE sessions SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id`,
+      [sessionId]
+    )
+    if (result.rowCount === 0)
+      return { content: [{ type: 'text', text: `Session ${sessionId} not found or already deleted.` }] }
+    if (reason) console.error(`Session ${sessionId} reported as useless: ${reason}`)
+    return { content: [{ type: 'text', text: `Session ${sessionId} soft-deleted.` }] }
+  }
+)
+
 const transport = new StdioServerTransport()
 await server.connect(transport)
 
