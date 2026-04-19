@@ -492,9 +492,10 @@ export async function updateAggregateEmbeddings(): Promise<{
       const wasSummarized =
         textForEmbedding.length < formattedMessages.join("").length;
 
-      // Generate embedding from summary or full text
+      // bge-m3 accepts 8192 tokens (~32k chars). Match the summary budget
+      // exactly so we don't silently drop the tail of a long summary.
       const embeddings = await generateEmbeddings([
-        textForEmbedding.slice(0, 8000),
+        textForEmbedding.slice(0, 32000),
       ]);
 
       if (embeddings[0] === null) {

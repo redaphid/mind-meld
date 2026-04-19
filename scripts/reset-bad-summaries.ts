@@ -22,6 +22,7 @@ const CATEGORIES = [
   "over_compressed",
   "loopy",
   "json_dump",
+  "code_dump",
 ] as const;
 type Category = (typeof CATEGORIES)[number];
 
@@ -59,7 +60,12 @@ const SIGNALS_SQL = `
                / NULLIF(array_length(string_to_array(s.summary, ' '), 1), 0)
              FROM unnest(string_to_array(s.summary, ' ')) AS w) < 0.05
       ) AS loopy,
-      (s.summary ~ '^\\s*\\{' AND s.summary ~ '"file_paths"\\s*:') AS json_dump
+      (s.summary ~ '^\\s*\\{' AND s.summary ~ '"file_paths"\\s*:') AS json_dump,
+      -- Summaries should describe, not reproduce. Two or more fenced code blocks
+      -- (>= 4 triple-backtick runs) means the model dumped code instead of summarizing.
+      (s.content_chars > 8000
+        AND (LENGTH(s.summary) - LENGTH(REPLACE(s.summary, REPEAT(CHR(96), 3), ''))) / 3 >= 4
+      ) AS code_dump
     FROM sessions s
     WHERE s.summary IS NOT NULL
   )
@@ -92,7 +98,8 @@ const main = async () => {
      UNION ALL SELECT 'too_short', COUNT(*)::text FROM scored WHERE too_short
      UNION ALL SELECT 'over_compressed', COUNT(*)::text FROM scored WHERE over_compressed
      UNION ALL SELECT 'loopy', COUNT(*)::text FROM scored WHERE loopy
-     UNION ALL SELECT 'json_dump', COUNT(*)::text FROM scored WHERE json_dump`,
+     UNION ALL SELECT 'json_dump', COUNT(*)::text FROM scored WHERE json_dump
+     UNION ALL SELECT 'code_dump', COUNT(*)::text FROM scored WHERE code_dump`,
   );
   console.table(breakdown.rows);
 

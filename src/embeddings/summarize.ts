@@ -42,8 +42,9 @@ const MAX_CHARS_BEFORE_SUMMARIZE = 8000;
 // qwen3:8b has 40k token context (~160k chars), use most of it
 // Leave room for prompt template and output
 const MAX_CHUNK_CHARS = 100000;
-// Allow up to 12000 tokens (~48k chars) for summary output
-const MAX_SUMMARY_TOKENS = 12000;
+// Cap at bge-m3's 8192-token context — summaries longer than this get truncated
+// at embed time, so generating more is wasted compute.
+const MAX_SUMMARY_TOKENS = 8192;
 const MIN_SUMMARY_CHARS = 500;
 
 interface OllamaGenerateResponse {
@@ -60,26 +61,29 @@ async function summarizeChunk(
     ? "This is one chunk of a larger conversation. Preserve all technical details for later combination."
     : "";
 
-  const prompt = `You are summarizing a coding conversation between a user and an AI assistant.
+  const prompt = `You are writing a dense technical summary of a coding conversation. The summary is used for semantic search, so it must describe what actually happened — not reproduce it.
+
 ${contextNote}
 
-Create a COMPREHENSIVE summary that preserves:
-- All file paths, function names, class names, and variable names mentioned
-- Error messages and their solutions
-- Key decisions and their rationale
-- Code changes made (what was added, modified, removed)
-- Technical patterns and approaches used
-- Commands executed and their outcomes
-- Any important context about the project structure
+Cover, as prose:
+- Goal: what the user was trying to accomplish
+- Actions: key things tried, in order
+- Findings: errors hit, root causes, what worked vs failed
+- Decisions: what was chosen and why
+- Outcome: final state, what's still open
+- Concrete nouns: file paths, function/class/variable names, commands, library names, error messages — inline, not in code blocks
 
-Be thorough - this summary will be used for semantic search to find relevant conversations later.
-Include specific technical details, not just high-level descriptions.
-Output only the summary, no preamble or meta-commentary.
+Hard rules:
+- NO code blocks, NO triple backticks, NO verbatim command output, NO JSON dumps.
+- Do NOT invent examples or sample data. Only describe things actually discussed.
+- Mention names inline (e.g. "fixed a regex bug in scripts/embed-progress.sh").
+- If the conversation is short or trivial, write a short summary — do not pad.
+- Output the summary only. No preamble, no headings like "Summary:".
 
 CONVERSATION:
 ${text}
 
-DETAILED SUMMARY:`;
+SUMMARY:`;
 
   const response = await fetchWithRetry(
     `${config.ollama.url}/api/generate`,
@@ -135,21 +139,19 @@ async function combineSummaries(summaries: string[]): Promise<string> {
       `Combining ${summaries.length} chunk summaries (${combined.length} chars)...`,
     );
 
-    const prompt = `You are combining multiple conversation summaries into a single comprehensive summary.
-Each section below is a summary from a different part of the same conversation.
+    const prompt = `Merge the following chunk summaries of a single coding conversation into one coherent summary.
 
-Merge them into ONE coherent summary that:
-- Preserves ALL technical details from each section
-- Maintains chronological flow where relevant
-- Removes redundancy while keeping all unique information
-- Keeps all file paths, function names, error messages, and code changes
+Rules:
+- Preserve concrete nouns from each chunk (file paths, function names, error messages, decisions) inline as prose.
+- Remove redundancy — if two chunks mention the same thing, say it once.
+- Maintain chronological flow where it matters.
+- NO code blocks, NO triple backticks, NO verbatim output, NO invented examples.
+- Output the merged summary only. No preamble, no "Combined Summary:" heading.
 
-Output only the combined summary, no preamble.
-
-SUMMARIES TO COMBINE:
+CHUNK SUMMARIES:
 ${combined}
 
-COMBINED SUMMARY:`;
+MERGED SUMMARY:`;
 
     let response: Response;
     try {
