@@ -216,16 +216,18 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
           try {
             const summary = await summarizeConversation([m.content_text]);
             if (summary.length < 20) {
-              console.error(`Summarization produced only ${summary.length} chars for message ${m.id}, truncating instead`);
-              texts.push(m.content_text.slice(0, MAX_EMBED_CHARS));
+              console.error(`Summarization produced only ${summary.length} chars for message ${m.id}, skipping for retry`);
+              skippedIndices.add(i);
+              texts.push("");
               wasSummarized.push(false);
-            } else {
-              texts.push(summary);
-              wasSummarized.push(true);
+              continue;
             }
+            texts.push(summary);
+            wasSummarized.push(true);
           } catch (e) {
-            console.error(`Summarization failed for message ${m.id}, truncating instead:`, e);
-            texts.push(m.content_text.slice(0, MAX_EMBED_CHARS));
+            console.error(`Summarization failed for message ${m.id}, skipping for retry:`, e);
+            skippedIndices.add(i);
+            texts.push("");
             wasSummarized.push(false);
           }
         } else {
@@ -233,18 +235,32 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
           wasSummarized.push(false);
         }
       }
-      const embeddings = await generateEmbeddings(texts);
+
+      const embedIndices: number[] = [];
+      const embedTexts: string[] = [];
+      for (let i = 0; i < texts.length; i++) {
+        if (skippedIndices.has(i)) continue;
+        embedIndices.push(i);
+        embedTexts.push(texts[i]);
+      }
+
+      if (skippedIndices.size > 0) {
+        console.log(`Skipped ${skippedIndices.size} messages pending summarization retry`);
+      }
+
+      const embeddings = embedTexts.length > 0 ? await generateEmbeddings(embedTexts) : [];
 
       // Separate successful embeddings from failed ones (null)
       const successful: Array<{ index: number; embedding: number[] }> = [];
       const failed: number[] = [];
 
-      for (let i = 0; i < embeddings.length; i++) {
-        if (embeddings[i] === null) {
-          failed.push(i);
-        } else {
-          successful.push({ index: i, embedding: embeddings[i]! });
+      for (let j = 0; j < embeddings.length; j++) {
+        const origIndex = embedIndices[j];
+        if (embeddings[j] === null) {
+          failed.push(origIndex);
+          continue;
         }
+        successful.push({ index: origIndex, embedding: embeddings[j]! });
       }
 
       // Mark failed messages as un-embeddable (NaN from Ollama)

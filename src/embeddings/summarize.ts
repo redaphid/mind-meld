@@ -42,8 +42,9 @@ const MAX_CHARS_BEFORE_SUMMARIZE = 8000;
 // qwen3:8b has 40k token context (~160k chars), use most of it
 // Leave room for prompt template and output
 const MAX_CHUNK_CHARS = 100000;
-// Allow up to 6000 tokens (~24k chars) for summary output
-const MAX_SUMMARY_TOKENS = 6000;
+// Allow up to 12000 tokens (~48k chars) for summary output
+const MAX_SUMMARY_TOKENS = 12000;
+const MIN_SUMMARY_CHARS = 500;
 
 interface OllamaGenerateResponse {
   response: string;
@@ -109,6 +110,12 @@ DETAILED SUMMARY:`;
   // Clean up qwen3's thinking tags if present
   let summary = result.response;
   summary = summary.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+
+  if (summary.length < MIN_SUMMARY_CHARS) {
+    throw new Error(
+      `Summary too short (${summary.length} chars < ${MIN_SUMMARY_CHARS}); likely prompt-injected or refused`,
+    );
+  }
 
   return summary;
 }
@@ -230,7 +237,7 @@ export async function summarizeConversation(
   if (combined.length <= MAX_CHUNK_CHARS) {
     console.log(`Summarizing conversation (${combined.length} chars)...`);
     const summary = await summarizeChunk(combined, false);
-    console.log(`Summarized to ${summary.length} chars`);
+    console.log(`Summarized to ${summary.length} chars:\n${summary}`);
     return summary;
   }
 
