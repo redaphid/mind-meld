@@ -4,13 +4,18 @@ import { query, closePool } from '../../src/db/postgres.js';
   console.log('=== Final Verification ===\n');
 
   // 1. Check total sessions and messages
+  // Use LEFT JOIN + IS NULL instead of NOT IN: the anti-join planner can use
+  // the embeddings(message_id) index, where NOT IN forces a sequential scan
+  // of the whole messages table and pins 3+ CPU cores for an hour.
   const totals = await query(`
     SELECT
       (SELECT COUNT(*) FROM sessions) as total_sessions,
       (SELECT COUNT(*) FROM sessions WHERE started_at IS NOT NULL) as sessions_with_timestamps,
       (SELECT COUNT(*) FROM messages) as total_messages,
       (SELECT COUNT(*) FROM embeddings) as total_embeddings,
-      (SELECT COUNT(*) FROM messages WHERE id NOT IN (SELECT message_id FROM embeddings WHERE message_id IS NOT NULL)) as messages_without_embeddings
+      (SELECT COUNT(*) FROM messages m
+         LEFT JOIN embeddings e ON e.message_id = m.id
+        WHERE e.id IS NULL) as messages_without_embeddings
   `);
 
   const stats = totals.rows[0];
