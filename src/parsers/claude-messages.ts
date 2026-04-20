@@ -106,11 +106,17 @@ export interface ParsedMessage {
 }
 
 // Extract text content from message
+const HOOK_INJECTION_PATTERN =
+  /<system-reminder>[\s\S]*?(?:UserPromptSubmit hook additional context|SessionStart hook additional context|ACCESSIBILITY ACCOMMODATION|task-notification)[\s\S]*?<\/system-reminder>/g;
+
+const stripHookInjections = (text: string): string =>
+  text.replace(HOOK_INJECTION_PATTERN, '').trim();
+
 function extractTextContent(message: ClaudeMessage): string {
   if (!message.message) return '';
 
   const content = message.message.content;
-  if (typeof content === 'string') return content;
+  if (typeof content === 'string') return stripHookInjections(content);
 
   if (Array.isArray(content)) {
     const parts: string[] = [];
@@ -118,7 +124,6 @@ function extractTextContent(message: ClaudeMessage): string {
       if (c.type === 'text' && c.text) {
         parts.push(c.text);
       } else if (c.type === 'tool_result') {
-        // Extract text from tool_result content
         const resultContent = (c as { content?: string | object[] }).content;
         if (typeof resultContent === 'string') {
           parts.push(resultContent);
@@ -131,7 +136,7 @@ function extractTextContent(message: ClaudeMessage): string {
         }
       }
     }
-    return parts.join('\n');
+    return stripHookInjections(parts.join('\n'));
   }
 
   return '';

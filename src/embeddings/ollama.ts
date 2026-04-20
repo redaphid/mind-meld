@@ -51,6 +51,7 @@ async function rephraseText(text: string): Promise<string> {
 
 ${text}`,
     stream: false,
+    keep_alive: "30m",
   });
 
   return response.response.trim();
@@ -72,6 +73,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   const response = await ollama.embed({
     model: config.embeddings.model,
     input: text,
+    keep_alive: "30m",
   });
 
   return response.embeddings[0];
@@ -109,6 +111,7 @@ export async function generateEmbeddings(
     response = await ollama.embed({
       model: config.embeddings.model,
       input: sanitizedTexts,
+      keep_alive: "30m",
     });
   } catch (error: any) {
     // Ollama bge-m3 has a known bug that produces NaN for certain texts
@@ -140,6 +143,7 @@ async function generateEmbeddingsWithFallback(
       const response = await ollama.embed({
         model: config.embeddings.model,
         input: [sanitizedTexts[i]],
+        keep_alive: "30m",
       });
 
       // Check for NaN
@@ -166,6 +170,7 @@ async function generateEmbeddingsWithFallback(
           const response = await ollama.embed({
             model: config.embeddings.model,
             input: [summarized],
+            keep_alive: "30m",
           });
 
           const hasNaN = response.embeddings[0].some(
@@ -196,6 +201,7 @@ async function generateEmbeddingsWithFallback(
               const response = await ollama.embed({
                 model: config.embeddings.model,
                 input: [rephrased],
+                keep_alive: "30m",
               });
 
               const hasNaN = response.embeddings[0].some(

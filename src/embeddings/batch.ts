@@ -7,7 +7,8 @@ import {
   getCollection,
 } from "../db/chroma.js";
 import { generateEmbeddings, ensureEmbeddingModel } from "./ollama.js";
-import { summarizeConversation, ensureSummarizeModel } from "./summarize.js";
+import { summarizeConversation, ensureSummarizeModel, combineSummaries } from "./summarize.js";
+import { persistSessionChunks, SessionMessage } from "./chunks.js";
 
 export interface BatchEmbeddingStats {
   processed: number;
@@ -62,6 +63,11 @@ const NOISE_PATTERNS = [
   /^\s*(CREATE TABLE|COPY \d|DROP TABLE|ALTER TABLE|INSERT \d)/,
   /^\s*\d+ rows? affected/,
   /^\{"ok":false/,
+  /^📬\s*\*?\*?Slack heads-up/m,
+  /^##\s*Slack Brief/m,
+  /^All clear! No urgent items/m,
+  /ACCESSIBILITY ACCOMMODATION.*screen reader/s,
+  /IMMEDIATE DISMISSAL.*dismissed-urls\.txt/s,
 ];
 
 const classifyNoise = (text: string): string | null => {
@@ -225,7 +231,18 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
             texts.push(summary);
             wasSummarized.push(true);
           } catch (e) {
-            console.error(`Summarization failed for message ${m.id}, skipping for retry:`, e);
+            const err = e instanceof Error ? e.message : String(e);
+            // "Summary too short" means qwen echoed an injection sentinel
+            // (NO_UPDATE, <done>...</done>, BLOCKED:...) instead of producing
+            // prose. These fail deterministically — retrying is pointless and
+            // wastes the qwen budget on every cycle.
+            if (err.startsWith("Summary too short")) {
+              console.error(`Injection-shaped message ${m.id}, marking unembeddable: ${err}`);
+              await markUnembeddable(m.id, "noise", `injection:${err.slice(0, 200)}`);
+              stats.skipped++;
+            } else {
+              console.error(`Summarization failed for message ${m.id}, skipping for retry:`, e);
+            }
             skippedIndices.add(i);
             texts.push("");
             wasSummarized.push(false);
@@ -464,8 +481,8 @@ export async function updateAggregateEmbeddings(): Promise<{
       }
 
       // Get ALL message content for this session
-      const messages = await query<{ content_text: string; role: string }>(
-        `SELECT content_text, role FROM messages
+      const messages = await query<SessionMessage>(
+        `SELECT id, content_text, role FROM messages
          WHERE session_id = $1 AND content_text IS NOT NULL AND LENGTH(content_text) > 0
          ORDER BY sequence_num`,
         [session.id],
@@ -487,8 +504,13 @@ export async function updateAggregateEmbeddings(): Promise<{
         0,
       );
 
-      // Summarize if needed (handles long conversations automatically)
-      const textForEmbedding = await summarizeConversation(formattedMessages);
+      // Persist chunk-level summaries for long sessions (returns null for
+      // short ones). When chunks are persisted we reuse their summaries to
+      // build the session-level summary, avoiding a second qwen pass.
+      const chunks = await persistSessionChunks(session.id, messages.rows);
+      const textForEmbedding = chunks
+        ? await combineSummaries(chunks.map((c) => c.summary))
+        : await summarizeConversation(formattedMessages);
       const wasSummarized =
         textForEmbedding.length < formattedMessages.join("").length;
 

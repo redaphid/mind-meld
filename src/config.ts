@@ -44,6 +44,7 @@ export const config = {
       messages: "convo-messages",
       sessions: "convo-sessions",
       projects: "convo-projects",
+      chunks: "convo-chunks",
     },
   },
 

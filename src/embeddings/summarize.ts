@@ -43,8 +43,15 @@ const MAX_CHARS_BEFORE_SUMMARIZE = 8000;
 // Leave room for prompt template and output
 const MAX_CHUNK_CHARS = 100000;
 // Cap at bge-m3's 8192-token context — summaries longer than this get truncated
-// at embed time, so generating more is wasted compute.
+// at embed time, so generating more is wasted compute. This is the budget for
+// the *final* combined summary that actually gets embedded.
 const MAX_SUMMARY_TOKENS = 8192;
+// Per-chunk summaries feed the combine step, not bge-m3. Typical output is
+// ~1k tokens; at 0.3 temperature qwen occasionally rambles to the cap, so we
+// bound it well below the combine budget to prevent runaway chunks from
+// inflating the combine input (seen in the wild: one chunk ballooned to 30k
+// chars / ~7600 tokens, deterministic rerun of same input produced 3075 chars).
+const MAX_CHUNK_SUMMARY_TOKENS = 3072;
 const MIN_SUMMARY_CHARS = 500;
 
 interface OllamaGenerateResponse {
@@ -53,7 +60,7 @@ interface OllamaGenerateResponse {
 }
 
 // Summarize a single chunk of text
-async function summarizeChunk(
+export async function summarizeChunk(
   text: string,
   isChunkOfMany: boolean,
 ): Promise<string> {
@@ -95,9 +102,10 @@ SUMMARY:`;
         prompt,
         stream: false,
         think: false,
+        keep_alive: "30m",
         options: {
           temperature: 0.3,
-          num_predict: MAX_SUMMARY_TOKENS,
+          num_predict: isChunkOfMany ? MAX_CHUNK_SUMMARY_TOKENS : MAX_SUMMARY_TOKENS,
         },
       }),
     },
@@ -116,6 +124,7 @@ SUMMARY:`;
   summary = summary.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
   if (summary.length < MIN_SUMMARY_CHARS) {
+    console.error(`Rejected summary (${summary.length} chars): ${JSON.stringify(summary)}`);
     throw new Error(
       `Summary too short (${summary.length} chars < ${MIN_SUMMARY_CHARS}); likely prompt-injected or refused`,
     );
@@ -125,7 +134,7 @@ SUMMARY:`;
 }
 
 // Combine multiple summaries into one
-async function combineSummaries(summaries: string[]): Promise<string> {
+export async function combineSummaries(summaries: string[]): Promise<string> {
   const combined = summaries.join("\n\n---\n\n");
 
   // If combined summaries are short enough, return as-is
@@ -165,6 +174,7 @@ MERGED SUMMARY:`;
             prompt,
             stream: false,
             think: false,
+            keep_alive: "30m",
             options: {
               temperature: 0.3,
               num_predict: MAX_SUMMARY_TOKENS,
@@ -198,32 +208,61 @@ MERGED SUMMARY:`;
   return summarizeConversation(summaries);
 }
 
-// Split messages into chunks that fit within context window
-function chunkMessages(messages: string[], maxChars: number): string[][] {
-  const chunks: string[][] = [];
-  let currentChunk: string[] = [];
+// Split messages into chunks that fit within context window.
+// Returns chunks with the original array indices they span — callers that need
+// to map chunks back to message IDs can use startIndex/endIndex.
+export interface MessageChunk {
+  messages: string[];
+  startIndex: number;
+  endIndex: number; // inclusive
+}
+
+export function chunkMessagesWithIndices(
+  messages: string[],
+  maxChars: number,
+): MessageChunk[] {
+  const chunks: MessageChunk[] = [];
+  let currentMessages: string[] = [];
+  let currentStart = 0;
   let currentLength = 0;
 
-  for (const message of messages) {
-    const messageLength = message.length + 10; // Account for separator
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    const messageLength = message.length + 10;
 
-    if (currentLength + messageLength > maxChars && currentChunk.length > 0) {
-      // Start a new chunk
-      chunks.push(currentChunk);
-      currentChunk = [message];
+    if (currentLength + messageLength > maxChars && currentMessages.length > 0) {
+      chunks.push({
+        messages: currentMessages,
+        startIndex: currentStart,
+        endIndex: i - 1,
+      });
+      currentMessages = [message];
+      currentStart = i;
       currentLength = messageLength;
-    } else {
-      currentChunk.push(message);
-      currentLength += messageLength;
+      continue;
     }
+
+    currentMessages.push(message);
+    currentLength += messageLength;
   }
 
-  if (currentChunk.length > 0) {
-    chunks.push(currentChunk);
+  if (currentMessages.length > 0) {
+    chunks.push({
+      messages: currentMessages,
+      startIndex: currentStart,
+      endIndex: messages.length - 1,
+    });
   }
 
   return chunks;
 }
+
+function chunkMessages(messages: string[], maxChars: number): string[][] {
+  return chunkMessagesWithIndices(messages, maxChars).map((c) => c.messages);
+}
+
+export const CHUNK_SIZE_CHARS = MAX_CHUNK_CHARS;
+export const SHORT_CONVERSATION_CHARS = MAX_CHARS_BEFORE_SUMMARIZE;
 
 export async function summarizeConversation(
   messages: string[],
