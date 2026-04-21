@@ -213,13 +213,11 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       resolveCentroids('projects', params.unlikeProject ? parseWeightedIds(params.unlikeProject) : []),
     ])
 
-  const results: SearchResult[] = []
-  const seenSessionIds = new Set<number>()
+  const bestBySession = new Map<number, SearchResult>()
 
-  const addResult = (r: SearchResult) => {
-    if (seenSessionIds.has(r.session_id)) return
-    seenSessionIds.add(r.session_id)
-    results.push(r)
+  const considerResult = (r: SearchResult) => {
+    const existing = bestBySession.get(r.session_id)
+    if (!existing || r.score > existing.score) bestBySession.set(r.session_id, r)
   }
 
   if (mode === 'semantic' || mode === 'hybrid') {
@@ -239,30 +237,29 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
           const session = await getSessionById(sessionId)
           if (!session) continue
           if (!passesFilters(session, params, sinceDate, projectIds)) continue
-          addResult(toResult(session, score, projectIds))
+          considerResult(toResult(session, score, projectIds))
         }
       }
 
       const messageHits = await querySimilar(config.chroma.collections.messages, embedding, limit * 3)
 
       if (messageHits.ids[0]) {
-        const bestBySession = new Map<number, number>()
+        const bestMessageScoreBySession = new Map<number, number>()
 
         for (let i = 0; i < messageHits.ids[0].length; i++) {
           const messageId = parseInt(messageHits.ids[0][i].replace('msg-', ''))
           const score = 1 - (messageHits.distances?.[0]?.[i] ?? 1)
           const session = await getSessionByMessageId(messageId)
           if (!session) continue
-          if (seenSessionIds.has(session.id)) continue
           if (!passesFilters(session, params, sinceDate, projectIds)) continue
 
-          const existing = bestBySession.get(session.id)
-          if (!existing || score > existing) bestBySession.set(session.id, score)
+          const existing = bestMessageScoreBySession.get(session.id)
+          if (!existing || score > existing) bestMessageScoreBySession.set(session.id, score)
         }
 
-        for (const [sessionId, score] of bestBySession) {
+        for (const [sessionId, score] of bestMessageScoreBySession) {
           const session = await getSessionById(sessionId)
-          if (session) addResult(toResult(session, score, projectIds))
+          if (session) considerResult(toResult(session, score, projectIds))
         }
       }
     } catch (e) {
@@ -272,7 +269,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
 
   if ((mode === 'text' || mode === 'hybrid') && params.query) {
     const conditions = [
-      `to_tsvector('english', m.content_text) @@ plainto_tsquery('english', $1)`,
+      `to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $1)`,
       `s.deleted_at IS NULL`,
       `($2::text IS NULL OR src.name = $2)`,
       `($3::timestamptz IS NULL OR s.started_at >= $3)`,
@@ -286,7 +283,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
     }
 
     if (params.excludeTerms) {
-      conditions.push(`NOT to_tsvector('english', m.content_text) @@ plainto_tsquery('english', $${nextParam++})`)
+      conditions.push(`NOT to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $${nextParam++})`)
       values.push(params.excludeTerms)
     }
 
@@ -308,7 +305,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       `WITH ranked_messages AS (
         SELECT DISTINCT ON (m.session_id)
           m.session_id,
-          ts_rank(to_tsvector('english', m.content_text), plainto_tsquery('english', $1)) as rank
+          ts_rank(to_tsvector('english', m.content_text), websearch_to_tsquery('english', $1)) as rank
         FROM messages m
         JOIN sessions s ON m.session_id = s.id
         JOIN projects p ON s.project_id = p.id
@@ -329,7 +326,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
     )
 
     for (const row of ftsResult.rows) {
-      addResult({
+      considerResult({
         session_id: row.session_id,
         project_name: row.project_name,
         project_path: row.project_path,
@@ -343,6 +340,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
     }
   }
 
+  const results = Array.from(bestBySession.values())
   results.sort((a, b) => b.score - a.score)
   return results.slice(0, limit)
 }
