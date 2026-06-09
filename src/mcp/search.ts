@@ -4,6 +4,9 @@ import { querySimilar } from '../db/chroma.js'
 import { config } from '../config.js'
 import { getOllamaClient } from '../embeddings/ollama.js'
 import { subtractVectors, normalizeVector, addVectors, scaleVector } from '../utils/vector-math.js'
+import { fuseRanks, type RankedList } from './rrf.js'
+
+const PROJECT_BOOST = 0.5
 
 const UNLIKE_DAMPENING = 0.2
 
@@ -159,7 +162,7 @@ const resolveCentroids = async (table: 'sessions' | 'projects', weightedIds: Wei
   return resolved
 }
 
-const toResult = (session: SessionRow, score: number, projectIds: number[]): SearchResult => ({
+const toResult = (session: SessionRow, score: number): SearchResult => ({
   session_id: session.id,
   project_name: session.project_name,
   project_path: session.project_path,
@@ -167,7 +170,7 @@ const toResult = (session: SessionRow, score: number, projectIds: number[]): Sea
   title: session.title ?? 'Untitled',
   summary: session.summary,
   timestamp: session.started_at,
-  score: score + (projectIds.includes(session.project_id) ? 0.5 : 0),
+  score,
   message_count: session.message_count,
 })
 
@@ -213,11 +216,13 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       resolveCentroids('projects', params.unlikeProject ? parseWeightedIds(params.unlikeProject) : []),
     ])
 
-  const bestBySession = new Map<number, SearchResult>()
+  const resultBySession = new Map<number, SearchResult>()
+  const inProject = new Set<number>()
+  const rankedLists: RankedList[] = []
 
-  const considerResult = (r: SearchResult) => {
-    const existing = bestBySession.get(r.session_id)
-    if (!existing || r.score > existing.score) bestBySession.set(r.session_id, r)
+  const record = (r: SearchResult, projectId: number) => {
+    if (projectIds.includes(projectId)) inProject.add(r.session_id)
+    if (!resultBySession.has(r.session_id)) resultBySession.set(r.session_id, r)
   }
 
   if (mode === 'semantic' || mode === 'hybrid') {
@@ -231,20 +236,26 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       const sessionHits = await querySimilar(config.chroma.collections.sessions, embedding, limit * 2)
 
       if (sessionHits.ids[0]) {
+        const sessionRanked: RankedList = []
         for (let i = 0; i < sessionHits.ids[0].length; i++) {
           const sessionId = parseInt(sessionHits.ids[0][i].replace('session-', ''))
           const score = 1 - (sessionHits.distances?.[0]?.[i] ?? 1)
           const session = await getSessionById(sessionId)
           if (!session) continue
           if (!passesFilters(session, params, sinceDate, projectIds)) continue
-          considerResult(toResult(session, score, projectIds))
+          record(toResult(session, score), session.project_id)
+          sessionRanked.push(session.id)
         }
+        rankedLists.push(sessionRanked)
       }
 
       const messageHits = await querySimilar(config.chroma.collections.messages, embedding, limit * 3)
 
       if (messageHits.ids[0]) {
-        const bestMessageScoreBySession = new Map<number, number>()
+        // Chroma returns messages in distance order; first appearance of a
+        // session is its best-ranked message, so dedup preserves rank order.
+        const messageRanked: RankedList = []
+        const seen = new Set<number>()
 
         for (let i = 0; i < messageHits.ids[0].length; i++) {
           const messageId = parseInt(messageHits.ids[0][i].replace('msg-', ''))
@@ -252,15 +263,12 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
           const session = await getSessionByMessageId(messageId)
           if (!session) continue
           if (!passesFilters(session, params, sinceDate, projectIds)) continue
-
-          const existing = bestMessageScoreBySession.get(session.id)
-          if (!existing || score > existing) bestMessageScoreBySession.set(session.id, score)
+          if (seen.has(session.id)) continue
+          seen.add(session.id)
+          record(toResult(session, score), session.project_id)
+          messageRanked.push(session.id)
         }
-
-        for (const [sessionId, score] of bestMessageScoreBySession) {
-          const session = await getSessionById(sessionId)
-          if (session) considerResult(toResult(session, score, projectIds))
-        }
+        rankedLists.push(messageRanked)
       }
     } catch (e) {
       console.error('Semantic search failed:', e)
@@ -325,22 +333,34 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       values
     )
 
+    // Rows already ordered by rank DESC — their order is the FTS ranking.
+    const ftsRanked: RankedList = []
     for (const row of ftsResult.rows) {
-      considerResult({
-        session_id: row.session_id,
-        project_name: row.project_name,
-        project_path: row.project_path,
-        source: row.source_name,
-        title: row.title ?? 'Untitled',
-        summary: row.summary,
-        timestamp: row.started_at,
-        score: row.rank + (projectIds.includes(row.project_id) ? 0.5 : 0),
-        message_count: row.message_count,
-      })
+      record(
+        {
+          session_id: row.session_id,
+          project_name: row.project_name,
+          project_path: row.project_path,
+          source: row.source_name,
+          title: row.title ?? 'Untitled',
+          summary: row.summary,
+          timestamp: row.started_at,
+          score: row.rank,
+          message_count: row.message_count,
+        },
+        row.project_id
+      )
+      ftsRanked.push(row.session_id)
     }
+    rankedLists.push(ftsRanked)
   }
 
-  const results = Array.from(bestBySession.values())
+  const fused = fuseRanks(rankedLists)
+
+  const results = Array.from(resultBySession.values()).map((r) => ({
+    ...r,
+    score: (fused.get(r.session_id) ?? 0) + (inProject.has(r.session_id) ? PROJECT_BOOST : 0),
+  }))
   results.sort((a, b) => b.score - a.score)
   return results.slice(0, limit)
 }
