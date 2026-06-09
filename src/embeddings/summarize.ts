@@ -39,14 +39,14 @@ const fetchWithRetry = async (
   throw new Error(`${label}: all ${maxRetries} attempts failed`);
 };
 const MAX_CHARS_BEFORE_SUMMARIZE = 8000;
-// Session chunking (convo-chunks middle tier). Balances granularity vs cost:
-// 100k timed out, but 30k exploded big sessions into 77-92 chunks (dozens of LLM
-// calls each). 60k is the middle — reliably summarizes at FA-on, ~1/3 the chunks.
-const MAX_CHUNK_CHARS = 60000;
-// Cap summarizer input to a size qwen3:8b handles reliably (large prefills time
-// out or degrade to garbage even with flash attention on). Tracks MAX_CHUNK_CHARS
-// so the two summarizer paths never disagree on what "too big" means.
-const MAX_SUMMARIZE_CHARS = MAX_CHUNK_CHARS;
+// The single ceiling on how much text qwen3:8b summarizes in one call. Governs
+// both session chunking (convo-chunks middle tier, via CHUNK_SIZE_CHARS) and the
+// summarizeConversation split, so the two paths can never disagree on "too big".
+// 100k timed out; 30k exploded big sessions into 77-92 chunks; 60k summarizes
+// reliably at FA-on with ~1/3 the chunk count. (If finer convo-chunks granularity
+// is ever wanted for retrieval, derive a smaller chunk size bounded BY this —
+// never above it.)
+const MAX_SUMMARIZER_INPUT_CHARS = 60000;
 // Cap at bge-m3's 8192-token context — summaries longer than this get truncated
 // at embed time, so generating more is wasted compute. This is the budget for
 // the *final* combined summary that actually gets embedded.
@@ -154,7 +154,7 @@ export async function combineSummaries(summaries: string[]): Promise<string> {
   }
 
   // If combined summaries fit in one chunk, summarize them
-  if (combined.length <= MAX_SUMMARIZE_CHARS) {
+  if (combined.length <= MAX_SUMMARIZER_INPUT_CHARS) {
     console.log(
       `Combining ${summaries.length} chunk summaries (${combined.length} chars)...`,
     );
@@ -272,7 +272,7 @@ function chunkMessages(messages: string[], maxChars: number): string[][] {
   return chunkMessagesWithIndices(messages, maxChars).map((c) => c.messages);
 }
 
-export const CHUNK_SIZE_CHARS = MAX_CHUNK_CHARS;
+export const CHUNK_SIZE_CHARS = MAX_SUMMARIZER_INPUT_CHARS;
 export const SHORT_CONVERSATION_CHARS = MAX_CHARS_BEFORE_SUMMARIZE;
 
 export async function summarizeConversation(
@@ -286,7 +286,7 @@ export async function summarizeConversation(
   }
 
   // If fits in one chunk, summarize directly
-  if (combined.length <= MAX_SUMMARIZE_CHARS) {
+  if (combined.length <= MAX_SUMMARIZER_INPUT_CHARS) {
     console.log(`Summarizing conversation (${combined.length} chars)...`);
     const summary = await summarizeChunk(combined, false);
     console.log(`Summarized to ${summary.length} chars:\n${summary}`);
@@ -294,7 +294,7 @@ export async function summarizeConversation(
   }
 
   // Too long for one chunk - split and summarize each chunk
-  const chunks = chunkMessages(messages, MAX_SUMMARIZE_CHARS);
+  const chunks = chunkMessages(messages, MAX_SUMMARIZER_INPUT_CHARS);
   console.log(
     `Conversation too long (${combined.length} chars), splitting into ${chunks.length} chunks...`,
   );
