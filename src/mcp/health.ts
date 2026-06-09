@@ -79,7 +79,7 @@ const gatherCoverage = async () => {
          WHERE summary IS NOT NULL AND deleted_at IS NULL AND title != 'Warmup'
        ) AS summarized,
        COUNT(*) FILTER (
-         WHERE summary IS NULL AND deleted_at IS NULL AND title != 'Warmup' AND message_count > 0
+         WHERE summary IS NULL AND deleted_at IS NULL AND is_automated = false AND title != 'Warmup' AND message_count > 0
        ) AS null_backlog
      FROM sessions`
   )
@@ -128,9 +128,12 @@ const gatherEmbeddingHealth = async () => {
         FROM embeddings WHERE chroma_collection = $2) AS messages_age_s,
        (SELECT COUNT(*)
         FROM messages m
+        JOIN sessions s ON m.session_id = s.id
         LEFT JOIN embeddings e ON m.id = e.message_id AND e.chroma_collection = $2
         LEFT JOIN embeddings skip ON skip.message_id = m.id AND skip.chroma_collection = 'UNEMBEDDABLE'
         WHERE e.id IS NULL AND skip.id IS NULL
+          AND s.deleted_at IS NULL
+          AND s.is_automated = false
           AND m.role <> 'tool'
           AND m.content_text IS NOT NULL
           AND LENGTH(m.content_text) > 10) AS pending_msgs`,
