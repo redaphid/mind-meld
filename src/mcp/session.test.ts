@@ -72,6 +72,49 @@ describe('getSessionDigest', () => {
     query.mockResolvedValueOnce(rows())
     expect(await getSessionDigest({ sessionId: 999 })).toBeNull()
   })
+
+  it('has no excerpt when a real summary is present (#4)', async () => {
+    query
+      .mockResolvedValueOnce(rows(metadataRow))
+      .mockResolvedValueOnce(
+        rows({
+          chunk_index: 0,
+          summary: 'opening',
+          start_message_id: 1,
+          end_message_id: 9,
+          content_chars: 100,
+        })
+      )
+    const digest = await getSessionDigest({ sessionId: 42 })
+    expect(digest!.summary).toBe('We fixed NaN embeddings.')
+    expect(digest!.excerpt).toBeNull()
+  })
+
+  it('falls back to the first chunk summary as an excerpt when summary is NULL (#4)', async () => {
+    query
+      .mockResolvedValueOnce(rows({ ...metadataRow, summary: null }))
+      .mockResolvedValueOnce(
+        rows({
+          chunk_index: 0,
+          summary: 'set OLLAMA_FLASH_ATTENTION false to stop NaN embeddings',
+          start_message_id: 1,
+          end_message_id: 9,
+          content_chars: 100,
+        })
+      )
+    const digest = await getSessionDigest({ sessionId: 42 })
+    expect(digest!.summary).toBeNull()
+    expect(digest!.excerpt).toBe('set OLLAMA_FLASH_ATTENTION false to stop NaN embeddings')
+  })
+
+  it('falls back to the first message when summary is NULL and there are no chunks (#4)', async () => {
+    query
+      .mockResolvedValueOnce(rows({ ...metadataRow, summary: null }))
+      .mockResolvedValueOnce(rows())
+      .mockResolvedValueOnce(rows({ content_text: 'first user message that hints at the topic' }))
+    const digest = await getSessionDigest({ sessionId: 42 })
+    expect(digest!.excerpt).toBe('first user message that hints at the topic')
+  })
 })
 
 describe('getMessages', () => {

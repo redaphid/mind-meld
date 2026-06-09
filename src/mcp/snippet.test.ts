@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildSnippet, SNIPPET_MAX_CHARS } from './snippet.js'
+import { buildSnippet, buildExcerpt, SNIPPET_MAX_CHARS, EXCERPT_MAX_CHARS } from './snippet.js'
 
 describe('buildSnippet', () => {
   it('prefers the ts_headline window when query terms highlighted a region', () => {
@@ -39,5 +39,29 @@ describe('buildSnippet', () => {
     expect(buildSnippet('no punctuation here just words', null)).toBe(
       'no punctuation here just words'
     )
+  })
+})
+
+describe('buildExcerpt (#4)', () => {
+  it('keeps a full multi-sentence lead, unlike the one-sentence snippet', () => {
+    const raw = 'We disabled flash attention. Then bge-m3 stopped producing NaN. Backfill resumed.'
+    expect(buildExcerpt(raw, null)).toBe(raw)
+  })
+
+  it('prefers a query-highlighted headline when present', () => {
+    expect(buildExcerpt('long raw text', 'highlighted region')).toBe('highlighted region')
+  })
+
+  it('caps at the excerpt max (longer than a snippet)', () => {
+    const long = 'x'.repeat(800)
+    const excerpt = buildExcerpt(long, null)!
+    expect(excerpt.length).toBe(EXCERPT_MAX_CHARS)
+    expect(EXCERPT_MAX_CHARS).toBeGreaterThan(SNIPPET_MAX_CHARS)
+    expect(excerpt.endsWith('…')).toBe(true)
+  })
+
+  it('returns null when there is nothing to excerpt', () => {
+    expect(buildExcerpt(null, null)).toBeNull()
+    expect(buildExcerpt('  ', '')).toBeNull()
   })
 })

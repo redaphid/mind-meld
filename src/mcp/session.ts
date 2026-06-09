@@ -1,5 +1,6 @@
 import assert from 'node:assert'
 import { query } from '../db/postgres.js'
+import { buildExcerpt } from './snippet.js'
 
 export type SessionMetadata = {
   id: number
@@ -30,6 +31,9 @@ export type SessionDigest = {
   session_id: number
   title: string | null
   summary: string | null
+  // Issue #4: present only when summary is NULL — a labeled raw-text fallback so
+  // the digest is never triage-blind. Yields to the real summary once it exists.
+  excerpt: string | null
   project: string
   message_count: number
   date: Date
@@ -101,10 +105,25 @@ const buildManifest = async (sessionId: number): Promise<ChunkManifestEntry[]> =
   }))
 }
 
-const toDigest = (s: SessionMetadata, chunks: ChunkManifestEntry[]): SessionDigest => ({
+const firstMessageText = async (sessionId: number): Promise<string | null> => {
+  const result = await query<{ content_text: string | null }>(
+    `SELECT content_text FROM messages
+     WHERE session_id = $1 AND content_text IS NOT NULL AND length(content_text) > 0
+     ORDER BY sequence_num ASC LIMIT 1`,
+    [sessionId]
+  )
+  return result.rows[0]?.content_text ?? null
+}
+
+const toDigest = (
+  s: SessionMetadata,
+  chunks: ChunkManifestEntry[],
+  excerpt: string | null
+): SessionDigest => ({
   session_id: s.id,
   title: s.title,
   summary: s.summary,
+  excerpt: s.summary ? null : excerpt,
   project: s.project_name,
   message_count: s.message_count,
   date: s.started_at,
@@ -126,7 +145,12 @@ export const getSessionDigest = async (
   if (!metadata) return null
 
   const chunks = await buildManifest(metadata.id)
-  return toDigest(metadata, chunks)
+  // Excerpt only matters when the summary is missing. Prefer the first chunk
+  // summary (always present for chunked sessions); else the first message.
+  const excerpt = metadata.summary
+    ? null
+    : buildExcerpt(chunks[0]?.summary ?? (await firstMessageText(metadata.id)))
+  return toDigest(metadata, chunks, excerpt)
 }
 
 export type GetMessagesParams = {
@@ -253,6 +277,12 @@ export const getChunk = async (
 
 export const formatDigest = (d: SessionDigest): string => {
   assert(d.date, `Missing date for session ${d.session_id}`)
+  const summaryBlock = d.summary
+    ? `## Summary\n\n${d.summary}`
+    : d.excerpt
+      ? `## Excerpt (no summary yet)\n\n"${d.excerpt}"`
+      : `## Summary\n\nNo summary available for this session.`
+
   const header = `# ${d.title ?? 'Untitled Session'}
 
 **Session ID:** ${d.session_id}
@@ -261,9 +291,7 @@ export const formatDigest = (d: SessionDigest): string => {
 **Messages:** ${d.message_count}
 **Tokens:** ${d.tokens}
 
-## Summary
-
-${d.summary ?? 'No summary available for this session.'}
+${summaryBlock}
 `
 
   if (d.chunks.length === 0)
