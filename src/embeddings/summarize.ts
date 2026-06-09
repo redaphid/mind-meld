@@ -43,10 +43,10 @@ const MAX_CHARS_BEFORE_SUMMARIZE = 8000;
 // 100k timed out, but 30k exploded big sessions into 77-92 chunks (dozens of LLM
 // calls each). 60k is the middle — reliably summarizes at FA-on, ~1/3 the chunks.
 const MAX_CHUNK_CHARS = 60000;
-// Cap summarizer input to a size qwen3:8b handles reliably — chunks of ~25k+
-// tokens time out on prefill or degrade to garbage output, even with flash
-// attention on. Same bound as MAX_CHUNK_CHARS.
-const MAX_SUMMARIZE_CHARS = 30000;
+// Cap summarizer input to a size qwen3:8b handles reliably (large prefills time
+// out or degrade to garbage even with flash attention on). Tracks MAX_CHUNK_CHARS
+// so the two summarizer paths never disagree on what "too big" means.
+const MAX_SUMMARIZE_CHARS = MAX_CHUNK_CHARS;
 // Cap at bge-m3's 8192-token context — summaries longer than this get truncated
 // at embed time, so generating more is wasted compute. This is the budget for
 // the *final* combined summary that actually gets embedded.
