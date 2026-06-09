@@ -400,12 +400,13 @@ export async function updateAggregateEmbeddings(): Promise<{
        AND s.title != 'Warmup'  -- Exclude noise sessions
        AND s.deleted_at IS NULL  -- Skip soft-deleted noise (filtered out of search anyway)
        AND s.is_automated = false  -- Skip automated sessions (filtered out of search anyway)
+       AND (s.ended_at IS NULL OR s.ended_at < NOW() - INTERVAL '30 minutes')  -- Defer still-active sessions: don't re-summarize a live conversation from scratch as it grows
        AND (
          e.id IS NULL  -- No embedding exists
          OR s.content_chars > COALESCE(e.content_chars_at_embed, 0)  -- Content has grown
          OR COALESCE(s.content_chars, 0) = 0  -- content_chars not calculated yet
        )
-     ORDER BY s.id
+     ORDER BY COALESCE(s.content_chars, 0) ASC  -- Smallest first: drain the bulk quickly; the few giant sessions go last instead of blocking all progress
      LIMIT 100`,
     [config.chroma.collections.sessions],
   );
