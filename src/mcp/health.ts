@@ -76,7 +76,7 @@ const gatherCoverage = async () => {
     `SELECT
        COUNT(*) AS total,
        COUNT(*) FILTER (
-         WHERE summary IS NOT NULL AND deleted_at IS NULL AND title != 'Warmup'
+         WHERE summary IS NOT NULL AND deleted_at IS NULL AND is_automated = false AND title != 'Warmup'
        ) AS summarized,
        COUNT(*) FILTER (
          WHERE summary IS NULL AND deleted_at IS NULL AND is_automated = false AND title != 'Warmup' AND message_count > 0
