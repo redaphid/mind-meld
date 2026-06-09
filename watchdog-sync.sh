@@ -17,9 +17,11 @@ PENDING=$(psql_q "$PENDING_Q")
 
 [[ -z "$LAST_AGO" || -z "$PENDING" ]] && exit 0
 [[ "$PENDING" -eq 0 ]] && exit 0
-[[ "$LAST_AGO" -lt 1200 ]] && exit 0
+[[ "$LAST_AGO" -lt 2400 ]] && exit 0
 
-# Stale (>20 min) with pending work — check deps before restarting
+# Stale (>40 min) with pending work — check deps before restarting
+# Threshold covers a slow multi-chunk summarization that writes no embedding
+# until the whole conversation summary lands.
 curl -sf http://localhost:11434/api/version > /dev/null 2>&1 || exit 0
 docker exec mindmeld-postgres pg_isready -U mindmeld -d conversations > /dev/null 2>&1 || exit 0
 

@@ -99,6 +99,11 @@ export const persistSessionChunks = async (
       `INSERT INTO session_chunks
          (session_id, chunk_index, start_message_id, end_message_id, summary, content_chars)
        VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (session_id, chunk_index) DO UPDATE SET
+         start_message_id = EXCLUDED.start_message_id,
+         end_message_id = EXCLUDED.end_message_id,
+         summary = EXCLUDED.summary,
+         content_chars = EXCLUDED.content_chars
        RETURNING id`,
       [sessionId, i, startMessageId, endMessageId, summary, chunkText.length],
     );
