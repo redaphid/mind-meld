@@ -27,6 +27,7 @@ export type SearchParams = {
   unlikeSession?: string[]
   likeProject?: string[]
   unlikeProject?: string[]
+  includeAutomated?: boolean
 }
 
 export type SearchResult = {
@@ -115,6 +116,9 @@ type SessionRow = {
   project_id: number
 }
 
+// Automated sessions are excluded unless explicitly opted in via includeAutomated.
+const AUTOMATED_FILTER = `($2::boolean OR s.is_automated = false)`
+
 const SESSION_QUERY = `
   SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
          src.name as source_name, s.started_at, s.message_count, p.id as project_id
@@ -123,12 +127,15 @@ const SESSION_QUERY = `
   JOIN sources src ON p.source_id = src.id
   WHERE s.deleted_at IS NULL`
 
-const getSessionById = async (sessionId: number) => {
-  const result = await query<SessionRow>(`${SESSION_QUERY} AND s.id = $1`, [sessionId])
+const getSessionById = async (sessionId: number, includeAutomated: boolean) => {
+  const result = await query<SessionRow>(
+    `${SESSION_QUERY} AND ${AUTOMATED_FILTER} AND s.id = $1`,
+    [sessionId, includeAutomated]
+  )
   return result.rows[0] ?? null
 }
 
-const getSessionByMessageId = async (messageId: number) => {
+const getSessionByMessageId = async (messageId: number, includeAutomated: boolean) => {
   const result = await query<SessionRow>(
     `SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
             src.name as source_name, s.started_at, s.message_count, p.id as project_id
@@ -136,8 +143,8 @@ const getSessionByMessageId = async (messageId: number) => {
      JOIN sessions s ON m.session_id = s.id
      JOIN projects p ON s.project_id = p.id
      JOIN sources src ON p.source_id = src.id
-     WHERE m.id = $1 AND s.deleted_at IS NULL`,
-    [messageId]
+     WHERE m.id = $1 AND s.deleted_at IS NULL AND ${AUTOMATED_FILTER}`,
+    [messageId, includeAutomated]
   )
   return result.rows[0] ?? null
 }
@@ -200,6 +207,7 @@ const parseSinceDate = (since?: string) => {
 export const search = async (params: SearchParams): Promise<SearchResult[]> => {
   const limit = params.limit ?? 20
   const mode = params.mode ?? 'hybrid'
+  const includeAutomated = params.includeAutomated ?? false
 
   if (!params.query && !params.likeSession && !params.likeProject && !params.unlikeSession && !params.unlikeProject)
     throw new Error('Must provide either query or centroid parameters (likeSession, likeProject, etc.)')
@@ -240,7 +248,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         for (let i = 0; i < sessionHits.ids[0].length; i++) {
           const sessionId = parseInt(sessionHits.ids[0][i].replace('session-', ''))
           const score = 1 - (sessionHits.distances?.[0]?.[i] ?? 1)
-          const session = await getSessionById(sessionId)
+          const session = await getSessionById(sessionId, includeAutomated)
           if (!session) continue
           if (!passesFilters(session, params, sinceDate, projectIds)) continue
           record(toResult(session, score), session.project_id)
@@ -260,7 +268,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         for (let i = 0; i < messageHits.ids[0].length; i++) {
           const messageId = parseInt(messageHits.ids[0][i].replace('msg-', ''))
           const score = 1 - (messageHits.distances?.[0]?.[i] ?? 1)
-          const session = await getSessionByMessageId(messageId)
+          const session = await getSessionByMessageId(messageId, includeAutomated)
           if (!session) continue
           if (!passesFilters(session, params, sinceDate, projectIds)) continue
           if (seen.has(session.id)) continue
@@ -281,9 +289,10 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       `s.deleted_at IS NULL`,
       `($2::text IS NULL OR src.name = $2)`,
       `($3::timestamptz IS NULL OR s.started_at >= $3)`,
+      `($4::boolean OR s.is_automated = false)`,
     ]
-    const values: unknown[] = [params.query, params.source ?? null, sinceDate]
-    let nextParam = 4
+    const values: unknown[] = [params.query, params.source ?? null, sinceDate, includeAutomated]
+    let nextParam = 5
 
     if (params.projectOnly && projectIds.length > 0) {
       conditions.push(`s.project_id = ANY($${nextParam++}::int[])`)

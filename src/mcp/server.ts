@@ -53,6 +53,7 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
     unlikeSession: z.array(z.string()).optional().describe('Suppress results similar to these session IDs'),
     likeProject: z.array(z.string()).optional().describe('Boost results matching these project IDs'),
     unlikeProject: z.array(z.string()).optional().describe('Suppress results matching these project IDs'),
+    includeAutomated: z.boolean().optional().describe('Include automated, non-interactive sessions (Slack monitoring, curiosity curation, MCP health checks, huddle transcripts). Excluded by default.'),
   },
   async (params) => {
     const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
