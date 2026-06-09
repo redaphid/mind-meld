@@ -39,9 +39,14 @@ const fetchWithRetry = async (
   throw new Error(`${label}: all ${maxRetries} attempts failed`);
 };
 const MAX_CHARS_BEFORE_SUMMARIZE = 8000;
-// qwen3:8b has 40k token context (~160k chars), use most of it
-// Leave room for prompt template and output
-const MAX_CHUNK_CHARS = 100000;
+// Session chunking (convo-chunks middle tier). Capped at a size qwen3:8b
+// reliably summarizes — 100k-char chunks (~25k tokens) timed out or emitted
+// garbage; smaller chunks summarize fast and never hit the timeout-retry path.
+const MAX_CHUNK_CHARS = 30000;
+// Cap summarizer input to a size qwen3:8b handles reliably — chunks of ~25k+
+// tokens time out on prefill or degrade to garbage output, even with flash
+// attention on. Same bound as MAX_CHUNK_CHARS.
+const MAX_SUMMARIZE_CHARS = 30000;
 // Cap at bge-m3's 8192-token context — summaries longer than this get truncated
 // at embed time, so generating more is wasted compute. This is the budget for
 // the *final* combined summary that actually gets embedded.
@@ -52,7 +57,10 @@ const MAX_SUMMARY_TOKENS = 8192;
 // inflating the combine input (seen in the wild: one chunk ballooned to 30k
 // chars / ~7600 tokens, deterministic rerun of same input produced 3075 chars).
 const MAX_CHUNK_SUMMARY_TOKENS = 3072;
-const MIN_SUMMARY_CHARS = 500;
+// Floor for the FINAL summary only (chunk summaries are kept regardless — see
+// summarizeChunk) — rejects refusals / near-empty garbage ("<done>", "The"),
+// not genuinely terse but real summaries.
+const MIN_SUMMARY_CHARS = 100;
 
 interface OllamaGenerateResponse {
   response: string;
@@ -123,7 +131,10 @@ SUMMARY:`;
   let summary = result.response;
   summary = summary.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
-  if (summary.length < MIN_SUMMARY_CHARS) {
+  // A mid-transcript chunk summary is intermediate — keep whatever the model
+  // produced rather than throwing away the chunk. Only the final single-pass
+  // summary enforces the floor, to keep refusals/garbage out of session search.
+  if (!isChunkOfMany && summary.length < MIN_SUMMARY_CHARS) {
     console.error(`Rejected summary (${summary.length} chars): ${JSON.stringify(summary)}`);
     throw new Error(
       `Summary too short (${summary.length} chars < ${MIN_SUMMARY_CHARS}); likely prompt-injected or refused`,
@@ -143,7 +154,7 @@ export async function combineSummaries(summaries: string[]): Promise<string> {
   }
 
   // If combined summaries fit in one chunk, summarize them
-  if (combined.length <= MAX_CHUNK_CHARS) {
+  if (combined.length <= MAX_SUMMARIZE_CHARS) {
     console.log(
       `Combining ${summaries.length} chunk summaries (${combined.length} chars)...`,
     );
@@ -275,7 +286,7 @@ export async function summarizeConversation(
   }
 
   // If fits in one chunk, summarize directly
-  if (combined.length <= MAX_CHUNK_CHARS) {
+  if (combined.length <= MAX_SUMMARIZE_CHARS) {
     console.log(`Summarizing conversation (${combined.length} chars)...`);
     const summary = await summarizeChunk(combined, false);
     console.log(`Summarized to ${summary.length} chars:\n${summary}`);
@@ -283,7 +294,7 @@ export async function summarizeConversation(
   }
 
   // Too long for one chunk - split and summarize each chunk
-  const chunks = chunkMessages(messages, MAX_CHUNK_CHARS);
+  const chunks = chunkMessages(messages, MAX_SUMMARIZE_CHARS);
   console.log(
     `Conversation too long (${combined.length} chars), splitting into ${chunks.length} chunks...`,
   );

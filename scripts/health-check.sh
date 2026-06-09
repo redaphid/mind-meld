@@ -45,6 +45,25 @@ if [[ -n "$CONTAINER_UPTIME" ]] && [[ "$RECENT_EMBEDDINGS" -lt 50 ]]; then
     fi
 fi
 
+# Check for summary-generation stall — the failure mode that silently dropped
+# session summaries for months (summarizer timeouts left summary NULL while message
+# embeddings kept flowing, so the embedding check above stayed green).
+RECENT_SUMMARIES=$(docker exec $POSTGRES_CONTAINER psql -U mindmeld -d conversations -t -c "
+SELECT COUNT(*) FROM embeddings WHERE chroma_collection = 'convo-sessions' AND created_at > NOW() - INTERVAL '2 hours'
+" 2>/dev/null | tr -d ' ')
+
+if [[ -n "$CONTAINER_UPTIME" ]] && [[ "$RECENT_SUMMARIES" -lt 10 ]]; then
+    MISSING_SUMMARIES=$(docker exec $POSTGRES_CONTAINER psql -U mindmeld -d conversations -t -c "
+    SELECT COUNT(*) FROM sessions
+    WHERE summary IS NULL AND message_count > 0 AND title != 'Warmup'
+    " 2>/dev/null | tr -d ' ')
+
+    if [[ "$MISSING_SUMMARIES" -gt 500 ]]; then
+        osascript -e "display notification \"Summaries stalled! $MISSING_SUMMARIES sessions missing summaries, only $RECENT_SUMMARIES generated in 2h\" with title \"Mindmeld Alert\" sound name \"Basso\""
+        exit 1
+    fi
+fi
+
 # Check for errors in recent logs
 if docker logs --since 10m $CONTAINER 2>&1 | grep -qi "error\|failed\|exception"; then
     ERROR_MSG=$(docker logs --since 10m $CONTAINER 2>&1 | grep -i "error\|failed\|exception" | tail -1 | cut -c1-100)

@@ -105,6 +105,7 @@ async function getMessagesToEmbed(limit: number, maxChars?: number): Promise<Get
      WHERE m.content_text IS NOT NULL
        AND LENGTH(m.content_text) > 10
        AND m.role != 'tool'
+       AND s.deleted_at IS NULL
        AND e.id IS NULL
        AND skip.id IS NULL
        ${charFilter}
@@ -424,6 +425,7 @@ export async function updateAggregateEmbeddings(): Promise<{
      LEFT JOIN embeddings e ON e.chroma_collection = $1 AND e.chroma_id = 'session-' || s.id::text
      WHERE s.message_count > 0
        AND s.title != 'Warmup'  -- Exclude noise sessions
+       AND s.deleted_at IS NULL  -- Skip soft-deleted noise (filtered out of search anyway)
        AND (
          e.id IS NULL  -- No embedding exists
          OR s.content_chars > COALESCE(e.content_chars_at_embed, 0)  -- Content has grown
@@ -445,6 +447,7 @@ export async function updateAggregateEmbeddings(): Promise<{
 
   for (const session of sessions.rows) {
     const isReembed = session.existing_content_chars !== null;
+    let actualContentChars = 0;
 
     try {
       // Also verify Chroma has the embedding with correct content_chars
@@ -499,7 +502,7 @@ export async function updateAggregateEmbeddings(): Promise<{
       );
 
       // Calculate actual content chars
-      const actualContentChars = formattedMessages.reduce(
+      actualContentChars = formattedMessages.reduce(
         (sum, m) => sum + m.length,
         0,
       );
@@ -587,6 +590,20 @@ export async function updateAggregateEmbeddings(): Promise<{
         );
       }
     } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // qwen refused (NO_UPDATE / short answer). Don't retry forever — mark
+      // processed so the session leaves the pending queue.
+      if (msg.startsWith("Summary too short")) {
+        console.warn(
+          `Session ${session.id} summary refused; marking processed: ${msg}`,
+        );
+        await markSessionProcessed(
+          session.id,
+          `[unsummarizable] ${msg.slice(0, 200)}`,
+          actualContentChars,
+        );
+        continue;
+      }
       console.error(`Failed to update session ${session.id} embedding:`, e);
     }
   }

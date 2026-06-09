@@ -86,7 +86,9 @@ export const persistSessionChunks = async (
         `Summarizing chunk ${i + 1}/${chunks.length} for session ${sessionId} (${chunkText.length} chars, messages ${startMessageId}..${endMessageId})...`,
       );
       summary = await summarizeChunk(chunkText, true);
-      console.log(`Chunk ${i + 1} → ${summary.length} chars`);
+      console.log(
+        `Chunk ${i + 1}/${chunks.length} (${summary.length} chars): ${summary.replace(/\s+/g, " ").slice(0, 200)}`,
+      );
     } catch (e) {
       console.error(
         `persistSessionChunks: chunk ${i + 1}/${chunks.length} failed for session ${sessionId}:`,
@@ -99,6 +101,11 @@ export const persistSessionChunks = async (
       `INSERT INTO session_chunks
          (session_id, chunk_index, start_message_id, end_message_id, summary, content_chars)
        VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (session_id, chunk_index) DO UPDATE SET
+         start_message_id = EXCLUDED.start_message_id,
+         end_message_id = EXCLUDED.end_message_id,
+         summary = EXCLUDED.summary,
+         content_chars = EXCLUDED.content_chars
        RETURNING id`,
       [sessionId, i, startMessageId, endMessageId, summary, chunkText.length],
     );
