@@ -78,6 +78,7 @@ async function getMessagesToEmbed(limit: number, maxChars?: number): Promise<Get
        AND LENGTH(m.content_text) > 10
        AND m.role != 'tool'
        AND s.deleted_at IS NULL
+       AND s.is_automated = false
        AND e.id IS NULL
        AND skip.id IS NULL
        ${charFilter}
@@ -398,6 +399,7 @@ export async function updateAggregateEmbeddings(): Promise<{
      WHERE s.message_count > 0
        AND s.title != 'Warmup'  -- Exclude noise sessions
        AND s.deleted_at IS NULL  -- Skip soft-deleted noise (filtered out of search anyway)
+       AND s.is_automated = false  -- Skip automated sessions (filtered out of search anyway)
        AND (
          e.id IS NULL  -- No embedding exists
          OR s.content_chars > COALESCE(e.content_chars_at_embed, 0)  -- Content has grown
