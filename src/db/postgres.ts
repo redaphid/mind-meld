@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { config } from '../config.js';
+import { isAutomated } from '../embeddings/classify.js';
 
 const { Pool } = pg;
 
@@ -136,8 +137,8 @@ export const queries = {
       `INSERT INTO sessions (
         project_id, external_id, title, is_agent, parent_session_id, agent_id,
         claude_version, model_used, git_branch, cwd, raw_file_path, file_modified_at,
-        started_at, ended_at, last_synced_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
+        started_at, ended_at, is_automated, last_synced_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
       ON CONFLICT (project_id, external_id)
       DO UPDATE SET
         title = COALESCE($3, sessions.title),
@@ -145,6 +146,7 @@ export const queries = {
         file_modified_at = $12,
         started_at = COALESCE($13, sessions.started_at),
         ended_at = COALESCE($14, sessions.ended_at),
+        is_automated = $15,
         last_synced_at = NOW()
       RETURNING id`,
       [
@@ -162,6 +164,7 @@ export const queries = {
         params.fileModifiedAt ?? null,
         params.startedAt ?? null,
         params.endedAt ?? null,
+        isAutomated(params.title ?? null),
       ]
     );
     return result.rows[0].id;

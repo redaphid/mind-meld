@@ -9,6 +9,7 @@ import {
 import { generateEmbeddings, ensureEmbeddingModel } from "./ollama.js";
 import { summarizeConversation, ensureSummarizeModel, combineSummaries } from "./summarize.js";
 import { persistSessionChunks, SessionMessage } from "./chunks.js";
+import { classifyNoise } from "./classify.js";
 
 export interface BatchEmbeddingStats {
   processed: number;
@@ -46,35 +47,6 @@ export const markUnembeddable = async (
        updated_at = NOW()`,
     [messageId, messageId.toString(), reason, detail ?? null],
   );
-};
-
-// Patterns that indicate tool output, boilerplate, or noise — not worth embedding
-const NOISE_PATTERNS = [
-  /^\[Request interrupted/,
-  /^\[THINKING\]/,
-  /^No results found/,
-  /^No files found/,
-  /^No matches found/,
-  /^File created successfully/,
-  /^Updated task #/,
-  /^MCP (error|tool call)/,
-  /^To github\.com/,
-  /^Exit code \d/,
-  /^\s*(CREATE TABLE|COPY \d|DROP TABLE|ALTER TABLE|INSERT \d)/,
-  /^\s*\d+ rows? affected/,
-  /^\{"ok":false/,
-  /^📬\s*\*?\*?Slack heads-up/m,
-  /^##\s*Slack Brief/m,
-  /^All clear! No urgent items/m,
-  /ACCESSIBILITY ACCOMMODATION.*screen reader/s,
-  /IMMEDIATE DISMISSAL.*dismissed-urls\.txt/s,
-];
-
-const classifyNoise = (text: string): string | null => {
-  if (text.length < 50) return `too-short:${text.length}`;
-  const matched = NOISE_PATTERNS.find((p) => p.test(text));
-  if (matched) return `pattern:${matched.source}`;
-  return null;
 };
 
 interface GetMessagesResult {
