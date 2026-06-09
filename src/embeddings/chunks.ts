@@ -86,7 +86,9 @@ export const persistSessionChunks = async (
         `Summarizing chunk ${i + 1}/${chunks.length} for session ${sessionId} (${chunkText.length} chars, messages ${startMessageId}..${endMessageId})...`,
       );
       summary = await summarizeChunk(chunkText, true);
-      console.log(`Chunk ${i + 1} → ${summary.length} chars`);
+      console.log(
+        `Chunk ${i + 1}/${chunks.length} (${summary.length} chars): ${summary.replace(/\s+/g, " ").slice(0, 200)}`,
+      );
     } catch (e) {
       console.error(
         `persistSessionChunks: chunk ${i + 1}/${chunks.length} failed for session ${sessionId}:`,

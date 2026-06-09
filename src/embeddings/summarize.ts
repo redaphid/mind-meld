@@ -57,7 +57,10 @@ const MAX_SUMMARY_TOKENS = 8192;
 // inflating the combine input (seen in the wild: one chunk ballooned to 30k
 // chars / ~7600 tokens, deterministic rerun of same input produced 3075 chars).
 const MAX_CHUNK_SUMMARY_TOKENS = 3072;
-const MIN_SUMMARY_CHARS = 500;
+// Floor for the FINAL summary only (chunk summaries are kept regardless — see
+// summarizeChunk) — rejects refusals / near-empty garbage ("<done>", "The"),
+// not genuinely terse but real summaries.
+const MIN_SUMMARY_CHARS = 100;
 
 interface OllamaGenerateResponse {
   response: string;
@@ -128,7 +131,10 @@ SUMMARY:`;
   let summary = result.response;
   summary = summary.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
-  if (summary.length < MIN_SUMMARY_CHARS) {
+  // A mid-transcript chunk summary is intermediate — keep whatever the model
+  // produced rather than throwing away the chunk. Only the final single-pass
+  // summary enforces the floor, to keep refusals/garbage out of session search.
+  if (!isChunkOfMany && summary.length < MIN_SUMMARY_CHARS) {
     console.error(`Rejected summary (${summary.length} chars): ${JSON.stringify(summary)}`);
     throw new Error(
       `Summary too short (${summary.length} chars < ${MIN_SUMMARY_CHARS}); likely prompt-injected or refused`,
