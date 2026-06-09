@@ -5,6 +5,7 @@ import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { search, formatSearchResults, findProjectsByPath } from './search.js'
 import { getSession, formatSession } from './session.js'
+import { getHealth, formatHealth } from './health.js'
 
 const server = new McpServer({
   name: 'mindmeld',
@@ -200,6 +201,34 @@ server.tool(
       output += `- **${row.name}:** ${row.session_count} sessions, ${row.message_count} messages\n`
 
     return { content: [{ type: 'text', text: output }] }
+  }
+)
+
+server.tool(
+  'health',
+  `Report mindmeld's own indexing health so silent degradation is visible.
+
+Surfaces three areas; "unhealthy" cues are documented inline in the output:
+
+SUMMARY COVERAGE
+- total sessions; sessions with a non-NULL summary (excluding deleted + 'Warmup')
+- coverage % = summarized / (summarized + real NULL backlog)
+- NULL-summary backlog: summary IS NULL, not deleted, not 'Warmup', message_count > 0
+
+SUMMARY QUALITY
+- count of bad summaries by signal (too_short, over_compressed, raw_message_leak,
+  code_dump, refusal, loopy, truncated, marker_only, no_update, json_dump) plus
+  '[unsummarizable]' markers. Signals mirror scripts/audit-summaries.sh.
+
+EMBEDDING FRESHNESS
+- age of the most recent convo-sessions and convo-messages embedding
+- pending message-embedding count (work the backfill still owes)
+
+Use this to confirm the pipeline is actually keeping up, not just degrading quietly.`,
+  {},
+  async () => {
+    const metrics = await getHealth()
+    return { content: [{ type: 'text', text: formatHealth(metrics) }] }
   }
 )
 
