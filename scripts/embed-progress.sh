@@ -1,13 +1,13 @@
 #!/bin/zsh
 # Mindmeld indexing progress monitor — tracks both message vectors and session summaries.
 
-SHORT_Q="SELECT COUNT(*) FROM messages m LEFT JOIN embeddings e ON m.id = e.message_id AND e.chroma_collection = 'convo-messages' LEFT JOIN embeddings skip ON skip.message_id = m.id AND skip.chroma_collection = 'UNEMBEDDABLE' WHERE e.id IS NULL AND skip.id IS NULL AND m.role <> 'tool' AND m.content_text IS NOT NULL AND LENGTH(m.content_text) > 10 AND LENGTH(m.content_text) <= 8000;"
-LONG_Q="SELECT COUNT(*) FROM messages m LEFT JOIN embeddings e ON m.id = e.message_id AND e.chroma_collection = 'convo-messages' LEFT JOIN embeddings skip ON skip.message_id = m.id AND skip.chroma_collection = 'UNEMBEDDABLE' WHERE e.id IS NULL AND skip.id IS NULL AND m.role <> 'tool' AND m.content_text IS NOT NULL AND LENGTH(m.content_text) > 8000;"
+SHORT_Q="SELECT COUNT(*) FROM messages m JOIN sessions s ON m.session_id = s.id LEFT JOIN embeddings e ON m.id = e.message_id AND e.chroma_collection = 'convo-messages' LEFT JOIN embeddings skip ON skip.message_id = m.id AND skip.chroma_collection = 'UNEMBEDDABLE' WHERE e.id IS NULL AND skip.id IS NULL AND s.deleted_at IS NULL AND s.is_automated = false AND m.role <> 'tool' AND m.content_text IS NOT NULL AND LENGTH(m.content_text) > 10 AND LENGTH(m.content_text) <= 8000;"
+LONG_Q="SELECT COUNT(*) FROM messages m JOIN sessions s ON m.session_id = s.id LEFT JOIN embeddings e ON m.id = e.message_id AND e.chroma_collection = 'convo-messages' LEFT JOIN embeddings skip ON skip.message_id = m.id AND skip.chroma_collection = 'UNEMBEDDABLE' WHERE e.id IS NULL AND skip.id IS NULL AND s.deleted_at IS NULL AND s.is_automated = false AND m.role <> 'tool' AND m.content_text IS NOT NULL AND LENGTH(m.content_text) > 8000;"
 DONE_Q="SELECT COUNT(*) FROM embeddings WHERE failure_reason IS NULL;"
 RATE_Q="SELECT COUNT(*) FROM embeddings WHERE created_at > NOW() - INTERVAL '1 hour';"
 LAST_Q="SELECT EXTRACT(EPOCH FROM NOW() - MAX(created_at))::int FROM embeddings;"
-SUMM_DONE_Q="SELECT COUNT(*) FROM sessions WHERE summary IS NOT NULL AND message_count > 0 AND title != 'Warmup' AND deleted_at IS NULL;"
-SUMM_MISSING_Q="SELECT COUNT(*) FROM sessions WHERE summary IS NULL AND message_count > 0 AND title != 'Warmup' AND deleted_at IS NULL;"
+SUMM_DONE_Q="SELECT COUNT(*) FROM sessions WHERE summary IS NOT NULL AND message_count > 0 AND title != 'Warmup' AND deleted_at IS NULL AND is_automated = false;"
+SUMM_MISSING_Q="SELECT COUNT(*) FROM sessions WHERE summary IS NULL AND message_count > 0 AND title != 'Warmup' AND deleted_at IS NULL AND is_automated = false;"
 SUMM_RATE_Q="SELECT COUNT(*) FROM embeddings WHERE chroma_collection = 'convo-sessions' AND created_at > NOW() - INTERVAL '1 hour';"
 
 COLS=$(tput cols 2>/dev/null || echo 80)
