@@ -5,6 +5,7 @@ import { config } from '../config.js'
 import { getOllamaClient } from '../embeddings/ollama.js'
 import { subtractVectors, normalizeVector, addVectors, scaleVector } from '../utils/vector-math.js'
 import { fuseRanks, type RankedList } from './rrf.js'
+import { buildSnippet, ts_headline_options } from './snippet.js'
 
 const PROJECT_BOOST = 0.5
 
@@ -30,16 +31,31 @@ export type SearchParams = {
   includeAutomated?: boolean
 }
 
+export type MatchedTier = 'session' | 'chunk' | 'message'
+
+export type SearchCursor = { chunk_index?: number; message_id?: number }
+
 export type SearchResult = {
   session_id: number
   project_name: string
   project_path: string
   source: string
   title: string
-  summary: string | null
-  timestamp: Date
+  date: Date
   score: number
-  message_count: number
+  matched_tier: MatchedTier
+  snippet: string | null
+  cursor?: SearchCursor
+}
+
+// A session can be hit by several arms; we keep the first (best-ranked) hit's
+// tier + cursor + the raw text its snippet is built from, plus an optional
+// ts_headline window when query terms ran in the text arm.
+type Hit = {
+  result: SearchResult
+  projectId: number
+  rawSnippet: string | null
+  headline: string | null
 }
 
 const parseWeightedIds = (params: string[]): WeightedId[] =>
@@ -68,9 +84,7 @@ const composeQueryVector = async (
   likeProjectCentroids: ResolvedCentroid[] = [],
   unlikeProjectCentroids: ResolvedCentroid[] = []
 ) => {
-  let vec = queryText
-    ? await getQueryEmbedding(queryText)
-    : new Array(1024).fill(0)
+  let vec = queryText ? await getQueryEmbedding(queryText) : new Array(1024).fill(0)
 
   if (negativeQuery) vec = subtractVectors(vec, await getQueryEmbedding(negativeQuery))
 
@@ -87,12 +101,7 @@ const composeQueryVector = async (
 }
 
 export const findProjectsByPath = async (cwd: string) => {
-  const result = await query<{
-    id: number
-    path: string
-    name: string
-    source_name: string
-  }>(
+  const result = await query<{ id: number; path: string; name: string; source_name: string }>(
     `SELECT p.id, p.path, p.name, s.name as source_name
      FROM projects p
      JOIN sources s ON p.source_id = s.id
@@ -135,16 +144,36 @@ const getSessionById = async (sessionId: number, includeAutomated: boolean) => {
   return result.rows[0] ?? null
 }
 
+type MessageAnchoredRow = SessionRow & { message_id: number; content_text: string | null }
+
 const getSessionByMessageId = async (messageId: number, includeAutomated: boolean) => {
-  const result = await query<SessionRow>(
+  const result = await query<MessageAnchoredRow>(
     `SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
-            src.name as source_name, s.started_at, s.message_count, p.id as project_id
+            src.name as source_name, s.started_at, s.message_count, p.id as project_id,
+            m.id as message_id, m.content_text
      FROM messages m
      JOIN sessions s ON m.session_id = s.id
      JOIN projects p ON s.project_id = p.id
      JOIN sources src ON p.source_id = src.id
      WHERE m.id = $1 AND s.deleted_at IS NULL AND ${AUTOMATED_FILTER}`,
     [messageId, includeAutomated]
+  )
+  return result.rows[0] ?? null
+}
+
+type ChunkAnchoredRow = SessionRow & { chunk_index: number; chunk_summary: string }
+
+const getSessionByChunkId = async (chunkId: number, includeAutomated: boolean) => {
+  const result = await query<ChunkAnchoredRow>(
+    `SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
+            src.name as source_name, s.started_at, s.message_count, p.id as project_id,
+            c.chunk_index, c.summary as chunk_summary
+     FROM session_chunks c
+     JOIN sessions s ON c.session_id = s.id
+     JOIN projects p ON s.project_id = p.id
+     JOIN sources src ON p.source_id = src.id
+     WHERE c.id = $1 AND s.deleted_at IS NULL AND ${AUTOMATED_FILTER}`,
+    [chunkId, includeAutomated]
   )
   return result.rows[0] ?? null
 }
@@ -162,23 +191,22 @@ const resolveCentroids = async (table: 'sessions' | 'projects', weightedIds: Wei
       [numId]
     )
 
-    if (result.rows[0]?.centroid_vector) {
+    if (result.rows[0]?.centroid_vector)
       resolved.push({ id, weight, centroid: JSON.parse(result.rows[0].centroid_vector) })
-    }
   }
   return resolved
 }
 
-const toResult = (session: SessionRow, score: number): SearchResult => ({
-  session_id: session.id,
-  project_name: session.project_name,
-  project_path: session.project_path,
-  source: session.source_name,
-  title: session.title ?? 'Untitled',
-  summary: session.summary,
-  timestamp: session.started_at,
+const baseResult = (s: SessionRow, score: number, tier: MatchedTier): SearchResult => ({
+  session_id: s.id,
+  project_name: s.project_name,
+  project_path: s.project_path,
+  source: s.source_name,
+  title: s.title ?? 'Untitled',
+  date: s.started_at,
   score,
-  message_count: session.message_count,
+  matched_tier: tier,
+  snippet: null,
 })
 
 const passesFilters = (
@@ -205,11 +233,17 @@ const parseSinceDate = (since?: string) => {
 }
 
 export const search = async (params: SearchParams): Promise<SearchResult[]> => {
-  const limit = params.limit ?? 20
+  const limit = params.limit ?? 8
   const mode = params.mode ?? 'hybrid'
   const includeAutomated = params.includeAutomated ?? false
 
-  if (!params.query && !params.likeSession && !params.likeProject && !params.unlikeSession && !params.unlikeProject)
+  if (
+    !params.query &&
+    !params.likeSession &&
+    !params.likeProject &&
+    !params.unlikeSession &&
+    !params.unlikeProject
+  )
     throw new Error('Must provide either query or centroid parameters (likeSession, likeProject, etc.)')
 
   const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
@@ -224,25 +258,35 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       resolveCentroids('projects', params.unlikeProject ? parseWeightedIds(params.unlikeProject) : []),
     ])
 
-  const resultBySession = new Map<number, SearchResult>()
+  const hitBySession = new Map<number, Hit>()
   const inProject = new Set<number>()
   const rankedLists: RankedList[] = []
 
-  const record = (r: SearchResult, projectId: number) => {
-    if (projectIds.includes(projectId)) inProject.add(r.session_id)
-    if (!resultBySession.has(r.session_id)) resultBySession.set(r.session_id, r)
+  // First arm to claim a session wins its tier/cursor/snippet source. Arms run
+  // session → chunk → message → fts; later, fusion across all arms decides rank.
+  const record = (
+    result: SearchResult,
+    projectId: number,
+    rawSnippet: string | null,
+    headline: string | null
+  ) => {
+    if (projectIds.includes(projectId)) inProject.add(result.session_id)
+    if (!hitBySession.has(result.session_id))
+      hitBySession.set(result.session_id, { result, projectId, rawSnippet, headline })
   }
 
   if (mode === 'semantic' || mode === 'hybrid') {
     try {
       const embedding = await composeQueryVector(
-        params.query, params.negativeQuery,
-        likeSessionCentroids, unlikeSessionCentroids,
-        likeProjectCentroids, unlikeProjectCentroids
+        params.query,
+        params.negativeQuery,
+        likeSessionCentroids,
+        unlikeSessionCentroids,
+        likeProjectCentroids,
+        unlikeProjectCentroids
       )
 
       const sessionHits = await querySimilar(config.chroma.collections.sessions, embedding, limit * 2)
-
       if (sessionHits.ids[0]) {
         const sessionRanked: RankedList = []
         for (let i = 0; i < sessionHits.ids[0].length; i++) {
@@ -251,20 +295,38 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
           const session = await getSessionById(sessionId, includeAutomated)
           if (!session) continue
           if (!passesFilters(session, params, sinceDate, projectIds)) continue
-          record(toResult(session, score), session.project_id)
+          record(baseResult(session, score, 'session'), session.project_id, session.summary, null)
           sessionRanked.push(session.id)
         }
         rankedLists.push(sessionRanked)
       }
 
-      const messageHits = await querySimilar(config.chroma.collections.messages, embedding, limit * 3)
+      const chunkHits = await querySimilar(config.chroma.collections.chunks, embedding, limit * 3)
+      if (chunkHits.ids[0]) {
+        const chunkRanked: RankedList = []
+        const seen = new Set<number>()
+        for (let i = 0; i < chunkHits.ids[0].length; i++) {
+          const chunkId = parseInt(chunkHits.ids[0][i].replace('chunk-', ''))
+          const score = 1 - (chunkHits.distances?.[0]?.[i] ?? 1)
+          const session = await getSessionByChunkId(chunkId, includeAutomated)
+          if (!session) continue
+          if (!passesFilters(session, params, sinceDate, projectIds)) continue
+          if (seen.has(session.id)) continue
+          seen.add(session.id)
+          const result = baseResult(session, score, 'chunk')
+          result.cursor = { chunk_index: session.chunk_index }
+          record(result, session.project_id, session.chunk_summary, null)
+          chunkRanked.push(session.id)
+        }
+        rankedLists.push(chunkRanked)
+      }
 
+      const messageHits = await querySimilar(config.chroma.collections.messages, embedding, limit * 3)
       if (messageHits.ids[0]) {
         // Chroma returns messages in distance order; first appearance of a
         // session is its best-ranked message, so dedup preserves rank order.
         const messageRanked: RankedList = []
         const seen = new Set<number>()
-
         for (let i = 0; i < messageHits.ids[0].length; i++) {
           const messageId = parseInt(messageHits.ids[0][i].replace('msg-', ''))
           const score = 1 - (messageHits.distances?.[0]?.[i] ?? 1)
@@ -273,7 +335,9 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
           if (!passesFilters(session, params, sinceDate, projectIds)) continue
           if (seen.has(session.id)) continue
           seen.add(session.id)
-          record(toResult(session, score), session.project_id)
+          const result = baseResult(session, score, 'message')
+          result.cursor = { message_id: session.message_id }
+          record(result, session.project_id, session.content_text, null)
           messageRanked.push(session.id)
         }
         rankedLists.push(messageRanked)
@@ -300,7 +364,9 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
     }
 
     if (params.excludeTerms) {
-      conditions.push(`NOT to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $${nextParam++})`)
+      conditions.push(
+        `NOT to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $${nextParam++})`
+      )
       values.push(params.excludeTerms)
     }
 
@@ -309,8 +375,8 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
 
     const ftsResult = await query<{
       session_id: number
+      message_id: number
       title: string | null
-      summary: string | null
       project_name: string
       project_path: string
       source_name: string
@@ -318,10 +384,13 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       message_count: number
       rank: number
       project_id: number
+      headline: string
     }>(
       `WITH ranked_messages AS (
         SELECT DISTINCT ON (m.session_id)
           m.session_id,
+          m.id as message_id,
+          m.content_text,
           ts_rank(to_tsvector('english', m.content_text), websearch_to_tsquery('english', $1)) as rank
         FROM messages m
         JOIN sessions s ON m.session_id = s.id
@@ -330,9 +399,10 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         WHERE ${conditions.join('\n          AND ')}
         ORDER BY m.session_id, rank DESC
       )
-      SELECT rm.session_id, s.title, s.summary, p.name as project_name, p.path as project_path,
+      SELECT rm.session_id, rm.message_id, s.title, p.name as project_name, p.path as project_path,
              src.name as source_name, s.started_at, s.message_count, rm.rank,
-             p.id as project_id
+             p.id as project_id,
+             ts_headline('english', rm.content_text, websearch_to_tsquery('english', $1), '${ts_headline_options}') as headline
       FROM ranked_messages rm
       JOIN sessions s ON rm.session_id = s.id
       JOIN projects p ON s.project_id = p.id
@@ -345,20 +415,23 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
     // Rows already ordered by rank DESC — their order is the FTS ranking.
     const ftsRanked: RankedList = []
     for (const row of ftsResult.rows) {
-      record(
-        {
-          session_id: row.session_id,
-          project_name: row.project_name,
-          project_path: row.project_path,
-          source: row.source_name,
-          title: row.title ?? 'Untitled',
-          summary: row.summary,
-          timestamp: row.started_at,
-          score: row.rank,
-          message_count: row.message_count,
-        },
-        row.project_id
-      )
+      const result: SearchResult = {
+        session_id: row.session_id,
+        project_name: row.project_name,
+        project_path: row.project_path,
+        source: row.source_name,
+        title: row.title ?? 'Untitled',
+        date: row.started_at,
+        score: row.rank,
+        matched_tier: 'message',
+        snippet: null,
+        cursor: { message_id: row.message_id },
+      }
+      // FTS arm has a real ts_headline window; if this session was already
+      // claimed by a semantic arm, upgrade its snippet to the highlighted one.
+      const existing = hitBySession.get(row.session_id)
+      if (existing) existing.headline = row.headline
+      record(result, row.project_id, null, row.headline)
       ftsRanked.push(row.session_id)
     }
     rankedLists.push(ftsRanked)
@@ -366,10 +439,10 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
 
   const fused = fuseRanks(rankedLists)
 
-  const results = Array.from(resultBySession.values()).map((r) => ({
-    ...r,
-    score: (fused.get(r.session_id) ?? 0) + (inProject.has(r.session_id) ? PROJECT_BOOST : 0),
-  }))
+  const results = Array.from(hitBySession.values()).map((hit) => {
+    const score = (fused.get(hit.result.session_id) ?? 0) + (inProject.has(hit.result.session_id) ? PROJECT_BOOST : 0)
+    return { ...hit.result, score, snippet: buildSnippet(hit.rawSnippet, hit.headline) }
+  })
   results.sort((a, b) => b.score - a.score)
   return results.slice(0, limit)
 }
@@ -377,19 +450,23 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
 export const formatSearchResults = (results: SearchResult[], projectIds: number[] = []) => {
   if (results.length === 0) return 'No matching conversations found.'
 
-  const output = results.map((r, i) => {
-    const projectLabel = projectIds.includes(r.session_id) ? ' [CURRENT PROJECT]' : ''
-    assert(r.timestamp, `Missing timestamp for session ${r.session_id}`)
-    const summary = r.summary ?? 'No summary available'
-    return `${i + 1}. **${r.title}**${projectLabel}
+  const output = results
+    .map((r, i) => {
+      const projectLabel = projectIds.includes(r.session_id) ? ' [CURRENT PROJECT]' : ''
+      assert(r.date, `Missing date for session ${r.session_id}`)
+      const cursor = r.cursor?.chunk_index != null
+        ? `\n   Cursor: chunk ${r.cursor.chunk_index}`
+        : r.cursor?.message_id != null
+          ? `\n   Cursor: message ${r.cursor.message_id}`
+          : ''
+      return `${i + 1}. **${r.title}**${projectLabel}
    Session ID: ${r.session_id}
    Project: ${r.project_name} (${r.source})
-   Path: ${r.project_path}
-   Date: ${r.timestamp.toISOString().split('T')[0]}
-   Messages: ${r.message_count}
-   Score: ${r.score.toFixed(3)}
-   Summary: ${summary}`
-  }).join('\n\n')
+   Date: ${r.date.toISOString().split('T')[0]}
+   Score: ${r.score.toFixed(3)} | Matched: ${r.matched_tier}${cursor}
+   ${r.snippet ?? '(no snippet)'}`
+    })
+    .join('\n\n')
 
   return `Found ${results.length} relevant conversations:\n\n${output}`
 }

@@ -8,7 +8,14 @@ import { z } from 'zod'
 import { query, closePool, queries } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
 import { search, formatSearchResults, findProjectsByPath } from './search.js'
-import { getSession, formatSession } from './session.js'
+import {
+  getSessionDigest,
+  getMessages,
+  getChunk,
+  formatDigest,
+  formatMessages,
+  formatChunk,
+} from './session.js'
 import { getSyncStatus } from '../sync/orchestrator.js'
 import { getCollectionStats } from '../db/chroma.js'
 import { config } from '../config.js'
@@ -81,16 +88,46 @@ const getServer = () => {
 
   server.tool(
     'getSession',
-    'Get conversation session by ID. Returns metadata, summary, and all messages. Optional offset/limit for pagination.',
+    'Get a session DIGEST — summary + chunk manifest, no raw messages. Use getMessages to read message regions.',
     {
       sessionId: z.number().describe('Session ID from search results'),
-      offset: z.number().optional().describe('Start at this message index (0-based)'),
-      limit: z.number().optional().describe('Number of messages to return'),
     },
     async (params) => {
-      const result = await getSession(params)
-      if (!result) return { content: [{ type: 'text', text: 'Session not found.' }] }
-      return { content: [{ type: 'text', text: formatSession(result) }] }
+      const digest = await getSessionDigest({ sessionId: params.sessionId })
+      if (!digest) return { content: [{ type: 'text', text: 'Session not found.' }] }
+      return { content: [{ type: 'text', text: formatDigest(digest) }] }
+    }
+  )
+
+  server.tool(
+    'getMessages',
+    'Read raw messages windowed: { session_id, offset?, limit? } (default limit 30) or { start_message_id, end_message_id }.',
+    {
+      session_id: z.number().optional(),
+      offset: z.number().optional(),
+      limit: z.number().optional(),
+      start_message_id: z.number().optional(),
+      end_message_id: z.number().optional(),
+      maxChars: z.number().optional(),
+    },
+    async (params) => {
+      const result = await getMessages(params)
+      if (!result) return { content: [{ type: 'text', text: 'No messages found.' }] }
+      return { content: [{ type: 'text', text: formatMessages(result) }] }
+    }
+  )
+
+  server.tool(
+    'getChunk',
+    'Get one chunk\'s full summary by { session_id, chunk_index }, with its message-id range.',
+    {
+      session_id: z.number(),
+      chunk_index: z.number(),
+    },
+    async (params) => {
+      const chunk = await getChunk(params)
+      if (!chunk) return { content: [{ type: 'text', text: 'Chunk not found.' }] }
+      return { content: [{ type: 'text', text: formatChunk(chunk, params.session_id) }] }
     }
   )
 
