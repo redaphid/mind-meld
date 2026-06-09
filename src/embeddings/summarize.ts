@@ -39,10 +39,10 @@ const fetchWithRetry = async (
   throw new Error(`${label}: all ${maxRetries} attempts failed`);
 };
 const MAX_CHARS_BEFORE_SUMMARIZE = 8000;
-// Session chunking (convo-chunks middle tier). Capped at a size qwen3:8b
-// reliably summarizes — 100k-char chunks (~25k tokens) timed out or emitted
-// garbage; smaller chunks summarize fast and never hit the timeout-retry path.
-const MAX_CHUNK_CHARS = 30000;
+// Session chunking (convo-chunks middle tier). Balances granularity vs cost:
+// 100k timed out, but 30k exploded big sessions into 77-92 chunks (dozens of LLM
+// calls each). 60k is the middle — reliably summarizes at FA-on, ~1/3 the chunks.
+const MAX_CHUNK_CHARS = 60000;
 // Cap summarizer input to a size qwen3:8b handles reliably — chunks of ~25k+
 // tokens time out on prefill or degrade to garbage output, even with flash
 // attention on. Same bound as MAX_CHUNK_CHARS.
