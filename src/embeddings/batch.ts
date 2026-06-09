@@ -364,11 +364,14 @@ const markSessionProcessed = async (
   );
 };
 
+export const AGGREGATE_BATCH_SIZE = 100;
+
 // Update session-level embeddings with summarization for long conversations
 // Now also re-embeds sessions where content_chars has grown
 export async function updateAggregateEmbeddings(): Promise<{
   sessionsUpdated: number;
   sessionsReembedded: number;
+  sessionsFetched: number;
 }> {
   // Ensure summarization model is available
   await ensureSummarizeModel();
@@ -407,12 +410,12 @@ export async function updateAggregateEmbeddings(): Promise<{
          OR COALESCE(s.content_chars, 0) = 0  -- content_chars not calculated yet
        )
      ORDER BY COALESCE(s.content_chars, 0) ASC  -- Smallest first: drain the bulk quickly; the few giant sessions go last instead of blocking all progress
-     LIMIT 100`,
-    [config.chroma.collections.sessions],
+     LIMIT $2`,
+    [config.chroma.collections.sessions, AGGREGATE_BATCH_SIZE],
   );
 
   if (sessions.rows.length === 0) {
-    return { sessionsUpdated: 0, sessionsReembedded: 0 };
+    return { sessionsUpdated: 0, sessionsReembedded: 0, sessionsFetched: 0 };
   }
 
   let newEmbeddings = 0;
@@ -583,5 +586,9 @@ export async function updateAggregateEmbeddings(): Promise<{
     }
   }
 
-  return { sessionsUpdated: newEmbeddings, sessionsReembedded: reembeddings };
+  return {
+    sessionsUpdated: newEmbeddings,
+    sessionsReembedded: reembeddings,
+    sessionsFetched: sessions.rows.length,
+  };
 }
