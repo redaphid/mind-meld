@@ -409,7 +409,7 @@ export async function updateAggregateEmbeddings(): Promise<{
          OR s.content_chars > COALESCE(e.content_chars_at_embed, 0)  -- Content has grown
          OR COALESCE(s.content_chars, 0) = 0  -- content_chars not calculated yet
        )
-     ORDER BY COALESCE(s.content_chars, 0) ASC  -- Smallest first: drain the bulk quickly; the few giant sessions go last instead of blocking all progress
+     ORDER BY COALESCE(s.ended_at, s.started_at) DESC NULLS LAST  -- Newest first: recent sessions are the ones searches actually need
      LIMIT $2`,
     [config.chroma.collections.sessions, AGGREGATE_BATCH_SIZE],
   );
