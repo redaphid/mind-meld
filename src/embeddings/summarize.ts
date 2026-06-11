@@ -186,6 +186,9 @@ export async function combineSummaries(summaries: string[]): Promise<string> {
 
   // If combined summaries are short enough, return as-is
   if (combined.length <= MAX_CHARS_BEFORE_SUMMARIZE) {
+    console.log(
+      `SUMMARY-OF-SUMMARIES (${summaries.length} chunk summaries joined as-is, ${combined.length} chars):\n${combined}`,
+    );
     return combined;
   }
 
@@ -248,7 +251,7 @@ MERGED SUMMARY:`;
     summary = summary.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
     console.log(
-      `Combined to ${summary.length} chars in ${((performance.now() - startedAt) / 1000).toFixed(1)}s`,
+      `SUMMARY-OF-SUMMARIES (merged ${summaries.length} chunk summaries → ${summary.length} chars in ${((performance.now() - startedAt) / 1000).toFixed(1)}s):\n${summary}`,
     );
     return summary;
   }
