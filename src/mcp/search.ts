@@ -6,6 +6,7 @@ import { getOllamaClient } from '../embeddings/ollama.js'
 import { subtractVectors, normalizeVector, addVectors, scaleVector } from '../utils/vector-math.js'
 import { fuseRanks, type RankedList } from './rrf.js'
 import { buildSnippet, ts_headline_options } from './snippet.js'
+import { parseSinceDate } from './since.js'
 
 const PROJECT_BOOST = 0.5
 
@@ -219,17 +220,6 @@ const passesFilters = (
   if (sinceDate && session.started_at < sinceDate) return false
   if (params.projectOnly && !projectIds.includes(session.project_id)) return false
   return true
-}
-
-const parseSinceDate = (since?: string) => {
-  if (!since) return null
-  const match = since.match(/^(\d+)([dhwm])$/)
-  if (match) {
-    const [, num, unit] = match
-    const ms = { d: 86400000, h: 3600000, w: 604800000, m: 2592000000 }[unit] ?? 86400000
-    return new Date(Date.now() - parseInt(num) * ms)
-  }
-  return new Date(since)
 }
 
 export const search = async (params: SearchParams): Promise<SearchResult[]> => {
