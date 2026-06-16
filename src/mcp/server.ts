@@ -4,6 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { search, formatSearchResults, findProjectsByPath } from './search.js'
+import { sinceSchema } from './since.js'
 import {
   getSessionDigest,
   getMessages,
@@ -66,12 +67,7 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
     mode: z.enum(['semantic', 'text', 'hybrid']).optional().describe('Search mode: semantic (default), text, or hybrid'),
     limit: z.number().optional().describe('Max results to return (default 8)'),
     source: z.string().optional().describe('Filter to specific source'),
-    since: z
-      .string()
-      .optional()
-      .describe(
-        'Only include conversations since this time. Flexible: relative duration ("7d", "24h", "2w"), ISO-8601 duration ("P3D", "PT12H"), natural language ("3 days ago", "yesterday", "last week"), or an absolute timestamp ("2024-01-01")'
-      ),
+    since: sinceSchema.optional(),
     projectOnly: z.boolean().optional().describe('Only search conversations from the CWD project'),
     likeSession: z.array(z.string()).optional().describe('Boost results similar to these session IDs (format: ["123"] or ["123:1.5"])'),
     unlikeSession: z.array(z.string()).optional().describe('Suppress results similar to these session IDs'),

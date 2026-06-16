@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { parseSinceDate } from './since.js'
+import { parseSinceDate, sinceSchema } from './since.js'
 
 const approxAgo = (date: Date, ms: number) => Math.abs(Date.now() - ms - date.getTime())
 
@@ -73,6 +73,34 @@ describe('parseSinceDate', () => {
 
     it('names the offending value', () => {
       expect((error as Error).message).toContain('not-a-time')
+    })
+  })
+})
+
+describe('sinceSchema', () => {
+  describe('when the value is parseable', () => {
+    it('accepts an ISO-8601 duration', () => {
+      expect(sinceSchema.safeParse('-P3D').success).toBe(true)
+    })
+
+    it('accepts natural language', () => {
+      expect(sinceSchema.safeParse('3 days ago').success).toBe(true)
+    })
+  })
+
+  describe('when the value is unparseable', () => {
+    let result: ReturnType<typeof sinceSchema.safeParse>
+
+    beforeEach(() => {
+      result = sinceSchema.safeParse('not-a-time')
+    })
+
+    it('rejects', () => {
+      expect(result.success).toBe(false)
+    })
+
+    it('reports a hint naming the value', () => {
+      expect(result.success ? '' : result.error.issues[0].message).toContain('not-a-time')
     })
   })
 })

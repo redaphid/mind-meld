@@ -8,6 +8,7 @@ import { z } from 'zod'
 import { query, closePool, queries } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
 import { search, formatSearchResults, findProjectsByPath } from './search.js'
+import { sinceSchema } from './since.js'
 import {
   getSessionDigest,
   getMessages,
@@ -69,7 +70,7 @@ const getServer = () => {
       cwd: z.string().optional(),
       mode: z.enum(['semantic', 'text', 'hybrid']).optional(),
       source: z.string().optional(),
-      since: z.string().optional(),
+      since: sinceSchema.optional(),
       projectOnly: z.boolean().optional(),
       likeSession: z.array(z.string()).optional(),
       unlikeSession: z.array(z.string()).optional(),

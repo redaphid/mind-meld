@@ -1,4 +1,5 @@
 import assert from 'node:assert'
+import { z } from 'zod'
 import * as chrono from 'chrono-node'
 import ms from 'ms'
 
@@ -14,9 +15,9 @@ const isoDurationMs = (value: string) => {
   return (y * 365 + mo * 30 + w * 7 + d) * DAY_MS + ((h * 60 + min) * 60 + s) * 1000
 }
 
-export const parseSinceDate = (since?: string) => {
-  if (!since) return null
-  const trimmed = since.trim()
+const tryParseSince = (value: string): Date | null => {
+  const trimmed = value.trim()
+  if (!trimmed) return null
 
   if (/^\d+(\.\d+)?$/.test(trimmed)) {
     const epoch = parseFloat(trimmed)
@@ -30,12 +31,22 @@ export const parseSinceDate = (since?: string) => {
   const relative = ms(trimmed)
   if (relative) return new Date(Date.now() - relative)
 
-  const natural = chrono.parseDate(trimmed)
-  assert(
-    natural,
-    new TypeError(
-      `Invalid "since" value: ${since}. Try a duration ("7d", "P3D", "PT12H"), natural language ("3 days ago", "yesterday"), or a timestamp ("2024-01-15").`
-    )
-  )
-  return natural
+  return chrono.parseDate(trimmed)
 }
+
+const hint = (value: string) =>
+  `Invalid "since" value: ${value}. Try a duration ("7d", "P3D", "PT12H"), natural language ("3 days ago", "yesterday"), or a timestamp ("2024-01-15").`
+
+export const parseSinceDate = (since?: string) => {
+  if (!since) return null
+  const parsed = tryParseSince(since)
+  assert(parsed, new TypeError(hint(since)))
+  return parsed
+}
+
+export const sinceSchema = z
+  .string()
+  .refine((value) => tryParseSince(value) !== null, (value) => ({ message: hint(value) }))
+  .describe(
+    'Only include conversations since this time. Flexible: relative duration ("7d", "24h", "2w"), ISO-8601 duration ("P3D", "PT12H"), natural language ("3 days ago", "yesterday", "last week"), or an absolute timestamp ("2024-01-01")'
+  )
