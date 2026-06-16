@@ -117,12 +117,17 @@ pnpm run type-check
 
 ## Deployment
 
-Use `/deploy` to commit, push, tag, build Docker images via CI, pull, and restart containers. See [deploy command](.claude/commands/deploy.md) for the full procedure.
+Deploys are **semver-driven** — CI only builds images when `package.json`'s `version` changes. A plain merge to `main` does **not** deploy.
+
+1. Bump `version` in `package.json` and push to `main`.
+2. `.github/workflows/release.yml` (gated on `paths: ["package.json"]`) runs tests + build, then creates a GitHub Release with a `v{version}` tag.
+3. `.github/workflows/docker-publish.yml` (on the `v*` tag / after Release completes) builds and pushes all images to GHCR: `mindmeld-sync` (`Dockerfile.sync`), `mindmeld-mcp` (`Dockerfile.http`), plus postgres/centroids/warmups. Image suffix = the matrix `image:` value, so `Dockerfile.http → mindmeld-mcp` (matches what compose pulls).
+4. On the host: `docker compose pull && docker compose up -d`. Migrations auto-apply on `mcp` startup (`src/db/migrations.ts`).
+
+`/deploy` (`.claude/commands/deploy.md`) automates the push → tag → CI-watch → pull → restart, but it reads the existing version and does **not** bump it — edit `package.json` first.
 
 ## No Truncation Policy
 
 Never truncate strings returned to API consumers. This includes `.slice()`, `substring()`, or SQL `LEFT()`/`SUBSTRING()` on data returned by MCP tools or HTTP endpoints. If content is too large, use summaries (LLM-generated) or pagination (offset/limit) instead. Truncation silently destroys information and makes results useless for downstream LLMs.
 
 Acceptable truncation: debug logging (`console.log`), embedding model input limits (model constraint, not a choice).
-
-MANDATORY PROTOCOL: when a session is started in this project, run `pnpm run dev` in a background thread, if you aren't already. This allows Claude code to connect to it

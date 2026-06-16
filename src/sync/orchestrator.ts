@@ -1,9 +1,11 @@
 import { syncClaudeCode, syncClaudeHistory } from './claude-code.js';
 import { syncCursor } from './cursor.js';
-import { generatePendingEmbeddings, updateAggregateEmbeddings } from '../embeddings/batch.js';
+import { generatePendingEmbeddings, updateAggregateEmbeddings, AGGREGATE_BATCH_SIZE } from '../embeddings/batch.js';
 import { ensureEmbeddingModel } from '../embeddings/ollama.js';
 import { ensureSummarizeModel } from '../embeddings/summarize.js';
 import { query } from '../db/postgres.js';
+
+const MAX_AGGREGATE_DRAIN_MS = 50 * 60 * 1000;
 
 export interface FullSyncResult {
   startTime: Date;
@@ -100,8 +102,18 @@ export async function runFullSync(options?: {
       result.embeddings.messagesEmbedded = embeddingStats.processed;
 
       console.log('\n--- Updating Aggregate Embeddings ---');
-      const aggregateStats = await updateAggregateEmbeddings();
-      result.embeddings.sessionsUpdated = aggregateStats.sessionsUpdated;
+      // Drain the backlog batch-by-batch instead of one batch per sync cycle,
+      // but stop after MAX_AGGREGATE_DRAIN_MS so new-message sync never starves
+      const drainStart = Date.now();
+      while (true) {
+        const aggregateStats = await updateAggregateEmbeddings();
+        result.embeddings.sessionsUpdated += aggregateStats.sessionsUpdated;
+        if (aggregateStats.sessionsFetched < AGGREGATE_BATCH_SIZE) break;
+        if (Date.now() - drainStart > MAX_AGGREGATE_DRAIN_MS) {
+          console.log('Aggregate drain time budget reached; remaining backlog resumes next cycle');
+          break;
+        }
+      }
     } catch (e) {
       const error = `Embedding generation failed: ${e}`;
       console.error(error);

@@ -364,11 +364,14 @@ const markSessionProcessed = async (
   );
 };
 
+export const AGGREGATE_BATCH_SIZE = 100;
+
 // Update session-level embeddings with summarization for long conversations
 // Now also re-embeds sessions where content_chars has grown
 export async function updateAggregateEmbeddings(): Promise<{
   sessionsUpdated: number;
   sessionsReembedded: number;
+  sessionsFetched: number;
 }> {
   // Ensure summarization model is available
   await ensureSummarizeModel();
@@ -400,18 +403,19 @@ export async function updateAggregateEmbeddings(): Promise<{
        AND s.title != 'Warmup'  -- Exclude noise sessions
        AND s.deleted_at IS NULL  -- Skip soft-deleted noise (filtered out of search anyway)
        AND s.is_automated = false  -- Skip automated sessions (filtered out of search anyway)
+       AND (s.ended_at IS NULL OR s.ended_at < NOW() - INTERVAL '30 minutes')  -- Defer still-active sessions: don't re-summarize a live conversation from scratch as it grows
        AND (
          e.id IS NULL  -- No embedding exists
          OR s.content_chars > COALESCE(e.content_chars_at_embed, 0)  -- Content has grown
          OR COALESCE(s.content_chars, 0) = 0  -- content_chars not calculated yet
        )
-     ORDER BY s.id
-     LIMIT 100`,
-    [config.chroma.collections.sessions],
+     ORDER BY COALESCE(s.ended_at, s.started_at) DESC NULLS LAST  -- Newest first: recent sessions are the ones searches actually need
+     LIMIT $2`,
+    [config.chroma.collections.sessions, AGGREGATE_BATCH_SIZE],
   );
 
   if (sessions.rows.length === 0) {
-    return { sessionsUpdated: 0, sessionsReembedded: 0 };
+    return { sessionsUpdated: 0, sessionsReembedded: 0, sessionsFetched: 0 };
   }
 
   let newEmbeddings = 0;
@@ -582,5 +586,9 @@ export async function updateAggregateEmbeddings(): Promise<{
     }
   }
 
-  return { sessionsUpdated: newEmbeddings, sessionsReembedded: reembeddings };
+  return {
+    sessionsUpdated: newEmbeddings,
+    sessionsReembedded: reembeddings,
+    sessionsFetched: sessions.rows.length,
+  };
 }

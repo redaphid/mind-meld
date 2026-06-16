@@ -39,14 +39,20 @@ const fetchWithRetry = async (
   throw new Error(`${label}: all ${maxRetries} attempts failed`);
 };
 const MAX_CHARS_BEFORE_SUMMARIZE = 8000;
-// Session chunking (convo-chunks middle tier). Capped at a size qwen3:8b
-// reliably summarizes — 100k-char chunks (~25k tokens) timed out or emitted
-// garbage; smaller chunks summarize fast and never hit the timeout-retry path.
-const MAX_CHUNK_CHARS = 30000;
-// Cap summarizer input to a size qwen3:8b handles reliably — chunks of ~25k+
-// tokens time out on prefill or degrade to garbage output, even with flash
-// attention on. Same bound as MAX_CHUNK_CHARS.
-const MAX_SUMMARIZE_CHARS = 30000;
+// Context window for every summarizer call. Ollama's default is 4096, which
+// silently truncated 60k-char chunks to ~25% visibility; worse, a prompt that
+// exactly fills the window makes the model emit 1 token (an empty summary).
+// 16384 won the 2026-06-10 benchmark: qwen3:8b at 28k-char chunks scored 10/15
+// fact recall in 38s vs 4/15 at the truncated default. 32k ctx with 60k chunks
+// scored worse (5/15) — qwen3 can't exploit chunks that large even when visible.
+const SUMMARIZER_NUM_CTX = 16384;
+// The single ceiling on how much text qwen3:8b summarizes in one call. Governs
+// both session chunking (convo-chunks middle tier, via CHUNK_SIZE_CHARS) and the
+// summarizeConversation split, so the two paths can never disagree on "too big".
+// Must fit SUMMARIZER_NUM_CTX with room to generate: 28000 chars is ~8k tokens
+// typical, ~11k worst case (dense JSON), leaving headroom for the prompt
+// boilerplate and num_predict inside the 16384 window.
+const MAX_SUMMARIZER_INPUT_CHARS = 28000;
 // Cap at bge-m3's 8192-token context — summaries longer than this get truncated
 // at embed time, so generating more is wasted compute. This is the budget for
 // the *final* combined summary that actually gets embedded.
@@ -65,7 +71,31 @@ const MIN_SUMMARY_CHARS = 100;
 interface OllamaGenerateResponse {
   response: string;
   done: boolean;
+  prompt_eval_count?: number;
 }
+
+export class TruncationError extends Error {
+  constructor(label: string, promptEvalCount: number) {
+    super(
+      `${label}: prompt filled the ${SUMMARIZER_NUM_CTX}-token context (prompt_eval_count=${promptEvalCount}); ollama silently truncated the input. Shrink MAX_SUMMARIZER_INPUT_CHARS or raise SUMMARIZER_NUM_CTX.`,
+    );
+    this.name = "TruncationError";
+  }
+}
+
+// Ollama truncates oversized prompts to num_ctx - 1 with no error; a prompt
+// that fills the window also leaves no room to generate (the model emits a
+// single EOS token → empty summary). 64 tokens of slack distinguishes "large
+// but legal" from "was cut off".
+const assertNotTruncated = (
+  result: OllamaGenerateResponse,
+  label: string,
+): void => {
+  const count = result.prompt_eval_count;
+  if (count === undefined) return;
+  if (count < SUMMARIZER_NUM_CTX - 64) return;
+  throw new TruncationError(label, count);
+};
 
 // Summarize a single chunk of text
 export async function summarizeChunk(
@@ -113,7 +143,10 @@ SUMMARY:`;
         keep_alive: "30m",
         options: {
           temperature: 0.3,
-          num_predict: isChunkOfMany ? MAX_CHUNK_SUMMARY_TOKENS : MAX_SUMMARY_TOKENS,
+          num_ctx: SUMMARIZER_NUM_CTX,
+          num_predict: isChunkOfMany
+            ? MAX_CHUNK_SUMMARY_TOKENS
+            : MAX_SUMMARY_TOKENS,
         },
       }),
     },
@@ -126,6 +159,7 @@ SUMMARY:`;
   }
 
   const result = (await response.json()) as OllamaGenerateResponse;
+  assertNotTruncated(result, "summarizeChunk");
 
   // Clean up qwen3's thinking tags if present
   let summary = result.response;
@@ -135,7 +169,9 @@ SUMMARY:`;
   // produced rather than throwing away the chunk. Only the final single-pass
   // summary enforces the floor, to keep refusals/garbage out of session search.
   if (!isChunkOfMany && summary.length < MIN_SUMMARY_CHARS) {
-    console.error(`Rejected summary (${summary.length} chars): ${JSON.stringify(summary)}`);
+    console.error(
+      `Rejected summary (${summary.length} chars): ${JSON.stringify(summary)}`,
+    );
     throw new Error(
       `Summary too short (${summary.length} chars < ${MIN_SUMMARY_CHARS}); likely prompt-injected or refused`,
     );
@@ -150,14 +186,18 @@ export async function combineSummaries(summaries: string[]): Promise<string> {
 
   // If combined summaries are short enough, return as-is
   if (combined.length <= MAX_CHARS_BEFORE_SUMMARIZE) {
+    console.log(
+      `SUMMARY-OF-SUMMARIES (${summaries.length} chunk summaries joined as-is, ${combined.length} chars):\n${combined}`,
+    );
     return combined;
   }
 
   // If combined summaries fit in one chunk, summarize them
-  if (combined.length <= MAX_SUMMARIZE_CHARS) {
+  if (combined.length <= MAX_SUMMARIZER_INPUT_CHARS) {
     console.log(
       `Combining ${summaries.length} chunk summaries (${combined.length} chars)...`,
     );
+    const startedAt = performance.now();
 
     const prompt = `Merge the following chunk summaries of a single coding conversation into one coherent summary.
 
@@ -188,6 +228,7 @@ MERGED SUMMARY:`;
             keep_alive: "30m",
             options: {
               temperature: 0.3,
+              num_ctx: SUMMARIZER_NUM_CTX,
               num_predict: MAX_SUMMARY_TOKENS,
             },
           }),
@@ -205,10 +246,13 @@ MERGED SUMMARY:`;
     }
 
     const result = (await response.json()) as OllamaGenerateResponse;
+    assertNotTruncated(result, "combineSummaries");
     let summary = result.response;
     summary = summary.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
-    console.log(`Combined to ${summary.length} chars`);
+    console.log(
+      `SUMMARY-OF-SUMMARIES (merged ${summaries.length} chunk summaries → ${summary.length} chars in ${((performance.now() - startedAt) / 1000).toFixed(1)}s):\n${summary}`,
+    );
     return summary;
   }
 
@@ -232,36 +276,56 @@ export function chunkMessagesWithIndices(
   messages: string[],
   maxChars: number,
 ): MessageChunk[] {
+  // A single message can exceed maxChars (one giant tool result) — split it
+  // into pieces that keep the original message index, so no chunk can ever
+  // outgrow the summarizer's context window. Adjacent chunks holding pieces of
+  // the same message share that boundary index.
+  const pieceMax = maxChars - 10;
+  const pieces: { text: string; index: number }[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (message.length <= pieceMax) {
+      pieces.push({ text: message, index: i });
+      continue;
+    }
+    for (let offset = 0; offset < message.length; offset += pieceMax) {
+      pieces.push({ text: message.slice(offset, offset + pieceMax), index: i });
+    }
+  }
+
   const chunks: MessageChunk[] = [];
   let currentMessages: string[] = [];
   let currentStart = 0;
+  let currentEnd = 0;
   let currentLength = 0;
 
-  for (let i = 0; i < messages.length; i++) {
-    const message = messages[i];
-    const messageLength = message.length + 10;
+  for (const piece of pieces) {
+    const pieceLength = piece.text.length + 10;
 
-    if (currentLength + messageLength > maxChars && currentMessages.length > 0) {
+    if (currentLength + pieceLength > maxChars && currentMessages.length > 0) {
       chunks.push({
         messages: currentMessages,
         startIndex: currentStart,
-        endIndex: i - 1,
+        endIndex: currentEnd,
       });
-      currentMessages = [message];
-      currentStart = i;
-      currentLength = messageLength;
+      currentMessages = [piece.text];
+      currentStart = piece.index;
+      currentEnd = piece.index;
+      currentLength = pieceLength;
       continue;
     }
 
-    currentMessages.push(message);
-    currentLength += messageLength;
+    if (currentMessages.length === 0) currentStart = piece.index;
+    currentMessages.push(piece.text);
+    currentEnd = piece.index;
+    currentLength += pieceLength;
   }
 
   if (currentMessages.length > 0) {
     chunks.push({
       messages: currentMessages,
       startIndex: currentStart,
-      endIndex: messages.length - 1,
+      endIndex: currentEnd,
     });
   }
 
@@ -272,7 +336,7 @@ function chunkMessages(messages: string[], maxChars: number): string[][] {
   return chunkMessagesWithIndices(messages, maxChars).map((c) => c.messages);
 }
 
-export const CHUNK_SIZE_CHARS = MAX_CHUNK_CHARS;
+export const CHUNK_SIZE_CHARS = MAX_SUMMARIZER_INPUT_CHARS;
 export const SHORT_CONVERSATION_CHARS = MAX_CHARS_BEFORE_SUMMARIZE;
 
 export async function summarizeConversation(
@@ -286,15 +350,18 @@ export async function summarizeConversation(
   }
 
   // If fits in one chunk, summarize directly
-  if (combined.length <= MAX_SUMMARIZE_CHARS) {
+  if (combined.length <= MAX_SUMMARIZER_INPUT_CHARS) {
     console.log(`Summarizing conversation (${combined.length} chars)...`);
+    const startedAt = performance.now();
     const summary = await summarizeChunk(combined, false);
-    console.log(`Summarized to ${summary.length} chars:\n${summary}`);
+    console.log(
+      `Summarized to ${summary.length} chars in ${((performance.now() - startedAt) / 1000).toFixed(1)}s:\n${summary}`,
+    );
     return summary;
   }
 
   // Too long for one chunk - split and summarize each chunk
-  const chunks = chunkMessages(messages, MAX_SUMMARIZE_CHARS);
+  const chunks = chunkMessages(messages, MAX_SUMMARIZER_INPUT_CHARS);
   console.log(
     `Conversation too long (${combined.length} chars), splitting into ${chunks.length} chunks...`,
   );
@@ -308,10 +375,13 @@ export async function summarizeConversation(
       `Summarizing chunk ${i + 1}/${chunks.length} (${chunkText.length} chars)...`,
     );
 
+    const startedAt = performance.now();
     try {
       const summary = await summarizeChunk(chunkText, true);
       chunkSummaries.push(summary);
-      console.log(`Chunk ${i + 1} summarized to ${summary.length} chars`);
+      console.log(
+        `Chunk ${i + 1} summarized to ${summary.length} chars in ${((performance.now() - startedAt) / 1000).toFixed(1)}s`,
+      );
     } catch (e) {
       console.error(`Failed to summarize chunk ${i + 1}:`, e);
       // Fall back to truncation for this chunk
