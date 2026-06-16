@@ -4,7 +4,14 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { search, formatSearchResults, findProjectsByPath } from './search.js'
-import { getSession, formatSession } from './session.js'
+import {
+  getSessionDigest,
+  getMessages,
+  getChunk,
+  formatDigest,
+  formatMessages,
+  formatChunk,
+} from './session.js'
 import { getHealth, formatHealth } from './health.js'
 
 const server = new McpServer({
@@ -14,7 +21,19 @@ const server = new McpServer({
 
 server.tool(
   'search',
-  `Search past AI conversations using hybrid full-text + semantic search.
+  `Search past AI conversations. Returns TERSE ranked hits — one line each, no
+full summaries — so you can triage cheaply, then drill in.
+
+Each hit carries:
+- session_id, title, date, score
+- matched_tier: which rung matched (session | chunk | message)
+- snippet: the query-highlighted lead of the matched region
+- cursor (optional): deep-link into the match — { chunk_index } or { message_id }
+
+Searches THREE tiers (session summaries, chunk summaries, per-message vectors)
+and fuses them. After a hit:
+- getSession(session_id) → digest + chunk map, then getMessages(chunk range)
+- OR jump straight to getMessages around cursor.message_id, skipping the digest.
 
 BEST FOR:
 - Finding previous discussions about a topic
@@ -45,7 +64,7 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
     excludeTerms: z.string().optional().describe('Hard filter - exclude results containing these terms'),
     cwd: z.string().optional().describe('Current working directory - conversations from matching projects get boosted'),
     mode: z.enum(['semantic', 'text', 'hybrid']).optional().describe('Search mode: semantic (default), text, or hybrid'),
-    limit: z.number().optional().describe('Max results to return (default 20)'),
+    limit: z.number().optional().describe('Max results to return (default 8)'),
     source: z.string().optional().describe('Filter to specific source'),
     since: z.string().optional().describe('Only include conversations since this time (e.g., "7d", "2024-01-01")'),
     projectOnly: z.boolean().optional().describe('Only search conversations from the CWD project'),
@@ -67,37 +86,85 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
 
 server.tool(
   'getSession',
-  `Get a conversation session by ID. Returns session metadata, summary, and all messages.
+  `Get a session's DIGEST — summary + chunk map. NO raw messages.
 
-Use after search to dive deep into a relevant conversation.
-Pagination is optional — omit offset/limit to get the entire thread.`,
+BREAKING CHANGE: getSession no longer dumps messages. It returns the middle
+rung of disclosure: the session summary plus a manifest of its chunks, each with
+a one-line summary and a { start_message_id, end_message_id } range. Read the
+region you want with getMessages; don't pull the whole thread.
+
+Returns: { summary, title, project, message_count, date, tokens,
+           chunks: [{ index, summary, start_message_id, end_message_id, chars }] }`,
   {
     sessionId: z.number().describe('Session ID from search results'),
-    offset: z.number().optional().describe('Start at this message index (0-based)'),
-    limit: z.number().optional().describe('Number of messages to return'),
   },
   async (params) => {
-    const result = await getSession(params)
-    if (!result) return { content: [{ type: 'text', text: 'Session not found.' }] }
-    return { content: [{ type: 'text', text: formatSession(result) }] }
+    const digest = await getSessionDigest({ sessionId: params.sessionId })
+    if (!digest) return { content: [{ type: 'text', text: 'Session not found.' }] }
+    return { content: [{ type: 'text', text: formatDigest(digest) }] }
   }
 )
 
 server.tool(
   'getSessionTranscript',
-  `Get a session by external ID or title search.
+  `Resolve a session by external ID or title and return its DIGEST.
 
-Searches by exact external_id match first, then falls back to ILIKE title search.
-Returns session metadata, summary, and all messages.`,
+Despite the name, this aliases getSession (digest, not raw transcript) — it just
+resolves the session differently: exact external_id match first, then ILIKE
+title search. Use getMessages to read raw messages once you have the session.`,
   {
     searchTerm: z.string().describe('Session external_id or title search term'),
-    offset: z.number().optional().describe('Start at this message index (0-based)'),
-    limit: z.number().optional().describe('Number of messages to return'),
   },
   async (params) => {
-    const result = await getSession({ searchTerm: params.searchTerm, offset: params.offset, limit: params.limit })
-    if (!result) return { content: [{ type: 'text', text: `No session found matching: ${params.searchTerm}` }], isError: true }
-    return { content: [{ type: 'text', text: formatSession(result) }] }
+    const digest = await getSessionDigest({ searchTerm: params.searchTerm })
+    if (!digest)
+      return {
+        content: [{ type: 'text', text: `No session found matching: ${params.searchTerm}` }],
+        isError: true,
+      }
+    return { content: [{ type: 'text', text: formatDigest(digest) }] }
+  }
+)
+
+server.tool(
+  'getMessages',
+  `Read RAW messages, windowed. Two modes:
+
+- Browse a window: { session_id, offset?, limit? } — default limit 30 (never the
+  whole thread). Page with offset.
+- Read a chunk's region: { start_message_id, end_message_id } — the id range
+  straight off a getSession chunk-manifest entry. session_id is inferred if omitted.
+
+maxChars caps the returned content (keeps at least one message).`,
+  {
+    session_id: z.number().optional().describe('Session ID (required for windowed browse)'),
+    offset: z.number().optional().describe('Window start (0-based, default 0)'),
+    limit: z.number().optional().describe('Window size (default 30)'),
+    start_message_id: z.number().optional().describe('Start of a message-id range (from a chunk manifest)'),
+    end_message_id: z.number().optional().describe('End of a message-id range (from a chunk manifest)'),
+    maxChars: z.number().optional().describe('Cap total content chars returned'),
+  },
+  async (params) => {
+    const result = await getMessages(params)
+    if (!result) return { content: [{ type: 'text', text: 'No messages found.' }] }
+    return { content: [{ type: 'text', text: formatMessages(result) }] }
+  }
+)
+
+server.tool(
+  'getChunk',
+  `Get one chunk's full summary by { session_id, chunk_index } — the middle step
+between a getSession manifest line and reading raw messages, when the one-line
+manifest summary isn't enough to decide. Includes the message-id range to hand
+to getMessages.`,
+  {
+    session_id: z.number().describe('Session ID'),
+    chunk_index: z.number().describe('Chunk index from the getSession manifest'),
+  },
+  async (params) => {
+    const chunk = await getChunk(params)
+    if (!chunk) return { content: [{ type: 'text', text: 'Chunk not found.' }] }
+    return { content: [{ type: 'text', text: formatChunk(chunk, params.session_id) }] }
   }
 )
 
