@@ -101,13 +101,13 @@ const getServer = () => {
 
   server.tool(
     'getMessages',
-    'Read raw messages windowed: { session_id, offset?, limit? } (default limit 30) or { start_message_id, end_message_id }.',
+    'Read raw messages windowed: { sessionId, offset?, limit? } (default limit 30) or { startMessageId, endMessageId }.',
     {
-      session_id: z.number().optional(),
+      sessionId: z.number().optional(),
       offset: z.number().optional(),
       limit: z.number().optional(),
-      start_message_id: z.number().optional(),
-      end_message_id: z.number().optional(),
+      startMessageId: z.number().optional(),
+      endMessageId: z.number().optional(),
       maxChars: z.number().optional(),
     },
     async (params) => {
@@ -119,15 +119,15 @@ const getServer = () => {
 
   server.tool(
     'getChunk',
-    'Get one chunk\'s full summary by { session_id, chunk_index }, with its message-id range.',
+    'Get one chunk\'s full summary by { sessionId, chunkIndex }, with its message-id range.',
     {
-      session_id: z.number(),
-      chunk_index: z.number(),
+      sessionId: z.number(),
+      chunkIndex: z.number(),
     },
     async (params) => {
       const chunk = await getChunk(params)
       if (!chunk) return { content: [{ type: 'text', text: 'Chunk not found.' }] }
-      return { content: [{ type: 'text', text: formatChunk(chunk, params.session_id) }] }
+      return { content: [{ type: 'text', text: formatChunk(chunk, params.sessionId) }] }
     }
   )
 

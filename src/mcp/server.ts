@@ -130,18 +130,18 @@ server.tool(
   'getMessages',
   `Read RAW messages, windowed. Two modes:
 
-- Browse a window: { session_id, offset?, limit? } — default limit 30 (never the
+- Browse a window: { sessionId, offset?, limit? } — default limit 30 (never the
   whole thread). Page with offset.
-- Read a chunk's region: { start_message_id, end_message_id } — the id range
-  straight off a getSession chunk-manifest entry. session_id is inferred if omitted.
+- Read a chunk's region: { startMessageId, endMessageId } — the id range
+  straight off a getSession chunk-manifest entry. sessionId is inferred if omitted.
 
 maxChars caps the returned content (keeps at least one message).`,
   {
-    session_id: z.number().optional().describe('Session ID (required for windowed browse)'),
+    sessionId: z.number().optional().describe('Session ID (required for windowed browse)'),
     offset: z.number().optional().describe('Window start (0-based, default 0)'),
     limit: z.number().optional().describe('Window size (default 30)'),
-    start_message_id: z.number().optional().describe('Start of a message-id range (from a chunk manifest)'),
-    end_message_id: z.number().optional().describe('End of a message-id range (from a chunk manifest)'),
+    startMessageId: z.number().optional().describe('Start of a message-id range (from a chunk manifest)'),
+    endMessageId: z.number().optional().describe('End of a message-id range (from a chunk manifest)'),
     maxChars: z.number().optional().describe('Cap total content chars returned'),
   },
   async (params) => {
@@ -153,18 +153,18 @@ maxChars caps the returned content (keeps at least one message).`,
 
 server.tool(
   'getChunk',
-  `Get one chunk's full summary by { session_id, chunk_index } — the middle step
+  `Get one chunk's full summary by { sessionId, chunkIndex } — the middle step
 between a getSession manifest line and reading raw messages, when the one-line
 manifest summary isn't enough to decide. Includes the message-id range to hand
 to getMessages.`,
   {
-    session_id: z.number().describe('Session ID'),
-    chunk_index: z.number().describe('Chunk index from the getSession manifest'),
+    sessionId: z.number().describe('Session ID'),
+    chunkIndex: z.number().describe('Chunk index from the getSession manifest'),
   },
   async (params) => {
     const chunk = await getChunk(params)
     if (!chunk) return { content: [{ type: 'text', text: 'Chunk not found.' }] }
-    return { content: [{ type: 'text', text: formatChunk(chunk, params.session_id) }] }
+    return { content: [{ type: 'text', text: formatChunk(chunk, params.sessionId) }] }
   }
 )
 

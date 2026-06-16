@@ -9,8 +9,11 @@ export const SNIPPET_MAX_CHARS = 140
 
 export const EXCERPT_MAX_CHARS = 300
 
+// Empty unquoted StartSel/StopSel made Postgres leak its parser state into the
+// snippet ("...,StopSel=progressive</b>"). Markdown bold marks the matched terms
+// cleanly and renders as emphasis for the LLM reading the result.
 export const ts_headline_options =
-  'StartSel=,StopSel=,MaxWords=25,MinWords=10,MaxFragments=1'
+  'StartSel=**, StopSel=**, MaxWords=25, MinWords=10, MaxFragments=1'
 
 const collapse = (text: string): string => text.replace(/\s+/g, ' ').trim()
 

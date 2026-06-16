@@ -154,11 +154,11 @@ export const getSessionDigest = async (
 }
 
 export type GetMessagesParams = {
-  session_id?: number
+  sessionId?: number
   offset?: number
   limit?: number
-  start_message_id?: number
-  end_message_id?: number
+  startMessageId?: number
+  endMessageId?: number
   maxChars?: number
 }
 
@@ -218,39 +218,39 @@ const readRange = async (sessionId: number, startId: number, endId: number) => {
 // window (offset/limit, default limit so we never spill the whole thread) or
 // read one chunk's region by its message-id range (straight off the manifest).
 export const getMessages = async (params: GetMessagesParams): Promise<MessagesResult | null> => {
-  if (params.start_message_id != null || params.end_message_id != null) {
+  if (params.startMessageId != null || params.endMessageId != null) {
     assert(
-      params.start_message_id != null && params.end_message_id != null,
-      'start_message_id and end_message_id must be provided together'
+      params.startMessageId != null && params.endMessageId != null,
+      'startMessageId and endMessageId must be provided together'
     )
     const sessionId =
-      params.session_id ?? (await sessionIdForMessage(params.start_message_id))
+      params.sessionId ?? (await sessionIdForMessage(params.startMessageId))
     if (sessionId == null) return null
-    const messages = await readRange(sessionId, params.start_message_id, params.end_message_id)
+    const messages = await readRange(sessionId, params.startMessageId, params.endMessageId)
     return {
       session_id: sessionId,
       messages: capByChars(messages, params.maxChars),
       range: {
         kind: 'message_ids',
-        start_message_id: params.start_message_id,
-        end_message_id: params.end_message_id,
+        start_message_id: params.startMessageId,
+        end_message_id: params.endMessageId,
       },
     }
   }
 
-  assert(params.session_id != null, 'session_id is required for windowed reads')
+  assert(params.sessionId != null, 'sessionId is required for windowed reads')
   const offset = params.offset ?? 0
   const limit = params.limit ?? DEFAULT_MESSAGE_LIMIT
-  const messages = await readWindow(params.session_id, offset, limit)
+  const messages = await readWindow(params.sessionId, offset, limit)
   return {
-    session_id: params.session_id,
+    session_id: params.sessionId,
     messages: capByChars(messages, params.maxChars),
     range: { kind: 'window', offset, limit },
   }
 }
 
 export const getChunk = async (
-  params: { session_id: number; chunk_index: number }
+  params: { sessionId: number; chunkIndex: number }
 ): Promise<ChunkManifestEntry | null> => {
   const result = await query<{
     chunk_index: number
@@ -262,7 +262,7 @@ export const getChunk = async (
     `SELECT chunk_index, summary, start_message_id, end_message_id, content_chars
      FROM session_chunks
      WHERE session_id = $1 AND chunk_index = $2`,
-    [params.session_id, params.chunk_index]
+    [params.sessionId, params.chunkIndex]
   )
   const row = result.rows[0]
   if (!row) return null
@@ -296,7 +296,7 @@ ${summaryBlock}
 
   if (d.chunks.length === 0)
     return `${header}
-_No chunk manifest — read the whole thread with getMessages({ session_id: ${d.session_id} })._`
+_No chunk manifest — read the whole thread with getMessages({ sessionId: ${d.session_id} })._`
 
   const map = d.chunks
     .map(
@@ -308,7 +308,7 @@ _No chunk manifest — read the whole thread with getMessages({ session_id: ${d.
   return `${header}
 ## Chunks
 
-Read a region with \`getMessages({ start_message_id, end_message_id })\`.
+Read a region with \`getMessages({ startMessageId, endMessageId })\`.
 
 ${map}`
 }
@@ -342,4 +342,4 @@ export const formatChunk = (c: ChunkManifestEntry, sessionId: number): string =>
 ${c.summary}
 
 ---
-Read the raw region: \`getMessages({ start_message_id: ${c.start_message_id}, end_message_id: ${c.end_message_id} })\``
+Read the raw region: \`getMessages({ startMessageId: ${c.start_message_id}, endMessageId: ${c.end_message_id} })\``

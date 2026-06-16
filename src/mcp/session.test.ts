@@ -130,7 +130,7 @@ describe('getMessages', () => {
 
   it('reads a window with a default limit (never the whole thread)', async () => {
     query.mockResolvedValueOnce(rows(msg(1, 'a'), msg(2, 'b')))
-    const result = await getMessages({ session_id: 42 })
+    const result = await getMessages({ sessionId: 42 })
     expect(result!.range).toEqual({ kind: 'window', offset: 0, limit: 30 })
     const limitArg = query.mock.calls[0][1] as unknown[]
     expect(limitArg).toEqual([42, 0, 30])
@@ -138,7 +138,7 @@ describe('getMessages', () => {
 
   it('reads a chunk region by message-id range', async () => {
     query.mockResolvedValueOnce(rows(msg(100, 'x'), msg(101, 'y')))
-    const result = await getMessages({ session_id: 42, start_message_id: 100, end_message_id: 140 })
+    const result = await getMessages({ sessionId: 42, startMessageId: 100, endMessageId: 140 })
     expect(result!.range).toEqual({
       kind: 'message_ids',
       start_message_id: 100,
@@ -148,11 +148,11 @@ describe('getMessages', () => {
 
   it('caps a window by maxChars but always returns at least one message', async () => {
     query.mockResolvedValueOnce(rows(msg(1, 'x'.repeat(100)), msg(2, 'y'.repeat(100))))
-    const result = await getMessages({ session_id: 42, maxChars: 10 })
+    const result = await getMessages({ sessionId: 42, maxChars: 10 })
     expect(result!.messages).toHaveLength(1)
   })
 
   it('crashes when only one end of a message-id range is given', async () => {
-    await expect(getMessages({ session_id: 42, start_message_id: 100 })).rejects.toThrow()
+    await expect(getMessages({ sessionId: 42, startMessageId: 100 })).rejects.toThrow()
   })
 })
