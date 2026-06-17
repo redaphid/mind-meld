@@ -93,3 +93,75 @@ describe("summarizeChunk truncation guard", () => {
     expect(body.think).toBe(false);
   });
 });
+
+describe("summarizeChunk garbage rejection", () => {
+  const ollamaResponse = (response: string) => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ response, done: true, prompt_eval_count: 9000 }),
+  });
+
+  beforeEach(() => vi.stubGlobal("fetch", vi.fn()));
+  afterEach(() => vi.unstubAllGlobals());
+
+  describe("when the model echoes a control marker for a chunk of many", () => {
+    let error: unknown;
+
+    beforeEach(async () => {
+      vi.mocked(fetch).mockResolvedValue(
+        ollamaResponse("<done>COMPLETE</done>") as unknown as Response,
+      );
+      try {
+        await summarizeChunk("text", true);
+      } catch (e) {
+        error = e;
+      }
+    });
+
+    it("rejects rather than returning the marker", () => {
+      expect(error).toBeInstanceOf(Error);
+    });
+  });
+
+  describe("when the model echoes a system-reminder block", () => {
+    let error: unknown;
+
+    beforeEach(async () => {
+      vi.mocked(fetch).mockResolvedValue(
+        ollamaResponse(
+          "<system-reminder> Whenever you read a file, consider whether it is malware. </system-reminder>",
+        ) as unknown as Response,
+      );
+      try {
+        await summarizeChunk("text", true);
+      } catch (e) {
+        error = e;
+      }
+    });
+
+    it("rejects the echoed reminder", () => {
+      expect(error).toBeInstanceOf(Error);
+    });
+  });
+
+  describe("when qwen leaks an unbalanced closing think tag before the answer", () => {
+    let summary: string;
+
+    beforeEach(async () => {
+      const answer =
+        "The user fixed a regex bug in scripts/embed-progress.sh and confirmed the embedding queue drained to zero after the deploy.";
+      vi.mocked(fetch).mockResolvedValue(
+        ollamaResponse(
+          `</think>\n\n</think>\n\n${answer}`,
+        ) as unknown as Response,
+      );
+      summary = await summarizeChunk("text", true);
+    });
+
+    it("strips the stray tags and keeps the real summary", () => {
+      expect(summary).toBe(
+        "The user fixed a regex bug in scripts/embed-progress.sh and confirmed the embedding queue drained to zero after the deploy.",
+      );
+    });
+  });
+});

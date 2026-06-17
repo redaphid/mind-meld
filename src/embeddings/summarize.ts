@@ -63,10 +63,26 @@ const MAX_SUMMARY_TOKENS = 8192;
 // inflating the combine input (seen in the wild: one chunk ballooned to 30k
 // chars / ~7600 tokens, deterministic rerun of same input produced 3075 chars).
 const MAX_CHUNK_SUMMARY_TOKENS = 3072;
-// Floor for the FINAL summary only (chunk summaries are kept regardless — see
-// summarizeChunk) — rejects refusals / near-empty garbage ("<done>", "The"),
-// not genuinely terse but real summaries.
+// Floor for every summary — chunk summaries are embedded into convo-chunks and
+// returned as chunk-tier search hits, so they must clear the same bar as the
+// final summary. Rejects refusals / near-empty garbage ("<done>", "The"), not
+// genuinely terse but real summaries.
 const MIN_SUMMARY_CHARS = 100;
+// Agentic transcripts carry markers (<done>COMPLETE</done>, <review>PASS</review>,
+// <system-reminder>…); qwen sometimes echoes one instead of summarizing. A real
+// prose summary (prompt forbids preamble) never opens with a tag.
+const CONTROL_MARKER = /^<[a-z]/i;
+
+// qwen3 reasons even with think:false, because we drive /api/generate with a raw
+// prompt — the think flag only takes effect through /api/chat's template. The
+// answer always follows the final </think>, so slice past it, then scrub any
+// stray opener/closer the balanced strip would miss.
+const stripThinking = (text: string): string => {
+  const lastClose = text.lastIndexOf("</think>");
+  const body =
+    lastClose === -1 ? text : text.slice(lastClose + "</think>".length);
+  return body.replace(/<\/?think>/g, "").trim();
+};
 
 interface OllamaGenerateResponse {
   response: string;
@@ -161,14 +177,18 @@ SUMMARY:`;
   const result = (await response.json()) as OllamaGenerateResponse;
   assertNotTruncated(result, "summarizeChunk");
 
-  // Clean up qwen3's thinking tags if present
-  let summary = result.response;
-  summary = summary.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+  const summary = stripThinking(result.response);
 
-  // A mid-transcript chunk summary is intermediate — keep whatever the model
-  // produced rather than throwing away the chunk. Only the final single-pass
-  // summary enforces the floor, to keep refusals/garbage out of session search.
-  if (!isChunkOfMany && summary.length < MIN_SUMMARY_CHARS) {
+  if (CONTROL_MARKER.test(summary)) {
+    console.error(
+      `Rejected summary (control marker): ${JSON.stringify(summary)}`,
+    );
+    throw new Error(
+      `Summary is a control marker (${JSON.stringify(summary.slice(0, 40))}); model echoed instead of summarizing`,
+    );
+  }
+
+  if (summary.length < MIN_SUMMARY_CHARS) {
     console.error(
       `Rejected summary (${summary.length} chars): ${JSON.stringify(summary)}`,
     );
@@ -247,8 +267,7 @@ MERGED SUMMARY:`;
 
     const result = (await response.json()) as OllamaGenerateResponse;
     assertNotTruncated(result, "combineSummaries");
-    let summary = result.response;
-    summary = summary.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+    const summary = stripThinking(result.response);
 
     console.log(
       `SUMMARY-OF-SUMMARIES (merged ${summaries.length} chunk summaries → ${summary.length} chars in ${((performance.now() - startedAt) / 1000).toFixed(1)}s):\n${summary}`,
