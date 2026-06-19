@@ -19,7 +19,7 @@ export function getChromaClient(): ChromaClient {
 export function getEmbeddingFunction(): OllamaEmbeddingFunction {
   if (!embeddingFunction) {
     embeddingFunction = new OllamaEmbeddingFunction({
-      url: config.ollama.url,
+      url: config.ollama.embeddingUrl,
       model: config.embeddings.model,
     });
   }
