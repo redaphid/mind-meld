@@ -150,9 +150,10 @@ chunk can't dump tens of thousands of tokens in one call. Whole messages are
 kept up to the budget; when more remain the result tells you the next offset /
 startMessageId to page. Override the cap with maxChars.
 
-OVERSIZED MESSAGES: a single message larger than the whole budget comes back as
-a stub (its size + a short preview) with a getMessage({ id }) pointer — its full
-content is never dumped inline.`,
+OVERSIZED MESSAGES: a single message larger than the whole budget comes back
+TRUNCATED — a labeled preview ("showing first N of M chars") plus a
+getMessage({ id }) pointer for the full content. This is the one place output is
+truncated, and it's always explicit and recoverable.`,
   {
     sessionId: z.number().optional().describe('Session ID (required for windowed browse)'),
     offset: z.number().optional().describe('Window start (0-based, default 0)'),
@@ -171,10 +172,10 @@ content is never dumped inline.`,
 server.tool(
   'getMessage',
   `Read ONE message in full by id, uncapped. The escape hatch for an oversized
-message that getMessages returned as a stub — reaching its full content requires
+message that getMessages returned TRUNCATED — reaching its full content requires
 this deliberate call, so a huge payload can never arrive by accident.`,
   {
-    id: z.number().describe('Message id (from a getMessages stub)'),
+    id: z.number().describe('Message id (from a truncated getMessages preview)'),
   },
   async (params) => {
     const message = await getMessageById(params.id)

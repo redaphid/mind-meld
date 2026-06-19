@@ -189,17 +189,22 @@ export type GetMessagesParams = {
 }
 
 // A rendered message is either the full message or — when one message alone
-// exceeds the whole char budget — a stub: just its identity and size. No preview
-// (we never slice content_text — No Truncation Policy); triage comes from the
-// chunk summary, the full bytes from one explicit getMessage call.
+// exceeds the call's char budget — a TRUNCATED preview. This is the single,
+// explicit exception to the No Truncation Policy: the cut is labeled
+// ("showing first N of M chars") and the full bytes are one getMessage call
+// away, so nothing is lost silently. Truncation lives ONLY here in the read
+// layer; content_text in the DB is never altered, so the summarizer and
+// embedding pipelines (which read content_text straight from the DB) can never
+// see a cut message.
 export type RenderedMessage =
-  | { kind: 'full'; message: SessionMessage }
+  | { truncated: false; message: SessionMessage }
   | {
-      kind: 'stub'
+      truncated: true
       id: number
       role: string
       tool_name: string | null
       char_count: number
+      preview: string
     }
 
 export type MessagesResult = {
@@ -224,18 +229,27 @@ const sessionIdForMessage = async (messageId: number): Promise<number | null> =>
   return result.rows[0]?.session_id ?? null
 }
 
-const toStub = (m: SessionMessage): RenderedMessage => ({
-  kind: 'stub',
-  id: m.id,
-  role: m.role,
-  tool_name: m.tool_name,
-  char_count: m.content_text?.length ?? 0,
-})
+const TRUNCATED_PREVIEW_CHARS = 2000
+
+// The cap also never exceeds the call's own budget — a tiny maxChars must win
+// over the default preview size.
+const toTruncated = (m: SessionMessage, budget: number): RenderedMessage => {
+  const text = m.content_text ?? ''
+  const cap = Math.min(TRUNCATED_PREVIEW_CHARS, budget)
+  return {
+    truncated: true,
+    id: m.id,
+    role: m.role,
+    tool_name: m.tool_name,
+    char_count: text.length,
+    preview: text.slice(0, cap),
+  }
+}
 
 // message.id is a bigint — pg hands it back as a string, so coerce before any
 // arithmetic on the paging cursor (else `id + 1` silently concatenates).
 const lastItemId = (item: RenderedMessage): number =>
-  Number(item.kind === 'full' ? item.message.id : item.id)
+  Number(item.truncated ? item.id : item.message.id)
 
 // Walk messages, keeping each whole until the budget runs out. A message larger
 // than the entire budget becomes a stub (alone) or is left for the next page.
@@ -248,12 +262,12 @@ const renderWithinBudget = (
   for (const m of messages) {
     const len = m.content_text?.length ?? 0
     if (len > budget && items.length === 0) {
-      items.push(toStub(m))
+      items.push(toTruncated(m, budget))
       return { items, exhausted: true }
     }
     if (len > budget) return { items, exhausted: true }
     if (used + len > budget && items.length > 0) return { items, exhausted: true }
-    items.push({ kind: 'full', message: m })
+    items.push({ truncated: false, message: m })
     used += len
   }
   return { items, exhausted: false }
@@ -299,6 +313,10 @@ export const getMessages = async (params: GetMessagesParams): Promise<MessagesRe
     const fetched = await readRange(sessionId, params.startMessageId, params.endMessageId)
     const { items, exhausted } = renderWithinBudget(fetched, budget)
     const lastId = items.length > 0 ? lastItemId(items[items.length - 1]) : null
+    // Only offer a continuation when one stays inside the range — a sole
+    // oversized message leaves lastId+1 past the end, which is no next page.
+    const nextStart =
+      exhausted && lastId != null && lastId + 1 <= params.endMessageId ? lastId + 1 : null
     return {
       session_id: sessionId,
       items,
@@ -312,7 +330,7 @@ export const getMessages = async (params: GetMessagesParams): Promise<MessagesRe
       budget_exhausted: exhausted,
       char_budget: budget,
       next_offset: null,
-      next_start_message_id: exhausted && lastId != null ? lastId + 1 : null,
+      next_start_message_id: nextStart,
     }
   }
 
@@ -426,9 +444,10 @@ const roleLabelFor = (role: string): string =>
   role === 'user' ? '**User:**' : role === 'assistant' ? '**Claude:**' : `**${role}:**`
 
 const renderItem = (item: RenderedMessage): string => {
-  if (item.kind === 'stub')
-    return `${roleLabelFor(item.role)}${item.tool_name ? ` [Tool: ${item.tool_name}]` : ''} [oversized: ${item.char_count} chars — not shown]
-_Read in full:_ \`getMessage({ id: ${item.id} })\` · or see this span's chunk summary in getSession`
+  if (item.truncated)
+    return `${roleLabelFor(item.role)}${item.tool_name ? ` [Tool: ${item.tool_name}]` : ''} [TRUNCATED — showing first ${item.preview.length} of ${item.char_count} chars]
+${item.preview}
+…[truncated — read the full message with \`getMessage({ id: ${item.id} })\`]`
   const m = item.message
   const toolLabel = m.tool_name ? ` [Tool: ${m.tool_name}]` : ''
   const modelLabel = m.model ? ` [${m.model}]` : ''

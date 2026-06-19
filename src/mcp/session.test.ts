@@ -187,8 +187,8 @@ describe('getMessages', () => {
     query.mockResolvedValueOnce(rows(msg(1, 'a'), msg(2, 'b')))
     const result = await getMessages({ sessionId: 42 })
     expect(result!.items).toEqual([
-      { kind: 'full', message: msg(1, 'a') },
-      { kind: 'full', message: msg(2, 'b') },
+      { truncated: false, message: msg(1, 'a') },
+      { truncated: false, message: msg(2, 'b') },
     ])
   })
 
@@ -210,13 +210,20 @@ describe('getMessages', () => {
     expect(result!.next_offset).toBe(1)
   })
 
-  it('stubs a single message larger than the whole budget instead of dumping it', async () => {
+  it('truncates a single message larger than the whole budget instead of dumping it', async () => {
     query.mockResolvedValueOnce(rows(msg(7, 'z'.repeat(500))))
     const result = await getMessages({ sessionId: 42, maxChars: 100 })
     expect(result!.items).toHaveLength(1)
     expect(result!.items[0]).toEqual(
-      expect.objectContaining({ kind: 'stub', id: 7, char_count: 500 })
+      expect.objectContaining({ truncated: true, id: 7, char_count: 500 })
     )
+  })
+
+  it('caps the truncated preview at the call budget, never past it', async () => {
+    query.mockResolvedValueOnce(rows(msg(7, 'z'.repeat(500))))
+    const result = await getMessages({ sessionId: 42, maxChars: 100 })
+    const item = result!.items[0]
+    expect(item.truncated && item.preview.length).toBe(100)
   })
 
   it('points past an oversized message so a range read can continue', async () => {
@@ -230,6 +237,17 @@ describe('getMessages', () => {
     expect(result!.next_start_message_id).toBe(8)
   })
 
+  it('offers no continuation when the sole oversized message ends the range', async () => {
+    query.mockResolvedValueOnce(rows(msg(7, 'z'.repeat(500))))
+    const result = await getMessages({
+      sessionId: 42,
+      startMessageId: 7,
+      endMessageId: 7,
+      maxChars: 100,
+    })
+    expect(result!.next_start_message_id).toBeNull()
+  })
+
   it('leaves an oversized message for the next page when earlier messages were shown', async () => {
     query.mockResolvedValueOnce(rows(msg(5, 'small'), msg(6, 'z'.repeat(500))))
     const result = await getMessages({
@@ -239,7 +257,7 @@ describe('getMessages', () => {
       maxChars: 100,
     })
     expect(result!.shown).toBe(1)
-    expect(result!.items[0]).toEqual({ kind: 'full', message: msg(5, 'small') })
+    expect(result!.items[0]).toEqual({ truncated: false, message: msg(5, 'small') })
     expect(result!.next_start_message_id).toBe(6)
   })
 
@@ -249,20 +267,30 @@ describe('getMessages', () => {
 })
 
 describe('formatMessages', () => {
-  it('renders an oversized stub with a getMessage pointer', () => {
-    const text = formatMessages({
-      session_id: 42,
-      items: [{ kind: 'stub', id: 7, role: 'assistant', tool_name: null, char_count: 9000 }],
-      range: { kind: 'window', offset: 0, limit: 30 },
-      fetched: 1,
-      shown: 1,
-      budget_exhausted: true,
-      char_budget: 24000,
-      next_offset: null,
-      next_start_message_id: null,
-    })
-    expect(text).toContain('getMessage({ id: 7 })')
-    expect(text).toContain('9000 chars')
+  const truncatedResult = {
+    session_id: 42,
+    items: [
+      { truncated: true as const, id: 7, role: 'assistant', tool_name: null, char_count: 9000, preview: 'the first part' },
+    ],
+    range: { kind: 'window' as const, offset: 0, limit: 30 },
+    fetched: 1,
+    shown: 1,
+    budget_exhausted: true,
+    char_budget: 24000,
+    next_offset: null,
+    next_start_message_id: null,
+  }
+
+  it('labels a truncated message as TRUNCATED with both counts', () => {
+    expect(formatMessages(truncatedResult)).toContain('TRUNCATED — showing first 14 of 9000 chars')
+  })
+
+  it('shows the preview text of a truncated message', () => {
+    expect(formatMessages(truncatedResult)).toContain('the first part')
+  })
+
+  it('points to getMessage for the full truncated message', () => {
+    expect(formatMessages(truncatedResult)).toContain('getMessage({ id: 7 })')
   })
 })
 

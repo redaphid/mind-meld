@@ -25,6 +25,10 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+logs/
+
+# Stray Claude version symlinks
+/2.1.*
 
 # Temporary files
 tmp/

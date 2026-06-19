@@ -106,7 +106,7 @@ const getServer = () => {
 
   server.tool(
     'getMessages',
-    'Read raw messages windowed: { sessionId, offset?, limit? } (default limit 30) or { startMessageId, endMessageId }. Budgeted to ~24K chars (override with maxChars); when more remain the result gives the next page cursor. An oversized message returns as a stub with a getMessage({ id }) pointer rather than dumping inline.',
+    'Read raw messages windowed: { sessionId, offset?, limit? } (default limit 30) or { startMessageId, endMessageId }. Budgeted to ~24K chars (override with maxChars); when more remain the result gives the next page cursor. A single oversized message comes back TRUNCATED — a labeled preview plus a getMessage({ id }) pointer for the full content.',
     {
       sessionId: z.number().optional(),
       offset: z.number().optional(),
@@ -124,9 +124,9 @@ const getServer = () => {
 
   server.tool(
     'getMessage',
-    'Read ONE message in full by id, uncapped. The escape hatch for an oversized message that getMessages returned as a stub.',
+    'Read ONE message in full by id, uncapped. The escape hatch for an oversized message that getMessages returned TRUNCATED.',
     {
-      id: z.number().describe('Message id (from a getMessages stub)'),
+      id: z.number().describe('Message id (from a truncated getMessages preview)'),
     },
     async (params) => {
       const message = await getMessageById(params.id)
