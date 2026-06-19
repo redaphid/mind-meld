@@ -62,6 +62,7 @@ services:
       CHROMA_PORT: 8000
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_EMBEDDING_URL: ${OLLAMA_EMBEDDING_URL:-http://host.docker.internal:21434}
+      OLLAMA_MAX_CONCURRENCY: ${OLLAMA_MAX_CONCURRENCY:-1}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
       EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-50}
@@ -90,6 +91,7 @@ services:
       CHROMA_PORT: 8000
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_EMBEDDING_URL: ${OLLAMA_EMBEDDING_URL:-http://host.docker.internal:21434}
+      OLLAMA_MAX_CONCURRENCY: ${OLLAMA_MAX_CONCURRENCY:-1}
       CENTROID_INTERVAL_SECONDS: ${CENTROID_INTERVAL_SECONDS:-25200}
 
   warmup-filter:
@@ -126,6 +128,7 @@ services:
       CHROMA_PORT: 8000
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_EMBEDDING_URL: ${OLLAMA_EMBEDDING_URL:-http://host.docker.internal:21434}
+      OLLAMA_MAX_CONCURRENCY: ${OLLAMA_MAX_CONCURRENCY:-1}
       MCP_PORT: 3000
     ports:
       - "${MCP_HTTP_PORT:-3847}:3000"

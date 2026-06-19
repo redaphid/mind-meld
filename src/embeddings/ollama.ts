@@ -1,6 +1,7 @@
 import { Ollama } from "ollama";
 import { config } from "../config.js";
 import { summarizeConversation, SUMMARIZE_MODEL } from "./summarize.js";
+import { withOllamaGate } from "./ollama-gate.js";
 
 // Fetch wrapper with timeout and retry for transient failures
 const fetchWithRetry: typeof fetch = async (input, init) => {
@@ -14,10 +15,12 @@ const fetchWithRetry: typeof fetch = async (input, init) => {
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const response = await fetch(input, {
-        ...init,
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      const response = await withOllamaGate(() =>
+        fetch(input, {
+          ...init,
+          signal: AbortSignal.timeout(timeoutMs),
+        }),
+      );
       return response;
     } catch (error: any) {
       const isTimeout =
@@ -47,7 +50,8 @@ async function rephraseText(text: string): Promise<string> {
 
   const response = await ollama.generate({
     model: SUMMARIZE_MODEL,
-    prompt: `Rephrase the following text using completely different words and sentence structure while preserving the exact meaning. Use simple, plain language. Do not add any introduction or explanation, just output the rephrased text:
+    prompt: `/no_think
+Rephrase the following text using completely different words and sentence structure while preserving the exact meaning. Use simple, plain language. Do not add any introduction or explanation, just output the rephrased text:
 
 ${text}`,
     stream: false,

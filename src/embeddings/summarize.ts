@@ -1,4 +1,5 @@
 import { config } from "../config.js";
+import { withOllamaGate } from "./ollama-gate.js";
 
 export const SUMMARIZE_MODEL = config.embeddings.summarizeModel;
 
@@ -12,10 +13,12 @@ const fetchWithRetry = async (
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const response = await fetch(url, {
-        ...options,
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      const response = await withOllamaGate(() =>
+        fetch(url, {
+          ...options,
+          signal: AbortSignal.timeout(timeoutMs),
+        }),
+      );
       return response;
     } catch (error: any) {
       const isTimeout =
@@ -73,10 +76,14 @@ const MIN_SUMMARY_CHARS = 100;
 // prose summary (prompt forbids preamble) never opens with a tag.
 const CONTROL_MARKER = /^<[a-z]/i;
 
-// qwen3 reasons even with think:false, because we drive /api/generate with a raw
-// prompt — the think flag only takes effect through /api/chat's template. The
-// answer always follows the final </think>, so slice past it, then scrub any
-// stray opener/closer the balanced strip would miss.
+// Belt-and-suspenders against qwen3 reasoning. `think: false` in the request
+// body already suppresses it on current Ollama, but the `/no_think` soft switch
+// in the prompt is a cheap guard if a model/version change ever re-enables it.
+// It is NOT a latency fix — measured summary cost is dominated by prompt prefill
+// on a contended GPU, not by generated tokens. qwen3 may still emit an empty
+// <think></think> pair, so stripThinking stays as a net: the answer follows the
+// final </think>, so slice past it, then scrub any stray opener/closer.
+const NO_THINK = "/no_think";
 const stripThinking = (text: string): string => {
   const lastClose = text.lastIndexOf("</think>");
   const body =
@@ -122,7 +129,8 @@ export async function summarizeChunk(
     ? "This is one chunk of a larger conversation. Preserve all technical details for later combination."
     : "";
 
-  const prompt = `You are writing a dense technical summary of a coding conversation. The summary is used for semantic search, so it must describe what actually happened — not reproduce it.
+  const prompt = `${NO_THINK}
+You are writing a dense technical summary of a coding conversation. The summary is used for semantic search, so it must describe what actually happened — not reproduce it.
 
 ${contextNote}
 
@@ -219,7 +227,8 @@ export async function combineSummaries(summaries: string[]): Promise<string> {
     );
     const startedAt = performance.now();
 
-    const prompt = `Merge the following chunk summaries of a single coding conversation into one coherent summary.
+    const prompt = `${NO_THINK}
+Merge the following chunk summaries of a single coding conversation into one coherent summary.
 
 Rules:
 - Preserve concrete nouns from each chunk (file paths, function names, error messages, decisions) inline as prose.
