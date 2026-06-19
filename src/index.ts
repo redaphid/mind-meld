@@ -150,7 +150,8 @@ program
     console.log('\n=== Configuration ===\n');
     console.log(`PostgreSQL: ${config.postgres.host}:${config.postgres.port}`);
     console.log(`Chroma: ${config.chroma.url}`);
-    console.log(`Ollama: ${config.ollama.url}`);
+    console.log(`Ollama (generation): ${config.ollama.url}`);
+    console.log(`Ollama (vectorization): ${config.ollama.embeddingUrl}`);
     console.log(`\nClaude Code path: ${config.sources.claudeCode.path}`);
     console.log(`Cursor path: ${config.sources.cursor.path}`);
     console.log(`\nEmbedding model: ${config.embeddings.model}`);

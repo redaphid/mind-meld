@@ -50,7 +50,11 @@ export const config = {
 
   // Ollama
   ollama: {
+    // Generation/summarization ollama (qwen3). Flash attention is fine here.
     url: getEnv("OLLAMA_URL", "http://localhost:11434"),
+    // Vectorization ollama (bge-m3) on a separate instance with flash attention
+    // OFF — flash attention makes bge-m3 return null embeddings, breaking sync.
+    embeddingUrl: getEnv("OLLAMA_EMBEDDING_URL", "http://localhost:21434"),
     timeoutMs: getEnvInt("OLLAMA_TIMEOUT_MS", 120000), // 2 minutes
     maxRetries: getEnvInt("OLLAMA_MAX_RETRIES", 3),
     retryDelayMs: getEnvInt("OLLAMA_RETRY_DELAY_MS", 5000), // 5 seconds between retries

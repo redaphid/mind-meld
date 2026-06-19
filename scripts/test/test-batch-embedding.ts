@@ -62,7 +62,7 @@ async function testBatchEmbedding() {
     // Now test calling Ollama directly to see the raw response
     console.log('\n--- Testing direct Ollama call ---');
     try {
-      const ollama = new Ollama({ host: config.ollama.url });
+      const ollama = new Ollama({ host: config.ollama.embeddingUrl });
       const response = await ollama.embed({
         model: config.embeddings.model,
         input: texts.slice(0, 5), // Just first 5 to be quick
