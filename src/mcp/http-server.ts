@@ -12,9 +12,11 @@ import { sinceSchema } from './since.js'
 import {
   getSessionDigest,
   getMessages,
+  getMessageById,
   getChunk,
   formatDigest,
   formatMessages,
+  formatMessage,
   formatChunk,
 } from './session.js'
 import { getSyncStatus } from '../sync/orchestrator.js'
@@ -89,12 +91,14 @@ const getServer = () => {
 
   server.tool(
     'getSession',
-    'Get a session DIGEST — summary + chunk manifest, no raw messages. Use getMessages to read message regions.',
+    'Get a session DIGEST — summary + chunk manifest (paged: chunkOffset/chunkLimit, default 20), no raw messages. Each chunk is a section summary spanning ~dozens of messages. Use getMessages to read message regions.',
     {
       sessionId: z.number().describe('Session ID from search results'),
+      chunkOffset: z.number().optional().describe('First section to return (0-based, default 0)'),
+      chunkLimit: z.number().optional().describe('Max sections to return (default 20)'),
     },
     async (params) => {
-      const digest = await getSessionDigest({ sessionId: params.sessionId })
+      const digest = await getSessionDigest(params)
       if (!digest) return { content: [{ type: 'text', text: 'Session not found.' }] }
       return { content: [{ type: 'text', text: formatDigest(digest) }] }
     }
@@ -102,7 +106,7 @@ const getServer = () => {
 
   server.tool(
     'getMessages',
-    'Read raw messages windowed: { sessionId, offset?, limit? } (default limit 30) or { startMessageId, endMessageId }.',
+    'Read raw messages windowed: { sessionId, offset?, limit? } (default limit 30) or { startMessageId, endMessageId }. Budgeted to ~24K chars (override with maxChars); when more remain the result gives the next page cursor. An oversized message returns as a stub with a getMessage({ id }) pointer rather than dumping inline.',
     {
       sessionId: z.number().optional(),
       offset: z.number().optional(),
@@ -115,6 +119,19 @@ const getServer = () => {
       const result = await getMessages(params)
       if (!result) return { content: [{ type: 'text', text: 'No messages found.' }] }
       return { content: [{ type: 'text', text: formatMessages(result) }] }
+    }
+  )
+
+  server.tool(
+    'getMessage',
+    'Read ONE message in full by id, uncapped. The escape hatch for an oversized message that getMessages returned as a stub.',
+    {
+      id: z.number().describe('Message id (from a getMessages stub)'),
+    },
+    async (params) => {
+      const message = await getMessageById(params.id)
+      if (!message) return { content: [{ type: 'text', text: 'Message not found.' }] }
+      return { content: [{ type: 'text', text: formatMessage(message) }] }
     }
   )
 

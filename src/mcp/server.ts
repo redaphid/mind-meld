@@ -8,9 +8,11 @@ import { sinceSchema } from './since.js'
 import {
   getSessionDigest,
   getMessages,
+  getMessageById,
   getChunk,
   formatDigest,
   formatMessages,
+  formatMessage,
   formatChunk,
 } from './session.js'
 import { getHealth, formatHealth } from './health.js'
@@ -94,13 +96,20 @@ rung of disclosure: the session summary plus a manifest of its chunks, each with
 a one-line summary and a { start_message_id, end_message_id } range. Read the
 region you want with getMessages; don't pull the whole thread.
 
-Returns: { summary, title, project, message_count, date, tokens,
+Each chunk is a SECTION SUMMARY — one paragraph standing in for a span of
+~dozens of messages (not a per-message summary). The manifest is itself paged:
+it returns up to chunkLimit sections from chunkOffset, with total_chunks so you
+can page a long session instead of pulling all summaries at once.
+
+Returns: { summary, title, project, message_count, date, tokens, total_chunks,
            chunks: [{ index, summary, start_message_id, end_message_id, chars }] }`,
   {
     sessionId: z.number().describe('Session ID from search results'),
+    chunkOffset: z.number().optional().describe('First section to return (0-based, default 0)'),
+    chunkLimit: z.number().optional().describe('Max sections to return (default 20)'),
   },
   async (params) => {
-    const digest = await getSessionDigest({ sessionId: params.sessionId })
+    const digest = await getSessionDigest(params)
     if (!digest) return { content: [{ type: 'text', text: 'Session not found.' }] }
     return { content: [{ type: 'text', text: formatDigest(digest) }] }
   }
@@ -136,19 +145,41 @@ server.tool(
 - Read a chunk's region: { startMessageId, endMessageId } — the id range
   straight off a getSession chunk-manifest entry. sessionId is inferred if omitted.
 
-maxChars caps the returned content (keeps at least one message).`,
+BUDGETED: total content is capped at a default char budget (~24K chars) so a big
+chunk can't dump tens of thousands of tokens in one call. Whole messages are
+kept up to the budget; when more remain the result tells you the next offset /
+startMessageId to page. Override the cap with maxChars.
+
+OVERSIZED MESSAGES: a single message larger than the whole budget comes back as
+a stub (its size + a short preview) with a getMessage({ id }) pointer — its full
+content is never dumped inline.`,
   {
     sessionId: z.number().optional().describe('Session ID (required for windowed browse)'),
     offset: z.number().optional().describe('Window start (0-based, default 0)'),
     limit: z.number().optional().describe('Window size (default 30)'),
     startMessageId: z.number().optional().describe('Start of a message-id range (from a chunk manifest)'),
     endMessageId: z.number().optional().describe('End of a message-id range (from a chunk manifest)'),
-    maxChars: z.number().optional().describe('Cap total content chars returned'),
+    maxChars: z.number().optional().describe('Override the default char budget'),
   },
   async (params) => {
     const result = await getMessages(params)
     if (!result) return { content: [{ type: 'text', text: 'No messages found.' }] }
     return { content: [{ type: 'text', text: formatMessages(result) }] }
+  }
+)
+
+server.tool(
+  'getMessage',
+  `Read ONE message in full by id, uncapped. The escape hatch for an oversized
+message that getMessages returned as a stub — reaching its full content requires
+this deliberate call, so a huge payload can never arrive by accident.`,
+  {
+    id: z.number().describe('Message id (from a getMessages stub)'),
+  },
+  async (params) => {
+    const message = await getMessageById(params.id)
+    if (!message) return { content: [{ type: 'text', text: 'Message not found.' }] }
+    return { content: [{ type: 'text', text: formatMessage(message) }] }
   }
 )
 

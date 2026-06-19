@@ -38,7 +38,12 @@ export type SessionDigest = {
   message_count: number
   date: Date
   tokens: number
+  // The manifest is itself a windowed rung: `chunks` is the slice starting at
+  // `chunk_offset`, `total_chunks` is how many the session has. A 96-chunk
+  // session would otherwise dump ~34K tokens of summaries in one call.
   chunks: ChunkManifestEntry[]
+  chunk_offset: number
+  total_chunks: number
 }
 
 export type SessionMessage = {
@@ -52,6 +57,11 @@ export type SessionMessage = {
 }
 
 const DEFAULT_MESSAGE_LIMIT = 30
+const DEFAULT_CHUNK_LIMIT = 20
+// ~6K tokens. Keeps a normal multi-message read whole (p95 message is ~5.8K
+// chars) while bounding the tail: an uncapped chunk-range read could otherwise
+// return a 272K-char chunk in one call. Overridable per-call via maxChars.
+const DEFAULT_CHAR_BUDGET = 24000
 
 const SELECT_METADATA = `
   SELECT s.id, s.external_id, s.title, s.summary, p.name as project_name, p.path as project_path,
@@ -82,27 +92,37 @@ const findByTerm = async (term: string) => {
   return result.rows[0] ?? null
 }
 
-const buildManifest = async (sessionId: number): Promise<ChunkManifestEntry[]> => {
+const buildManifest = async (
+  sessionId: number,
+  offset: number,
+  limit: number
+): Promise<{ chunks: ChunkManifestEntry[]; total: number }> => {
   const result = await query<{
     chunk_index: number
     summary: string
     start_message_id: number
     end_message_id: number
     content_chars: number
+    total_chunks: string
   }>(
-    `SELECT chunk_index, summary, start_message_id, end_message_id, content_chars
+    `SELECT chunk_index, summary, start_message_id, end_message_id, content_chars,
+            count(*) OVER() AS total_chunks
      FROM session_chunks
      WHERE session_id = $1
-     ORDER BY chunk_index ASC`,
-    [sessionId]
+     ORDER BY chunk_index ASC
+     OFFSET $2 LIMIT $3`,
+    [sessionId, offset, limit]
   )
-  return result.rows.map((r) => ({
-    index: r.chunk_index,
-    summary: r.summary,
-    start_message_id: r.start_message_id,
-    end_message_id: r.end_message_id,
-    chars: r.content_chars,
-  }))
+  return {
+    total: result.rows[0] ? Number(result.rows[0].total_chunks) : 0,
+    chunks: result.rows.map((r) => ({
+      index: r.chunk_index,
+      summary: r.summary,
+      start_message_id: r.start_message_id,
+      end_message_id: r.end_message_id,
+      chars: r.content_chars,
+    })),
+  }
 }
 
 const firstMessageText = async (sessionId: number): Promise<string | null> => {
@@ -118,7 +138,9 @@ const firstMessageText = async (sessionId: number): Promise<string | null> => {
 const toDigest = (
   s: SessionMetadata,
   chunks: ChunkManifestEntry[],
-  excerpt: string | null
+  excerpt: string | null,
+  chunkOffset: number,
+  totalChunks: number
 ): SessionDigest => ({
   session_id: s.id,
   title: s.title,
@@ -129,13 +151,15 @@ const toDigest = (
   date: s.started_at,
   tokens: Number(s.total_input_tokens) + Number(s.total_output_tokens),
   chunks,
+  chunk_offset: chunkOffset,
+  total_chunks: totalChunks,
 })
 
 // The digest is the middle rung: a session's summary plus a manifest of its
 // chunks, each carrying the message-id range a caller can hand to getMessages.
 // No raw messages — that's getMessages' job.
 export const getSessionDigest = async (
-  params: { sessionId?: number; searchTerm?: string }
+  params: { sessionId?: number; searchTerm?: string; chunkOffset?: number; chunkLimit?: number }
 ): Promise<SessionDigest | null> => {
   const metadata = params.sessionId
     ? await findById(params.sessionId)
@@ -144,13 +168,15 @@ export const getSessionDigest = async (
       : null
   if (!metadata) return null
 
-  const chunks = await buildManifest(metadata.id)
+  const offset = params.chunkOffset ?? 0
+  const limit = params.chunkLimit ?? DEFAULT_CHUNK_LIMIT
+  const { chunks, total } = await buildManifest(metadata.id, offset, limit)
   // Excerpt only matters when the summary is missing. Prefer the first chunk
   // summary (always present for chunked sessions); else the first message.
   const excerpt = metadata.summary
     ? null
     : buildExcerpt(chunks[0]?.summary ?? (await firstMessageText(metadata.id)))
-  return toDigest(metadata, chunks, excerpt)
+  return toDigest(metadata, chunks, excerpt, offset, total)
 }
 
 export type GetMessagesParams = {
@@ -162,12 +188,32 @@ export type GetMessagesParams = {
   maxChars?: number
 }
 
+// A rendered message is either the full message or — when one message alone
+// exceeds the whole char budget — a stub: just its identity and size. No preview
+// (we never slice content_text — No Truncation Policy); triage comes from the
+// chunk summary, the full bytes from one explicit getMessage call.
+export type RenderedMessage =
+  | { kind: 'full'; message: SessionMessage }
+  | {
+      kind: 'stub'
+      id: number
+      role: string
+      tool_name: string | null
+      char_count: number
+    }
+
 export type MessagesResult = {
   session_id: number
-  messages: SessionMessage[]
+  items: RenderedMessage[]
   range:
     | { kind: 'window'; offset: number; limit: number }
     | { kind: 'message_ids'; start_message_id: number; end_message_id: number }
+  fetched: number
+  shown: number
+  budget_exhausted: boolean
+  char_budget: number
+  next_offset: number | null
+  next_start_message_id: number | null
 }
 
 const sessionIdForMessage = async (messageId: number): Promise<number | null> => {
@@ -178,16 +224,39 @@ const sessionIdForMessage = async (messageId: number): Promise<number | null> =>
   return result.rows[0]?.session_id ?? null
 }
 
-const capByChars = (messages: SessionMessage[], maxChars?: number): SessionMessage[] => {
-  if (maxChars == null) return messages
+const toStub = (m: SessionMessage): RenderedMessage => ({
+  kind: 'stub',
+  id: m.id,
+  role: m.role,
+  tool_name: m.tool_name,
+  char_count: m.content_text?.length ?? 0,
+})
+
+// message.id is a bigint — pg hands it back as a string, so coerce before any
+// arithmetic on the paging cursor (else `id + 1` silently concatenates).
+const lastItemId = (item: RenderedMessage): number =>
+  Number(item.kind === 'full' ? item.message.id : item.id)
+
+// Walk messages, keeping each whole until the budget runs out. A message larger
+// than the entire budget becomes a stub (alone) or is left for the next page.
+const renderWithinBudget = (
+  messages: SessionMessage[],
+  budget: number
+): { items: RenderedMessage[]; exhausted: boolean } => {
+  const items: RenderedMessage[] = []
   let used = 0
-  const kept: SessionMessage[] = []
   for (const m of messages) {
-    used += m.content_text?.length ?? 0
-    if (kept.length > 0 && used > maxChars) break
-    kept.push(m)
+    const len = m.content_text?.length ?? 0
+    if (len > budget && items.length === 0) {
+      items.push(toStub(m))
+      return { items, exhausted: true }
+    }
+    if (len > budget) return { items, exhausted: true }
+    if (used + len > budget && items.length > 0) return { items, exhausted: true }
+    items.push({ kind: 'full', message: m })
+    used += len
   }
-  return kept
+  return { items, exhausted: false }
 }
 
 const readWindow = async (sessionId: number, offset: number, limit: number) => {
@@ -218,6 +287,7 @@ const readRange = async (sessionId: number, startId: number, endId: number) => {
 // window (offset/limit, default limit so we never spill the whole thread) or
 // read one chunk's region by its message-id range (straight off the manifest).
 export const getMessages = async (params: GetMessagesParams): Promise<MessagesResult | null> => {
+  const budget = params.maxChars ?? DEFAULT_CHAR_BUDGET
   if (params.startMessageId != null || params.endMessageId != null) {
     assert(
       params.startMessageId != null && params.endMessageId != null,
@@ -226,27 +296,56 @@ export const getMessages = async (params: GetMessagesParams): Promise<MessagesRe
     const sessionId =
       params.sessionId ?? (await sessionIdForMessage(params.startMessageId))
     if (sessionId == null) return null
-    const messages = await readRange(sessionId, params.startMessageId, params.endMessageId)
+    const fetched = await readRange(sessionId, params.startMessageId, params.endMessageId)
+    const { items, exhausted } = renderWithinBudget(fetched, budget)
+    const lastId = items.length > 0 ? lastItemId(items[items.length - 1]) : null
     return {
       session_id: sessionId,
-      messages: capByChars(messages, params.maxChars),
+      items,
       range: {
         kind: 'message_ids',
         start_message_id: params.startMessageId,
         end_message_id: params.endMessageId,
       },
+      fetched: fetched.length,
+      shown: items.length,
+      budget_exhausted: exhausted,
+      char_budget: budget,
+      next_offset: null,
+      next_start_message_id: exhausted && lastId != null ? lastId + 1 : null,
     }
   }
 
   assert(params.sessionId != null, 'sessionId is required for windowed reads')
   const offset = params.offset ?? 0
   const limit = params.limit ?? DEFAULT_MESSAGE_LIMIT
-  const messages = await readWindow(params.sessionId, offset, limit)
+  const fetched = await readWindow(params.sessionId, offset, limit)
+  const { items, exhausted } = renderWithinBudget(fetched, budget)
+  const more = exhausted || fetched.length === limit
   return {
     session_id: params.sessionId,
-    messages: capByChars(messages, params.maxChars),
+    items,
     range: { kind: 'window', offset, limit },
+    fetched: fetched.length,
+    shown: items.length,
+    budget_exhausted: exhausted,
+    char_budget: budget,
+    next_offset: more && items.length > 0 ? offset + items.length : null,
+    next_start_message_id: null,
   }
+}
+
+// The escape hatch for an oversized message: fetch exactly one by id, in full,
+// uncapped. Reaching a 271K-char message requires this explicit, deliberate call
+// — it can never arrive by accident through a window or range read.
+export const getMessageById = async (id: number): Promise<SessionMessage | null> => {
+  const result = await query<SessionMessage>(
+    `SELECT id, sequence_num, role, content_text, tool_name, timestamp, model
+     FROM messages
+     WHERE id = $1`,
+    [id]
+  )
+  return result.rows[0] ?? null
 }
 
 export const getChunk = async (
@@ -305,35 +404,64 @@ _No chunk manifest — read the whole thread with getMessages({ sessionId: ${d.s
     )
     .join('\n')
 
+  const shownTo = d.chunk_offset + d.chunks.length
+  const heading =
+    d.total_chunks > d.chunks.length
+      ? `## Chunks (${d.chunk_offset}–${shownTo - 1} of ${d.total_chunks})`
+      : `## Chunks`
+  const pager =
+    d.total_chunks > shownTo
+      ? `\n\n_More chunks — \`getSession({ sessionId: ${d.session_id}, chunkOffset: ${shownTo} })\`._`
+      : ''
+
   return `${header}
-## Chunks
+${heading}
 
-Read a region with \`getMessages({ startMessageId, endMessageId })\`.
+Each chunk is a summary of a span of messages (not one message). Read a span's raw messages with \`getMessages({ startMessageId, endMessageId })\`.
 
-${map}`
+${map}${pager}`
+}
+
+const roleLabelFor = (role: string): string =>
+  role === 'user' ? '**User:**' : role === 'assistant' ? '**Claude:**' : `**${role}:**`
+
+const renderItem = (item: RenderedMessage): string => {
+  if (item.kind === 'stub')
+    return `${roleLabelFor(item.role)}${item.tool_name ? ` [Tool: ${item.tool_name}]` : ''} [oversized: ${item.char_count} chars — not shown]
+_Read in full:_ \`getMessage({ id: ${item.id} })\` · or see this span's chunk summary in getSession`
+  const m = item.message
+  const toolLabel = m.tool_name ? ` [Tool: ${m.tool_name}]` : ''
+  const modelLabel = m.model ? ` [${m.model}]` : ''
+  return `${roleLabelFor(m.role)}${toolLabel}${modelLabel}\n${m.content_text ?? '[No content]'}`
+}
+
+const pagingFooter = (result: MessagesResult): string => {
+  if (result.next_offset != null)
+    return `\n\n---\n_More messages — \`getMessages({ sessionId: ${result.session_id}, offset: ${result.next_offset} })\`._`
+  if (result.next_start_message_id != null && result.range.kind === 'message_ids')
+    return `\n\n---\n_Budget reached — continue: \`getMessages({ startMessageId: ${result.next_start_message_id}, endMessageId: ${result.range.end_message_id} })\`._`
+  return ''
 }
 
 export const formatMessages = (result: MessagesResult): string => {
-  const { messages, range } = result
+  const { items, range } = result
   const rangeInfo =
     range.kind === 'window'
-      ? `messages ${range.offset + 1}–${range.offset + messages.length} (offset ${range.offset}, limit ${range.limit})`
-      : `messages in id range ${range.start_message_id}–${range.end_message_id}`
+      ? `window offset ${range.offset}, limit ${range.limit}`
+      : `id range ${range.start_message_id}–${range.end_message_id}`
 
-  const header = `**Session ${result.session_id}** — ${rangeInfo}\n\n---\n\n`
+  if (items.length === 0)
+    return `**Session ${result.session_id}** — ${rangeInfo}\n\nNo messages in this range.`
 
-  const body = messages
-    .map((m) => {
-      const roleLabel =
-        m.role === 'user' ? '**User:**' : m.role === 'assistant' ? '**Claude:**' : `**${m.role}:**`
-      const toolLabel = m.tool_name ? ` [Tool: ${m.tool_name}]` : ''
-      const modelLabel = m.model ? ` [${m.model}]` : ''
-      const content = m.content_text ?? '[No content]'
-      return `${roleLabel}${toolLabel}${modelLabel}\n${content}`
-    })
-    .join('\n\n---\n\n')
+  const header = `**Session ${result.session_id}** — ${rangeInfo} · showing ${result.shown} of ${result.fetched} fetched (budget ${result.char_budget} chars)\n\n---\n\n`
+  const body = items.map(renderItem).join('\n\n---\n\n')
+  return header + body + pagingFooter(result)
+}
 
-  return header + body
+export const formatMessage = (m: SessionMessage): string => {
+  const toolLabel = m.tool_name ? ` [Tool: ${m.tool_name}]` : ''
+  const modelLabel = m.model ? ` [${m.model}]` : ''
+  return `${roleLabelFor(m.role)}${toolLabel}${modelLabel} **(message ${m.id}, ${m.content_text?.length ?? 0} chars)**\n\n${m.content_text ?? '[No content]'}`
 }
 
 export const formatChunk = (c: ChunkManifestEntry, sessionId: number): string =>
