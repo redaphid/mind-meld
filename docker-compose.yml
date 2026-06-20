@@ -45,34 +45,12 @@ services:
       timeout: 5s
       retries: 5
 
-  sync:
-    image: ghcr.io/redaphid/mindmeld-sync:latest
-    container_name: mindmeld-sync
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      chroma:
-        condition: service_healthy
-    environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindmeld}
-      CHROMA_HOST: chroma
-      CHROMA_PORT: 8000
-      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
-      OLLAMA_EMBEDDING_URL: ${OLLAMA_EMBEDDING_URL:-http://host.docker.internal:21434}
-      OLLAMA_MAX_CONCURRENCY: ${OLLAMA_MAX_CONCURRENCY:-1}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
-      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
-      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-50}
-      SUMMARIZE_MODEL: ${SUMMARIZE_MODEL:-qwen3:8b}
-      OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-300000}
-      SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-3600}
-    volumes:
-      - ${CLAUDE_CODE_PATH:-~/.claude}:/root/.claude:ro
-      # macOS default path - Linux users: set CURSOR_GLOBALSTATE_PATH=~/.cursor/User/globalStorage
-      - "${CURSOR_GLOBALSTATE_PATH:-~/Library/Application Support/Cursor/User/globalStorage}:/root/.config/Cursor/User/globalStorage:ro"
+  # NOTE: the `sync` worker no longer runs in Docker on macOS. Docker Desktop's
+  # container network proxy (gvisor/vpnkit) backpressures Ollama's response
+  # stream, inflating chunk summaries from ~3s to ~30s. It now runs as a HOST
+  # process via scripts/sync-host.sh (launchd: com.hypnodroid.mindmeld-sync),
+  # reaching Ollama over the fast host->tunnel path and Postgres/Chroma via their
+  # published ports. On a Linux host where Ollama is local, restore this service.
 
   centroid-compute:
     image: ghcr.io/redaphid/mindmeld-centroids:latest
