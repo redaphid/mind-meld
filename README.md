@@ -46,6 +46,8 @@ docker logs mindmeld-sync --tail 20  # Sync progress
 
 - **[Docker Setup](docs/DOCKER.md)** - Full setup, troubleshooting, configuration
 - **[Usage Guide](docs/USAGE.md)** - Search examples, MCP tools reference
+- **[Multi-Machine Setup](docs/MULTI-MACHINE.md)** - One shared brain; connect laptops/other machines over SSH
+- **[Linux Installation Tips](docs/LINUX.md)** - Paths, the flash-off embedding Ollama, systemd, host Docker networking
 
 ## Services
 
