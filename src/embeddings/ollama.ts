@@ -95,6 +95,18 @@ function sanitizeText(text: string): string {
     .trim();
 }
 
+// bge-m3 rejects some inputs outright, two ways: a NaN bug on certain texts
+// (ollama#13572), and a context-length 400 that no character heuristic predicts
+// — 6k chars of id-dense text can blow the 8192-token window while 50k chars of
+// prose fits inside it. Both recover identically: re-embed something shorter.
+// Anything else is a real fault and must surface.
+export const isRecoverableEmbedError = (error: any) => {
+  const message = `${error?.message ?? ""} ${error?.error ?? ""}`;
+  return (
+    message.includes("NaN") || message.includes("exceeds the context length")
+  );
+};
+
 // Generate embeddings for multiple texts in batch
 // Returns null for texts that cannot be embedded (Ollama bug)
 export async function generateEmbeddings(
@@ -122,12 +134,12 @@ export async function generateEmbeddings(
       keep_alive: "30m",
     });
   } catch (error: any) {
-    // Ollama bge-m3 has a known bug that produces NaN for certain texts
-    // GitHub issue: https://github.com/ollama/ollama/issues/13572
-    // When batch fails with NaN, retry each text individually with summarization fallback
-    if (error.message?.includes("NaN") || error.error?.includes("NaN")) {
+    // One bad text fails the whole batch, so degrade to per-text rather than
+    // letting it poison the other 49. The queue is ordered by id and never
+    // skips, so a rethrow here stalls every message behind it, permanently.
+    if (isRecoverableEmbedError(error)) {
       console.log(
-        "Batch failed with NaN error, retrying individually with summarization fallback...",
+        `Batch failed (${error.message || error.error}), retrying individually with summarization fallback...`,
       );
       return await generateEmbeddingsWithFallback(texts, sanitizedTexts);
     }
@@ -164,10 +176,10 @@ async function generateEmbeddingsWithFallback(
 
       embeddings.push(response.embeddings[0]);
     } catch (error: any) {
-      // If original fails with NaN, try summarizing
-      if (error.message?.includes("NaN") || error.error?.includes("NaN")) {
+      // If the original is unembeddable, try a shorter rewrite of it
+      if (isRecoverableEmbedError(error)) {
         console.log(
-          `  Text ${i} failed with NaN, trying with summarization...`,
+          `  Text ${i} failed (${error.message || error.error}), trying with summarization...`,
         );
 
         try {
@@ -191,13 +203,10 @@ async function generateEmbeddingsWithFallback(
           console.log(`  ✅ Summarization worked for text ${i}`);
           embeddings.push(response.embeddings[0]);
         } catch (summaryError: any) {
-          // If summarization also fails with NaN, try rephrasing with completely different words
-          if (
-            summaryError.message?.includes("NaN") ||
-            summaryError.error?.includes("NaN")
-          ) {
+          // If the summary is unembeddable too, try completely different words
+          if (isRecoverableEmbedError(summaryError)) {
             console.log(
-              `  Summarization also produced NaN, trying with rephrasing...`,
+              `  Summary also unembeddable (${summaryError.message || summaryError.error}), trying with rephrasing...`,
             );
 
             try {
@@ -238,9 +247,9 @@ async function generateEmbeddingsWithFallback(
               embeddings.push(null); // Return null to mark as un-embeddable
             }
           } else {
-            // Non-NaN error from summarization
+            // Not a recoverable embed failure — a real fault, surface it
             console.error(
-              `\n🚨 CRITICAL: Text ${i} summarization failed with non-NaN error!`,
+              `\n🚨 CRITICAL: Text ${i} summarization failed with an unrecoverable error!`,
             );
             console.error(`   Error: ${summaryError.message || summaryError}`);
             throw summaryError;
