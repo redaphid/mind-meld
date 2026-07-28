@@ -68,7 +68,6 @@ services:
       CHROMA_HOST: chroma
       CHROMA_PORT: 8000
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
-      OLLAMA_EMBEDDING_URL: ${OLLAMA_EMBEDDING_URL:-http://host.docker.internal:21434}
       OLLAMA_MAX_CONCURRENCY: ${OLLAMA_MAX_CONCURRENCY:-1}
       CENTROID_INTERVAL_SECONDS: ${CENTROID_INTERVAL_SECONDS:-25200}
 
@@ -105,7 +104,6 @@ services:
       CHROMA_HOST: chroma
       CHROMA_PORT: 8000
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
-      OLLAMA_EMBEDDING_URL: ${OLLAMA_EMBEDDING_URL:-http://host.docker.internal:21434}
       OLLAMA_MAX_CONCURRENCY: ${OLLAMA_MAX_CONCURRENCY:-1}
       MCP_PORT: 3000
     ports:

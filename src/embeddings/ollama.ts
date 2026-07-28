@@ -46,7 +46,7 @@ const fetchWithRetry: typeof fetch = async (input, init) => {
 
 // Rephrase text using completely different wording to avoid triggering NaN bugs
 async function rephraseText(text: string): Promise<string> {
-  const ollama = getGenerationClient();
+  const ollama = getOllamaClient();
 
   const response = await ollama.generate({
     model: SUMMARIZE_MODEL,
@@ -61,30 +61,17 @@ ${text}`,
   return response.response.trim();
 }
 
-let embeddingClient: Ollama | null = null;
-let generationClient: Ollama | null = null;
+let client: Ollama | null = null;
 
-// Vectorization (bge-m3) — its own ollama with flash attention off (port 21434).
+// One ollama serves both bge-m3 (vectorization) and qwen3 (generation).
 export function getOllamaClient(): Ollama {
-  if (!embeddingClient) {
-    embeddingClient = new Ollama({
-      host: config.ollama.embeddingUrl,
-      fetch: fetchWithRetry,
-    });
-  }
-  return embeddingClient;
-}
-
-// Generation (qwen3) — the summarizer ollama (port 11434), used by the NaN
-// rephrase fallback so it never hits the embedding instance.
-function getGenerationClient(): Ollama {
-  if (!generationClient) {
-    generationClient = new Ollama({
+  if (!client) {
+    client = new Ollama({
       host: config.ollama.url,
       fetch: fetchWithRetry,
     });
   }
-  return generationClient;
+  return client;
 }
 
 // Generate embedding for a single text

@@ -16,7 +16,6 @@ export POSTGRES_PORT=5433
 export CHROMA_HOST=localhost
 export CHROMA_PORT=8001
 export OLLAMA_URL=http://localhost:11434
-export OLLAMA_EMBEDDING_URL=http://localhost:21434
 
 INTERVAL="${SYNC_INTERVAL_SECONDS:-3600}"
 while true; do
