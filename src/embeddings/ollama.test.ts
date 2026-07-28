@@ -1,5 +1,55 @@
-import { describe, it, expect } from "vitest";
-import { isRecoverableEmbedError } from "./ollama.js";
+import { describe, it, expect, beforeEach } from "vitest";
+import {
+  isRecoverableEmbedError,
+  isOversizeEmbedError,
+  isNaNEmbedError,
+} from "./ollama.js";
+
+// Oversize and NaN are both recoverable but need opposite rewrites — summarize to
+// shed tokens vs. rephrase to change wording at the same length. Confusing the two
+// sends a too-long text to the rephraser, which returns something just as long.
+describe("embed failure classification", () => {
+  let error: any;
+
+  describe("when ollama rejects the input for context length", () => {
+    beforeEach(() => {
+      error = { error: "the input length exceeds the context length" };
+    });
+
+    it("classifies it as oversize", () => {
+      expect(isOversizeEmbedError(error)).toBe(true);
+    });
+
+    it("does not classify it as NaN", () => {
+      expect(isNaNEmbedError(error)).toBe(false);
+    });
+  });
+
+  describe("when the model returns a NaN embedding", () => {
+    beforeEach(() => {
+      error = new Error("NaN in embedding");
+    });
+
+    it("classifies it as NaN", () => {
+      expect(isNaNEmbedError(error)).toBe(true);
+    });
+
+    it("does not classify it as oversize", () => {
+      expect(isOversizeEmbedError(error)).toBe(false);
+    });
+  });
+
+  describe("when ollama is unreachable", () => {
+    beforeEach(() => {
+      error = new Error("fetch failed");
+      error.code = "ECONNREFUSED";
+    });
+
+    it("classifies it as neither oversize nor NaN", () => {
+      expect(isRecoverableEmbedError(error)).toBe(false);
+    });
+  });
+});
 
 // This predicate is the cork-remover. It sat unexercised from 2026-01 to
 // 2026-07-20, matching only "NaN"; the first context-length 400 to arrive
@@ -34,9 +84,9 @@ describe("isRecoverableEmbedError", () => {
   });
 
   it("does NOT swallow a missing model", () => {
-    expect(
-      isRecoverableEmbedError({ error: 'model "bge-m3" not found' }),
-    ).toBe(false);
+    expect(isRecoverableEmbedError({ error: 'model "bge-m3" not found' })).toBe(
+      false,
+    );
   });
 
   it("does NOT swallow a timeout", () => {

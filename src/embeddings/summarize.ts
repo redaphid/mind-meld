@@ -421,6 +421,41 @@ export async function summarizeConversation(
   return combineSummaries(chunkSummaries);
 }
 
+// A summary that isn't smaller than its input is not a summary. qwen3 at 0.3 falls
+// into repetition loops on some inputs and rambles to the num_predict cap — observed
+// 2026-07-28 merging 19,499 chars of chunk summaries into 50,831 chars of the same
+// clause repeated. Callers rely on this shrinking, so refuse rather than hand back
+// something they'll only have to re-summarize.
+const assertShrunk = (input: string, summary: string) => {
+  if (summary.length < input.length) return summary;
+  throw new Error(
+    `Summarization did not shrink text (${input.length} → ${summary.length} chars); model likely looped`,
+  );
+};
+
+// summarizeConversation returns its input verbatim below MAX_CHARS_BEFORE_SUMMARIZE,
+// which is useless to a caller that needs the text to get *smaller*: bge-m3 rejects on
+// tokens, not characters, and id-dense text can blow the 8192-token window in 6k chars.
+// This always runs the model, so the output is always shorter than the input.
+export async function shrinkBySummarizing(text: string): Promise<string> {
+  if (text.length <= MAX_SUMMARIZER_INPUT_CHARS) {
+    return assertShrunk(text, await summarizeChunk(text, false));
+  }
+
+  const chunks = chunkMessagesWithIndices([text], MAX_SUMMARIZER_INPUT_CHARS);
+  const summaries: string[] = [];
+  for (const chunk of chunks) {
+    summaries.push(await summarizeChunk(chunk.messages.join(""), true));
+  }
+
+  // Joined chunk summaries are always smaller than the original, so they're the
+  // safety net when the merge pass loops instead of condensing.
+  const joined = summaries.join("\n\n");
+  const merged = await combineSummaries(summaries);
+  if (merged.length < joined.length) return assertShrunk(text, merged);
+  return assertShrunk(text, joined);
+}
+
 export async function ensureSummarizeModel(): Promise<void> {
   try {
     const response = await fetchWithRetry(

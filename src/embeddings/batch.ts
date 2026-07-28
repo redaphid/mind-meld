@@ -495,11 +495,11 @@ export async function updateAggregateEmbeddings(): Promise<{
       const wasSummarized =
         textForEmbedding.length < formattedMessages.join("").length;
 
-      // bge-m3 accepts 8192 tokens (~32k chars). Match the summary budget
-      // exactly so we don't silently drop the tail of a long summary.
-      const embeddings = await generateEmbeddings([
-        textForEmbedding.slice(0, 32000),
-      ]);
+      // Send the whole summary. The old slice(0, 32000) assumed ~4 chars/token,
+      // but bge-m3's real ceiling for these summaries measured ~22k chars — so the
+      // slice cut the tail off long ones and ollama silently cut more. Oversize is
+      // now summarized down inside generateEmbeddings instead of being chopped.
+      const embeddings = await generateEmbeddings([textForEmbedding]);
 
       if (embeddings[0] === null) {
         await markSessionProcessed(

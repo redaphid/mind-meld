@@ -116,7 +116,7 @@ export const persistSessionChunks = async (
     const chunkId = row.rows[0].id;
     const chromaId = `chunk-${chunkId}`;
 
-    const [embedding] = await generateEmbeddings([summary.slice(0, 32000)]);
+    const [embedding] = await generateEmbeddings([summary]);
     if (!embedding) {
       console.warn(
         `Embedding generation failed for chunk ${chunkId}; row persisted without vector`,

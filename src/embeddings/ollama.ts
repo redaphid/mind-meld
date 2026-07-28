@@ -1,6 +1,6 @@
 import { Ollama } from "ollama";
 import { config } from "../config.js";
-import { summarizeConversation, SUMMARIZE_MODEL } from "./summarize.js";
+import { shrinkBySummarizing, SUMMARIZE_MODEL } from "./summarize.js";
 import { withOllamaGate } from "./ollama-gate.js";
 
 // Fetch wrapper with timeout and retry for transient failures
@@ -74,6 +74,13 @@ export function getOllamaClient(): Ollama {
   return client;
 }
 
+// truncate:false is load-bearing everywhere we embed. Ollama's default silently
+// clips anything past the 8192-token window and still returns a vector — built from
+// a prefix, with no error and no record that it happened. Measured 2026-07-28: 64% of
+// 5-8k-char messages and 100% of session summaries over ~22k chars were being clipped
+// this way. Refusing lets the caller summarize instead, which loses far less.
+const NO_TRUNCATE = { truncate: false, keep_alive: "30m" } as const;
+
 // Generate embedding for a single text
 export async function generateEmbedding(text: string): Promise<number[]> {
   const ollama = getOllamaClient();
@@ -81,7 +88,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   const response = await ollama.embed({
     model: config.embeddings.model,
     input: text,
-    keep_alive: "30m",
+    ...NO_TRUNCATE,
   });
 
   return response.embeddings[0];
@@ -95,17 +102,21 @@ function sanitizeText(text: string): string {
     .trim();
 }
 
-// bge-m3 rejects some inputs outright, two ways: a NaN bug on certain texts
-// (ollama#13572), and a context-length 400 that no character heuristic predicts
-// — 6k chars of id-dense text can blow the 8192-token window while 50k chars of
-// prose fits inside it. Both recover identically: re-embed something shorter.
-// Anything else is a real fault and must surface.
-export const isRecoverableEmbedError = (error: any) => {
-  const message = `${error?.message ?? ""} ${error?.error ?? ""}`;
-  return (
-    message.includes("NaN") || message.includes("exceeds the context length")
-  );
-};
+// bge-m3 rejects input two ways, and they need opposite remedies:
+//   oversize — too many tokens for the 8192 window. Only shorter text helps.
+//   NaN      — the flash-attention bug (ollama#13572). Only different wording helps.
+// Neither is predictable from character count: 6k chars of id-dense text can
+// overflow while 26k chars of prose fits. Anything else is a real fault.
+const errorText = (error: any) =>
+  `${error?.message ?? ""} ${error?.error ?? ""}`;
+
+export const isOversizeEmbedError = (error: any) =>
+  errorText(error).includes("exceeds the context length");
+
+export const isNaNEmbedError = (error: any) => errorText(error).includes("NaN");
+
+export const isRecoverableEmbedError = (error: any) =>
+  isOversizeEmbedError(error) || isNaNEmbedError(error);
 
 // Generate embeddings for multiple texts in batch
 // Returns null for texts that cannot be embedded (Ollama bug)
@@ -131,7 +142,7 @@ export async function generateEmbeddings(
     response = await ollama.embed({
       model: config.embeddings.model,
       input: sanitizedTexts,
-      keep_alive: "30m",
+      ...NO_TRUNCATE,
     });
   } catch (error: any) {
     // One bad text fails the whole batch, so degrade to per-text rather than
@@ -139,9 +150,9 @@ export async function generateEmbeddings(
     // skips, so a rethrow here stalls every message behind it, permanently.
     if (isRecoverableEmbedError(error)) {
       console.log(
-        `Batch failed (${error.message || error.error}), retrying individually with summarization fallback...`,
+        `Batch failed (${error.message || error.error}), re-embedding individually...`,
       );
-      return await generateEmbeddingsWithFallback(texts, sanitizedTexts);
+      return await generateEmbeddingsWithFallback(sanitizedTexts);
     }
     throw error;
   }
@@ -149,120 +160,89 @@ export async function generateEmbeddings(
   return response.embeddings;
 }
 
-// Retry failed embeddings individually with summarization fallback
-async function generateEmbeddingsWithFallback(
-  originalTexts: string[],
-  sanitizedTexts: string[],
-): Promise<(number[] | null)[]> {
-  const ollama = getOllamaClient();
-  const embeddings: (number[] | null)[] = [];
+// How many times we may rewrite one text before giving up on it. Each round costs
+// a qwen3 pass, so this bounds the damage a pathological input can do to sync time.
+const MAX_SHRINK_ROUNDS = 3;
 
-  for (let i = 0; i < sanitizedTexts.length; i++) {
+// Shrink by summarizing, never by cutting. A hard slice keeps a prefix and throws
+// away the tail unread; a summary keeps what the whole text was about. Which rewrite
+// we reach for depends on why bge-m3 refused: oversize needs fewer tokens, NaN needs
+// different words at the same length.
+const rewriteForRetry = async (error: any, text: string) => {
+  if (isOversizeEmbedError(error)) return shrinkBySummarizing(text);
+  return rephraseText(text);
+};
+
+// Embed one text, rewriting it as many times as it takes to fit. Returns null only
+// when the rewrites are exhausted or the summarizer itself refuses the text.
+const embedWithShrinking = async (
+  text: string,
+  label: string,
+): Promise<number[] | null> => {
+  const ollama = getOllamaClient();
+  let candidate = text;
+
+  for (let round = 0; round <= MAX_SHRINK_ROUNDS; round++) {
     try {
-      // Try original text first
       const response = await ollama.embed({
         model: config.embeddings.model,
-        input: [sanitizedTexts[i]],
-        keep_alive: "30m",
+        input: [candidate],
+        ...NO_TRUNCATE,
       });
 
-      // Check for NaN
-      const hasNaN = response.embeddings[0].some(
-        (val) => isNaN(val) || !isFinite(val),
-      );
-      if (hasNaN) {
+      const [embedding] = response.embeddings;
+      if (embedding.some((value) => isNaN(value) || !isFinite(value))) {
         throw new Error("NaN in embedding");
       }
 
-      embeddings.push(response.embeddings[0]);
-    } catch (error: any) {
-      // If the original is unembeddable, try a shorter rewrite of it
-      if (isRecoverableEmbedError(error)) {
+      if (round > 0) {
         console.log(
-          `  Text ${i} failed (${error.message || error.error}), trying with summarization...`,
+          `  ✅ ${label} embedded after ${round} rewrite(s) (${text.length} → ${candidate.length} chars)`,
         );
-
-        try {
-          const summarized = await summarizeConversation([sanitizedTexts[i]]);
-          console.log(`  Summarized to: ${summarized.substring(0, 100)}...`);
-
-          // Try embedding the summarized version
-          const response = await ollama.embed({
-            model: config.embeddings.model,
-            input: [summarized],
-            keep_alive: "30m",
-          });
-
-          const hasNaN = response.embeddings[0].some(
-            (val) => isNaN(val) || !isFinite(val),
-          );
-          if (hasNaN) {
-            throw new Error("NaN in summarized embedding");
-          }
-
-          console.log(`  ✅ Summarization worked for text ${i}`);
-          embeddings.push(response.embeddings[0]);
-        } catch (summaryError: any) {
-          // If the summary is unembeddable too, try completely different words
-          if (isRecoverableEmbedError(summaryError)) {
-            console.log(
-              `  Summary also unembeddable (${summaryError.message || summaryError.error}), trying with rephrasing...`,
-            );
-
-            try {
-              // Ask Ollama to rephrase using completely different wording
-              const rephrased = await rephraseText(sanitizedTexts[i]);
-              console.log(`  Rephrased to: ${rephrased.substring(0, 100)}...`);
-
-              // Try embedding the rephrased version
-              const response = await ollama.embed({
-                model: config.embeddings.model,
-                input: [rephrased],
-                keep_alive: "30m",
-              });
-
-              const hasNaN = response.embeddings[0].some(
-                (val) => isNaN(val) || !isFinite(val),
-              );
-              if (hasNaN) {
-                throw new Error("NaN in rephrased embedding");
-              }
-
-              console.log(`  ✅ Rephrasing worked for text ${i}`);
-              embeddings.push(response.embeddings[0]);
-            } catch (rephraseError: any) {
-              // If even rephrasing fails, mark as un-embeddable and continue
-              console.error(
-                `\n⚠️  Text ${i} failed even after rephrasing - will mark as un-embeddable`,
-              );
-              console.error(
-                `   Error: ${rephraseError.message || rephraseError}`,
-              );
-              console.error(
-                `   Original text length: ${sanitizedTexts[i].length}`,
-              );
-              console.error(
-                `   Original text (first 200 chars): ${sanitizedTexts[i].substring(0, 200)}\n`,
-              );
-              embeddings.push(null); // Return null to mark as un-embeddable
-            }
-          } else {
-            // Not a recoverable embed failure — a real fault, surface it
-            console.error(
-              `\n🚨 CRITICAL: Text ${i} summarization failed with an unrecoverable error!`,
-            );
-            console.error(`   Error: ${summaryError.message || summaryError}`);
-            throw summaryError;
-          }
-        }
-      } else {
-        throw error;
       }
+      return embedding;
+    } catch (error: any) {
+      if (!isRecoverableEmbedError(error)) throw error;
+
+      if (round === MAX_SHRINK_ROUNDS) {
+        console.error(
+          `⚠️  ${label} still unembeddable after ${MAX_SHRINK_ROUNDS} rewrites (${candidate.length} chars): ${error.message || error.error}`,
+        );
+        return null;
+      }
+
+      const reason = isOversizeEmbedError(error) ? "oversize" : "NaN";
+      const before = candidate.length;
+      try {
+        candidate = await rewriteForRetry(error, candidate);
+      } catch (rewriteError: any) {
+        // The summarizer refused (injection sentinel, control marker, empty
+        // output). There is no shorter text to try, so stop cleanly.
+        console.error(
+          `⚠️  ${label} rewrite failed: ${rewriteError.message || rewriteError}`,
+        );
+        return null;
+      }
+      console.log(
+        `  ${label} ${reason} → rewrote ${before} → ${candidate.length} chars (round ${round + 1})`,
+      );
     }
   }
 
+  return null;
+};
+
+// Re-embed a failed batch one text at a time, so one bad input costs one vector
+// instead of fifty.
+const generateEmbeddingsWithFallback = async (
+  sanitizedTexts: string[],
+): Promise<(number[] | null)[]> => {
+  const embeddings: (number[] | null)[] = [];
+  for (let i = 0; i < sanitizedTexts.length; i++) {
+    embeddings.push(await embedWithShrinking(sanitizedTexts[i], `text ${i}`));
+  }
   return embeddings;
-}
+};
 
 // Check if embedding model is available
 export async function checkEmbeddingModel(): Promise<boolean> {
