@@ -25,11 +25,18 @@ import { getCollection } from "../src/db/chroma.js";
 const MIN_CHARS = 4000;
 const DRY_RUN = process.argv.includes("--dry-run");
 
+// Stamped on every row this script repairs. It doubles as the resume marker: the
+// summary text never changes, so a re-run would otherwise re-probe as clipped and
+// redo hours of work. It is also honest provenance — after the repair these vectors
+// genuinely are derived from a summary rather than the stored text.
+const REPAIR_MARKER = "shrink:1.7.0";
+
 interface Tier {
   name: string;
   collection: string;
   chromaId: (id: number) => string;
   sql: string;
+  markSql: string;
 }
 
 const TIERS: Tier[] = [
@@ -42,7 +49,10 @@ const TIERS: Tier[] = [
           JOIN embeddings e ON e.chroma_id = 'session-' || s.id::text
             AND e.chroma_collection = $1
           WHERE s.summary IS NOT NULL AND length(s.summary) > $2
+            AND e.summarize_model IS DISTINCT FROM '${REPAIR_MARKER}'
           ORDER BY length(s.summary) DESC`,
+    markSql: `UPDATE embeddings SET summarize_model = '${REPAIR_MARKER}', updated_at = NOW()
+              WHERE chroma_collection = $1 AND chroma_id = $2`,
   },
   {
     name: "chunks",
@@ -53,7 +63,10 @@ const TIERS: Tier[] = [
           JOIN embeddings e ON e.session_chunk_id = c.id
             AND e.chroma_collection = $1
           WHERE c.summary IS NOT NULL AND length(c.summary) > $2
+            AND e.summarize_model IS DISTINCT FROM '${REPAIR_MARKER}'
           ORDER BY length(c.summary) DESC`,
+    markSql: `UPDATE embeddings SET summarize_model = '${REPAIR_MARKER}', updated_at = NOW()
+              WHERE chroma_collection = $1 AND chroma_id = $2`,
   },
 ];
 
@@ -130,6 +143,7 @@ const backfillTier = async (tier: Tier) => {
       documents: [existing.documents[0] ?? row.summary],
       metadatas: [existing.metadatas[0] ?? {}],
     });
+    await query(tier.markSql, [tier.collection, chromaId]);
     repaired++;
     console.log(
       `  ✅ ${chromaId} re-embedded (${row.summary.length} chars) — ${repaired}/${clipped}`,

@@ -124,6 +124,7 @@ const assertNotTruncated = (
 export async function summarizeChunk(
   text: string,
   isChunkOfMany: boolean,
+  maxTokens?: number,
 ): Promise<string> {
   const contextNote = isChunkOfMany
     ? "This is one chunk of a larger conversation. Preserve all technical details for later combination."
@@ -168,9 +169,9 @@ SUMMARY:`;
         options: {
           temperature: 0.3,
           num_ctx: SUMMARIZER_NUM_CTX,
-          num_predict: isChunkOfMany
-            ? MAX_CHUNK_SUMMARY_TOKENS
-            : MAX_SUMMARY_TOKENS,
+          num_predict:
+            maxTokens ??
+            (isChunkOfMany ? MAX_CHUNK_SUMMARY_TOKENS : MAX_SUMMARY_TOKENS),
         },
       }),
     },
@@ -437,9 +438,19 @@ const assertShrunk = (input: string, summary: string) => {
 // which is useless to a caller that needs the text to get *smaller*: bge-m3 rejects on
 // tokens, not characters, and id-dense text can blow the 8192-token window in 6k chars.
 // This always runs the model, so the output is always shorter than the input.
+// assertShrunk alone can only detect a runaway summary after paying for it, and on
+// the single-chunk path there's no joined-chunks fallback to fall back to. Capping
+// num_predict at roughly a quarter of the input's token count makes the runaway
+// impossible instead: prose is ~4 chars/token, so input/16 tokens cannot outrun
+// input chars no matter how badly the model loops.
+const shrinkBudget = (chars: number) => Math.max(256, Math.floor(chars / 16));
+
 export async function shrinkBySummarizing(text: string): Promise<string> {
   if (text.length <= MAX_SUMMARIZER_INPUT_CHARS) {
-    return assertShrunk(text, await summarizeChunk(text, false));
+    return assertShrunk(
+      text,
+      await summarizeChunk(text, false, shrinkBudget(text.length)),
+    );
   }
 
   const chunks = chunkMessagesWithIndices([text], MAX_SUMMARIZER_INPUT_CHARS);
