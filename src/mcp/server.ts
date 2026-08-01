@@ -70,6 +70,7 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
     limit: z.number().optional().describe('Max results to return (default 8)'),
     source: z.string().optional().describe('Filter to specific source'),
     since: sinceSchema.optional(),
+    machine: z.string().optional().describe('Filter to sessions recorded on a specific machine (e.g. windows-desktop, wsl, mac)'),
     projectOnly: z.boolean().optional().describe('Only search conversations from the CWD project'),
     likeSession: z.array(z.string()).optional().describe('Boost results similar to these session IDs (format: ["123"] or ["123:1.5"])'),
     unlikeSession: z.array(z.string()).optional().describe('Suppress results similar to these session IDs'),

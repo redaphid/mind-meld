@@ -236,6 +236,7 @@ export async function syncCursor(options?: { incremental?: boolean }): Promise<C
           projectId: definiteProjectId,
           externalId: conv.conversationId,
           title: conv.preview?.slice(0, 100) || 'Untitled',
+          machine: config.machineName,
           fileModifiedAt: new Date(conv.updatedAt),
           startedAt,
           endedAt,

@@ -139,6 +139,7 @@ describe('formatDigest', () => {
     summary: 'a summary',
     excerpt: null,
     project: 'mind-meld',
+    machine: null,
     message_count: 10,
     date: new Date('2026-01-01T00:00:00Z'),
     tokens: 100,

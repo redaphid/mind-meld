@@ -294,18 +294,34 @@ export async function parseClaudeSessionFile(filePath: string): Promise<ParsedSe
   };
 }
 
-// Decode project path from encoded directory name
+// Decode project path from encoded directory name.
+//
+// Claude Code encodes the cwd by replacing every path separator (and the
+// Windows drive colon) with '-'. Two shapes exist:
+//   Unix:    "-Users-hypnodroid-Projects-sibi"  → "/Users/hypnodroid/Projects/sibi"
+//   Windows: "D--Projects-mind-meld"            → "D:/Projects/mind-meld"
+//            ("D:\" → "D--", "\" → "-")
+//
+// KNOWN LOSSINESS: hyphens inside real directory names are indistinguishable
+// from separators, so "mind-meld" mechanically decodes to "mind/meld". The
+// sync's cwd-based correction (src/sync/claude-code.ts) repairs this whenever a
+// session carries a cwd — always prefer session cwd over this decode.
 export function decodeProjectPath(encodedName: string): string {
-  // Convert "-Users-hypnodroid-Projects-sibi" to "/Users/hypnodroid/Projects/sibi"
   if (encodedName.startsWith('-')) {
     return encodedName.replace(/^-/, '/').replace(/-/g, '/');
+  }
+  // Windows encoding: single drive letter followed by '--'
+  const windowsMatch = /^([A-Za-z])--(.+)$/.exec(encodedName);
+  if (windowsMatch) {
+    return `${windowsMatch[1]}:/${windowsMatch[2].replace(/-/g, '/')}`;
   }
   return encodedName;
 }
 
-// Extract project name from path
+// Extract project name from path (handles both '/' and '\' separators, so
+// Windows cwds like "D:\Projects\mind-meld" yield "mind-meld")
 export function extractProjectName(path: string): string {
-  const parts = path.split('/').filter(Boolean);
+  const parts = path.split(/[/\\]/).filter(Boolean);
   return parts[parts.length - 1] ?? path;
 }
 

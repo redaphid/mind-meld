@@ -10,6 +10,7 @@ export type SessionMetadata = {
   project_name: string
   project_path: string
   source_name: string
+  machine: string | null
   started_at: Date
   ended_at: Date | null
   message_count: number
@@ -35,6 +36,7 @@ export type SessionDigest = {
   // the digest is never triage-blind. Yields to the real summary once it exists.
   excerpt: string | null
   project: string
+  machine: string | null
   message_count: number
   date: Date
   tokens: number
@@ -65,7 +67,7 @@ const DEFAULT_CHAR_BUDGET = 24000
 
 const SELECT_METADATA = `
   SELECT s.id, s.external_id, s.title, s.summary, p.name as project_name, p.path as project_path,
-         src.name as source_name, s.started_at, s.ended_at, s.message_count,
+         src.name as source_name, s.machine, s.started_at, s.ended_at, s.message_count,
          s.model_used, s.git_branch, s.total_input_tokens, s.total_output_tokens
   FROM sessions s
   JOIN projects p ON s.project_id = p.id
@@ -147,6 +149,7 @@ const toDigest = (
   summary: s.summary,
   excerpt: s.summary ? null : excerpt,
   project: s.project_name,
+  machine: s.machine,
   message_count: s.message_count,
   date: s.started_at,
   tokens: Number(s.total_input_tokens) + Number(s.total_output_tokens),
@@ -403,7 +406,7 @@ export const formatDigest = (d: SessionDigest): string => {
   const header = `# ${d.title ?? 'Untitled Session'}
 
 **Session ID:** ${d.session_id}
-**Project:** ${d.project}
+**Project:** ${d.project}${d.machine ? `\n**Machine:** ${d.machine}` : ''}
 **Date:** ${d.date.toISOString().split('T')[0]}
 **Messages:** ${d.message_count}
 **Tokens:** ${d.tokens}

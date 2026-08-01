@@ -24,6 +24,7 @@ export type SearchParams = {
   limit?: number
   source?: string
   since?: string
+  machine?: string
   projectOnly?: boolean
   likeSession?: string[]
   unlikeSession?: string[]
@@ -41,6 +42,7 @@ export type SearchResult = {
   project_name: string
   project_path: string
   source: string
+  machine: string | null
   title: string
   date: Date
   score: number
@@ -121,6 +123,7 @@ type SessionRow = {
   project_name: string
   project_path: string
   source_name: string
+  machine: string | null
   started_at: Date
   message_count: number
   project_id: number
@@ -131,7 +134,7 @@ const AUTOMATED_FILTER = `($2::boolean OR s.is_automated = false)`
 
 const SESSION_QUERY = `
   SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
-         src.name as source_name, s.started_at, s.message_count, p.id as project_id
+         src.name as source_name, s.machine, s.started_at, s.message_count, p.id as project_id
   FROM sessions s
   JOIN projects p ON s.project_id = p.id
   JOIN sources src ON p.source_id = src.id
@@ -150,7 +153,7 @@ type MessageAnchoredRow = SessionRow & { message_id: number; content_text: strin
 const getSessionByMessageId = async (messageId: number, includeAutomated: boolean) => {
   const result = await query<MessageAnchoredRow>(
     `SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
-            src.name as source_name, s.started_at, s.message_count, p.id as project_id,
+            src.name as source_name, s.machine, s.started_at, s.message_count, p.id as project_id,
             m.id as message_id, m.content_text
      FROM messages m
      JOIN sessions s ON m.session_id = s.id
@@ -167,7 +170,7 @@ type ChunkAnchoredRow = SessionRow & { chunk_index: number; chunk_summary: strin
 const getSessionByChunkId = async (chunkId: number, includeAutomated: boolean) => {
   const result = await query<ChunkAnchoredRow>(
     `SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
-            src.name as source_name, s.started_at, s.message_count, p.id as project_id,
+            src.name as source_name, s.machine, s.started_at, s.message_count, p.id as project_id,
             c.chunk_index, c.summary as chunk_summary
      FROM session_chunks c
      JOIN sessions s ON c.session_id = s.id
@@ -203,6 +206,7 @@ const baseResult = (s: SessionRow, score: number, tier: MatchedTier): SearchResu
   project_name: s.project_name,
   project_path: s.project_path,
   source: s.source_name,
+  machine: s.machine,
   title: s.title ?? 'Untitled',
   date: s.started_at,
   score,
@@ -212,11 +216,12 @@ const baseResult = (s: SessionRow, score: number, tier: MatchedTier): SearchResu
 
 const passesFilters = (
   session: SessionRow,
-  params: { source?: string; projectOnly?: boolean },
+  params: { source?: string; machine?: string; projectOnly?: boolean },
   sinceDate: Date | null,
   projectIds: number[]
 ) => {
   if (params.source && session.source_name !== params.source) return false
+  if (params.machine && session.machine !== params.machine) return false
   if (sinceDate && session.started_at < sinceDate) return false
   if (params.projectOnly && !projectIds.includes(session.project_id)) return false
   return true
@@ -344,9 +349,16 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       `($2::text IS NULL OR src.name = $2)`,
       `($3::timestamptz IS NULL OR s.started_at >= $3)`,
       `($4::boolean OR s.is_automated = false)`,
+      `($5::text IS NULL OR s.machine = $5)`,
     ]
-    const values: unknown[] = [params.query, params.source ?? null, sinceDate, includeAutomated]
-    let nextParam = 5
+    const values: unknown[] = [
+      params.query,
+      params.source ?? null,
+      sinceDate,
+      includeAutomated,
+      params.machine ?? null,
+    ]
+    let nextParam = 6
 
     if (params.projectOnly && projectIds.length > 0) {
       conditions.push(`s.project_id = ANY($${nextParam++}::int[])`)
@@ -370,6 +382,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       project_name: string
       project_path: string
       source_name: string
+      machine: string | null
       started_at: Date
       message_count: number
       rank: number
@@ -390,7 +403,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         ORDER BY m.session_id, rank DESC
       )
       SELECT rm.session_id, rm.message_id, s.title, p.name as project_name, p.path as project_path,
-             src.name as source_name, s.started_at, s.message_count, rm.rank,
+             src.name as source_name, s.machine, s.started_at, s.message_count, rm.rank,
              p.id as project_id,
              ts_headline('english', rm.content_text, websearch_to_tsquery('english', $1), '${ts_headline_options}') as headline
       FROM ranked_messages rm
@@ -410,6 +423,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         project_name: row.project_name,
         project_path: row.project_path,
         source: row.source_name,
+        machine: row.machine,
         title: row.title ?? 'Untitled',
         date: row.started_at,
         score: row.rank,
@@ -449,9 +463,10 @@ export const formatSearchResults = (results: SearchResult[], projectIds: number[
         : r.cursor?.message_id != null
           ? `\n   Cursor: message ${r.cursor.message_id}`
           : ''
+      const machineLabel = r.machine ? ` | Machine: ${r.machine}` : ''
       return `${i + 1}. **${r.title}**${projectLabel}
    Session ID: ${r.session_id}
-   Project: ${r.project_name} (${r.source})
+   Project: ${r.project_name} (${r.source})${machineLabel}
    Date: ${r.date.toISOString().split('T')[0]}
    Score: ${r.score.toFixed(3)} | Matched: ${r.matched_tier}${cursor}
    ${r.snippet ?? '(no snippet)'}`

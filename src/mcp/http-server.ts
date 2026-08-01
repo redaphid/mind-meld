@@ -82,6 +82,7 @@ const getServer = () => {
       mode: z.enum(['semantic', 'text', 'hybrid']).optional(),
       source: z.string().optional(),
       since: sinceSchema.optional(),
+      machine: z.string().optional().describe('Filter to sessions recorded on a specific machine (e.g. windows-desktop, wsl, mac)'),
       projectOnly: z.boolean().optional(),
       likeSession: z.array(z.string()).optional(),
       unlikeSession: z.array(z.string()).optional(),

@@ -1,5 +1,5 @@
 import { readdir, stat } from 'fs/promises';
-import { join } from 'path';
+import { basename, join } from 'path';
 import { config } from '../config.js';
 import { queries } from '../db/postgres.js';
 import {
@@ -9,6 +9,7 @@ import {
   parseHistoryFile,
   type ParsedSession,
 } from '../parsers/claude-messages.js';
+import { deriveSessionTitle, contentJsonHasToolResult } from '../parsers/session-title.js';
 
 export interface SyncStats {
   projectsProcessed: number;
@@ -63,11 +64,21 @@ async function syncSession(
   projectId: number,
   session: ParsedSession
 ): Promise<{ messagesInserted: number }> {
-  // Upsert session
+  // Upsert session. Title comes from the first human-typed message — command
+  // XML (<command-name>...) and system-reminder wrappers are skipped/stripped.
+  const title = deriveSessionTitle(
+    session.messages.map((m) => ({
+      role: m.role,
+      contentText: m.contentText,
+      isToolResult: contentJsonHasToolResult(m.contentJson),
+    }))
+  );
+
   const sessionId = await queries.upsertSession({
     projectId,
     externalId: session.sessionId,
-    title: session.messages[0]?.contentText?.slice(0, 200),
+    title,
+    machine: config.machineName,
     isAgent: session.isAgent,
     agentId: session.agentId,
     claudeVersion: session.claudeVersion,
@@ -147,7 +158,9 @@ export async function syncClaudeCode(options?: {
   console.log(`Found ${projectPaths.length} projects`);
 
   for (const projectPath of projectPaths) {
-    const projectDirName = projectPath.split('/').pop()!;
+    // basename (not split('/')) so this also works when sync runs on Windows,
+    // where path.join produces backslashes.
+    const projectDirName = basename(projectPath);
     const decodedPath = decodeProjectPath(projectDirName);
     const projectName = extractProjectName(decodedPath);
 
@@ -176,7 +189,7 @@ export async function syncClaudeCode(options?: {
           const fileStat = await stat(sessionFile);
 
           // Check if already synced with same modification time (per-file check)
-          const fileName = sessionFile.split('/').pop()!.replace('.jsonl', '');
+          const fileName = basename(sessionFile, '.jsonl');
           const isAgent = fileName.startsWith('agent-');
           const sessionExternalId = isAgent ? fileName : fileName;
 

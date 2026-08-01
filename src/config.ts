@@ -96,6 +96,11 @@ export const config = {
     },
   },
 
+  // Machine label stamped onto sessions at sync time. Set MACHINE_NAME when
+  // ingesting transcripts rsynced from another host so sessions are attributed
+  // to their origin machine (see .env.example).
+  machineName: getEnv("MACHINE_NAME", hostname()),
+
   // Sync
   sync: {
     intervalMinutes: getEnvInt("SYNC_INTERVAL_MINUTES", 60),
