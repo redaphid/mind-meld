@@ -5,11 +5,33 @@ implementation to subagents. The human sets direction and approves designs; the
 coordinator runs the machinery. Labels and their authority semantics are
 defined in issue #34 — read that first.
 
+## Topology (v2, issue #75)
+
+Two layers sit above the implementation agents:
+
+- **Interactive session**: the session the operator actually types into. It
+  stays free as aggressively as possible — it delegates everything (including
+  coordination itself) and returns to the prompt. It does not implement, does
+  not review, does not babysit; it spawns/continues a coordinator agent and
+  relays only what needs a human decision.
+- **Coordinator agent**: a delegated agent that runs the cycle below. The
+  operator and the coordinator talk on **issue #66** (the coordinator
+  channel) — either party can start a thread there, so the operator can steer
+  the coordinator without going through the interactive session at all.
+
+State between cycles is PERSISTED, not re-derived: see "Persistent cycle
+state" below. The comms protocol all agents follow is
+`.claude/skills/comms/SKILL.md` (loadable as the `comms` skill) and, for any
+non-Claude tool, `AGENTS.md` at the repo root. Hooks in `.claude/settings.json`
+(scripts under `.claude/hooks/`) enforce the load-bearing parts.
+
 ## Roles
 
-- **Coordinator** (the long-running session): polls health, triages and
+- **Coordinator** (delegated agent, see Topology): polls health, triages and
   validates issues, delegates, reviews-by-proxy, merges, releases, deploys.
   Never implements code.
+- **Interactive session**: the operator's prompt. Delegates to the
+  coordinator, stays free, surfaces decisions.
 - **Implementation agent**: one issue (or tightly related pair) per agent, in
   an isolated git worktree. Opens a PR; never pushes to main.
 - **Review agent**: fresh context, no knowledge of the implementation. Its job
@@ -40,7 +62,9 @@ defined in issue #34 — read that first.
    merged up with main.
 7. **Status board**: GitHub reflects everything — `in-progress` on delegation,
    `in-review` at PR-open, cleared on merge/close, a status comment at each
-   transition.
+   transition. Every cycle runs `pnpm run reconcile:labels` (dry-run) and, on
+   drift, `pnpm run reconcile:labels --fix` — labels are not allowed to rot
+   between cycles.
 8. **End-of-cycle report**: every cycle ends with a message to the human:
    release notes (what merged/released/deployed, or what's in flight) and the
    explicit list of verification steps taken this cycle with their results.
@@ -116,6 +140,67 @@ authorship is by marker: the orchestrator's comments start with
 implementation/review agents never post there. The orchestrator 👀-reacts to
 each user comment on read, acts on it, and replies in-channel. Checked every
 cycle and whenever the orchestrator is active between cycles.
+
+## Persistent cycle state
+
+`.claude/coordinator-state.json` (gitignored, local to each checkout) holds
+the coordinator's high-water marks so no cycle ever re-reads a whole
+conversation history:
+
+```json
+{
+  "issues": { "66": { "lastSeenCommentId": 123456789 } },
+  "prs": { "77": { "lastReviewedSha": "abc123" } },
+  "lastReconcileAt": "2026-08-02T00:00:00.000Z"
+}
+```
+
+- **Read it first** each cycle; fetch only comments/commits newer than the
+  recorded marks (`gh api ... --jq` filtered by id/SHA).
+- **Update it after acting** — `reconcile-labels.mjs` already maintains
+  `issues.*.lastSeenCommentId` for the issues it inspects and
+  `lastReconcileAt`; the coordinator maintains `prs.*.lastReviewedSha` when a
+  review round completes.
+- Helpers live in `.claude/hooks/lib.mjs` (`readState`/`writeState`).
+- For recall beyond the state file ("when did we decide X?", "what did the
+  operator say about Y last month?"), query **mindmeld itself** via its MCP
+  `search` tool — every past session is indexed.
+
+## Enforcement hooks
+
+`.claude/settings.json` wires two hooks (scripts in `.claude/hooks/`, plain
+node, zero dependencies, all fail-open — a network or gh failure warns and
+never blocks the session):
+
+- **Stop** (`stop-pr-progress.mjs`): if the current branch has an open PR
+  with pushes newer than its last comment, the stop is blocked once with
+  instructions to post a progress comment (`stop_hook_active` prevents
+  loops).
+- **PostToolUse on Bash** (`post-pr-create.mjs`): after `gh pr create`,
+  warns Claude if the linked issue (branch `-<n>` suffix or `#<n>` in the
+  command) was not flipped to `in-review`.
+- **Label reconciler** (`reconcile-labels.mjs`, also
+  `pnpm run reconcile:labels`): dry-run prints drift and exits 1; `--fix`
+  applies. Rules: `needs-human` cleared when the last comment is an unmarked
+  OWNER response; stale `in-progress` (no open PR, quiet > 4h — tune with
+  `RECONCILE_STALE_HOURS`) removed; `in-review` with no open PR removed;
+  `in-progress` with a ready PR flipped to `in-review`.
+
+Tests: `src/__tests__/comms-hooks.test.ts` (black-box, stubbed `gh`).
+
+## Migration notes (for the running coordinator)
+
+1. Pull main; the hooks activate on the next session start (project
+   `.claude/settings.json`).
+2. Start each cycle by loading the `comms` skill and reading
+   `.claude/coordinator-state.json`; create it on first run by running
+   `pnpm run reconcile:labels` once.
+3. Delegation prompts can now point agents at `AGENTS.md` +
+   `.claude/skills/comms/SKILL.md` instead of restating the comms rules
+   inline.
+4. The interactive session should hand the cycle to a coordinator agent and
+   return to the prompt; steer the coordinator on issue #66, not in chat,
+   whenever the operator is remote.
 
 ## Approvals from mobile
 
