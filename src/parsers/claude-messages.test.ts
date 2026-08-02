@@ -89,6 +89,72 @@ describe('parseClaudeLine', () => {
   })
 })
 
+// Slash-command wrappers and system-reminder blocks are harness scaffolding.
+// Stripping them here, at the parse boundary, is what keeps the stored
+// content_text equal to what a human actually typed (issue #37).
+describe('parseClaudeLine: harness scaffolding (issue #37)', () => {
+  it('stores the command, not the XML wrapped around it', () => {
+    const { message } = asMessage(
+      line({
+        message: {
+          role: 'user',
+          content: '<command-message>gm</command-message>\n<command-name>/gm</command-name>',
+        },
+      })
+    )
+    expect(message.contentText).toBe('/gm')
+  })
+
+  it('keeps user arguments carried by a command', () => {
+    const { message } = asMessage(
+      line({
+        message: {
+          role: 'user',
+          content:
+            '<command-name>/vibej</command-name>\n<command-args>float d = length(p);</command-args>',
+        },
+      })
+    )
+    expect(message.contentText).toBe('/vibej\nfloat d = length(p);')
+  })
+
+  it('strips a system-reminder no named hook pattern matched', () => {
+    const { message } = asMessage(
+      line({
+        message: {
+          role: 'user',
+          content:
+            'what broke the sync?\n' +
+            '<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>',
+        },
+      })
+    )
+    expect(message.contentText).toBe('what broke the sync?')
+  })
+
+  it('strips scaffolding out of structured content blocks too', () => {
+    const { message } = asMessage(
+      line({
+        message: {
+          role: 'user',
+          content: [
+            { type: 'text', text: '<system-reminder>noise</system-reminder>' },
+            { type: 'text', text: 'the real question' },
+          ],
+        },
+      })
+    )
+    expect(message.contentText).toBe('the real question')
+  })
+
+  it('leaves an ordinary message untouched', () => {
+    const { message } = asMessage(
+      line({ message: { role: 'user', content: 'if (a<b && c>d) return' } })
+    )
+    expect(message.contentText).toBe('if (a<b && c>d) return')
+  })
+})
+
 // Windows tools (wsl.exe, PowerShell) emit UTF-16LE; captured as UTF-8, each
 // character arrives followed by NUL, recorded in the transcript as escaped
 // NULs that JSON.parse turns into real U+0000 — which Postgres rejects
