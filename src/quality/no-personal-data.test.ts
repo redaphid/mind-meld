@@ -145,9 +145,35 @@ const describeFindings = (findings: Finding[]): string =>
   ].join('\n');
 
 describe('public repository contains no personal data', () => {
+  const scan = scanRepository();
+
   it('has no personal paths, machine names, or operator identifiers', () => {
-    const findings = scanRepository();
-    expect(findings.length, describeFindings(findings)).toBe(0);
+    expect(scan.findings.length, describeFindings(scan.findings)).toBe(0);
+  });
+
+  // A guard that quietly declines to look is worse than one that admits it.
+  // Skips are accounted for, and the scan is asserted non-empty, so a refactor
+  // that scans nothing fails instead of passing.
+  describe('coverage accounting', () => {
+    it('scanned essentially every tracked file', () => {
+      expect(scan.scanned, describeCoverage(scan)).toBeGreaterThan(150);
+    });
+
+    it('skipped only files on the documented skip list', () => {
+      const unexpected = scan.skipped.filter((s) => s.reason !== 'skip-list');
+      expect(unexpected, describeCoverage(scan)).toEqual([]);
+    });
+
+    it('reads UTF-16LE text rather than skipping it as binary', () => {
+      // This repo handles UTF-16LE content, so "has a NUL byte, must be
+      // binary" would silently exempt a real text file from the guard.
+      const utf16 = Buffer.concat([
+        Buffer.from([0xff, 0xfe]),
+        Buffer.from('/home/realperson/.claude', 'utf16le'),
+      ]);
+      expect(decodeText(utf16)).toBe('/home/realperson/.claude');
+      expect(decodeText(Buffer.from([0x00, 0x01, 0x02, 0x00]))).toBeNull();
+    });
   });
 
   // The guard is only worth having if it actually fires. These pin the
@@ -181,6 +207,64 @@ describe('public repository contains no personal data', () => {
       expect(scanStructural('f', "path LIKE '/home/%'")).toHaveLength(0);
       expect(scanStructural('f', 'rm -rf /home/*/tmp')).toHaveLength(0);
       expect(scanStructural('f', 'rejects C:\\Users\\... volume specs')).toHaveLength(0);
+    });
+
+    // Gaps found by adversarial review of PR #92. Each shape below is one a
+    // real leak arrived in (or is the shape this codebase most naturally
+    // produces), and each is mechanical — it needs no denylist to catch.
+
+    it('flags the encoded project-directory form Claude Code writes', () => {
+      // `decodeProjectPath` (src/parsers/claude-messages.ts) turns
+      // `-Users-x-Projects-y` back into `/Users/x/Projects/y`. A fixture copied
+      // from a real transcript arrives in the encoded form, where the path
+      // separators are hyphens — so the plain home-path check never sees it.
+      expect(scanStructural('f', '-Users-realperson-Projects-app')).toHaveLength(1);
+      expect(scanStructural('f', '-home-realperson-code')).toHaveLength(1);
+      expect(scanStructural('f', '-Users-you-Projects-acme')).toHaveLength(0);
+      expect(scanStructural('f', '-home-user-code')).toHaveLength(0);
+    });
+
+    it('flags the tilde home form', () => {
+      expect(scanStructural('f', '~realperson/.claude')).toHaveLength(1);
+      expect(scanStructural('f', 'cp x ~realperson/dst')).toHaveLength(1);
+      expect(scanStructural('f', '~/.claude')).toHaveLength(0);
+      expect(scanStructural('f', '~you/.claude')).toHaveLength(0);
+      expect(scanStructural('f', '~<user>/.claude')).toHaveLength(0);
+    });
+
+    it('flags mDNS names, which name a device', () => {
+      expect(scanStructural('f', 'OLLAMA_URL=http://realbox.local:11434')).toHaveLength(1);
+      expect(scanStructural('f', 'ssh realbox.local')).toHaveLength(1);
+      // Role words name a role, not a device; and these are not mDNS at all.
+      expect(scanStructural('f', 'http://ollama-host.local:11434')).toHaveLength(0);
+      expect(scanStructural('f', 'docker-compose.local.yml')).toHaveLength(0);
+      expect(scanStructural('f', '.env.local')).toHaveLength(0);
+      expect(scanStructural('f', '\\\\wsl.localhost\\<distro>\\home')).toHaveLength(0);
+    });
+
+    it('flags user@host, the shape one removed value had', () => {
+      expect(scanStructural('f', 'ssh realperson@realbox')).toHaveLength(1);
+      expect(scanStructural('f', 'scp f realperson@realbox.local:/tmp')).toHaveLength(1);
+      // Versions, emails and action refs are not people at hosts.
+      expect(scanStructural('f', '"packageManager": "pnpm@10.11.0"')).toHaveLength(0);
+      expect(scanStructural('f', 'uses: actions/checkout@v4')).toHaveLength(0);
+      expect(scanStructural('f', 'Co-Authored-By: X <noreply@anthropic.com>')).toHaveLength(0);
+      expect(scanStructural('f', 'contact: someone@example.com')).toHaveLength(0);
+      expect(scanStructural('f', 'user@localhost')).toHaveLength(0);
+    });
+
+    it('flags a machine-name assignment holding a literal name', () => {
+      // Device names were this PR's largest leak category. Hashing the two
+      // known ones defends the past; this defends the shape, so tomorrow's
+      // machine is caught without anyone remembering to add a hash.
+      expect(scanStructural('f', 'MACHINE_NAME=realbox')).toHaveLength(1);
+      expect(scanStructural('f', '      MACHINE_NAME: ${MACHINE_NAME_WSL:-realbox}')).toHaveLength(1);
+      expect(scanStructural('f', 'DEVICE_NAME: "realbox"')).toHaveLength(1);
+      // Generic names, and values deferred to the environment, name nobody.
+      expect(scanStructural('f', 'MACHINE_NAME=windows')).toHaveLength(0);
+      expect(scanStructural('f', 'MACHINE_NAME_WSL=wsl')).toHaveLength(0);
+      expect(scanStructural('f', 'MACHINE_NAME: ${MACHINE_NAME:?required}')).toHaveLength(0);
+      expect(scanStructural('f', 'machine: getEnv("MACHINE_NAME", hostname())')).toHaveLength(0);
     });
 
     it('flags a banned term as a whole token only', () => {
