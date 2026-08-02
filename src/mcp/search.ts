@@ -63,7 +63,8 @@ export class UnknownDataClassError extends Error {
 }
 
 // Every class in use: source classifications plus project overrides.
-const listKnownDataClasses = async (): Promise<string[]> => {
+// Shared with ingest, which names this vocabulary when a caller must classify.
+export const listKnownDataClasses = async (): Promise<string[]> => {
   const result = await query<{ data_class: string }>(
     `SELECT DISTINCT data_class FROM (
        SELECT data_class FROM sources
