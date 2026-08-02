@@ -76,6 +76,17 @@ LANGUAGE sql IMMUTABLE AS $fn$
   )
 $fn$;
 
+-- Windows-backed paths — a drive root or its WSL drvfs view — live on a
+-- case-insensitive filesystem; everything else does not. This is the ONLY
+-- place case-insensitive comparison is ever allowed, mirroring DRIVE_RE /
+-- MNT_RE in src/utils/project-path.ts. Unix paths are case-sensitive:
+-- /home/u/App and /home/u/app are different directories, and treating them
+-- alike would merge (i.e. destroy) genuinely distinct projects.
+CREATE FUNCTION pg_temp.mm_windows_backed(c text) RETURNS boolean
+LANGUAGE sql IMMUTABLE AS $fn$
+  SELECT c IS NOT NULL AND (c ~ '^[A-Za-z]:(/|$)' OR c ~ '^/mnt/[A-Za-z](/|$)')
+$fn$;
+
 -- Same-directory key. NULL for anything that is not a real path: raw names
 -- prove nothing about identity and must never merge on guesswork.
 CREATE FUNCTION pg_temp.mm_equiv_key(input text) RETURNS text
@@ -141,7 +152,12 @@ BEGIN
       JOIN projects p ON p.id = cc.project_id AND p.source_id = claude_source_id
       WHERE cc.c IS NOT NULL
         AND (pg_temp.mm_encode(cc.c) = p.external_id
-             OR lower(pg_temp.mm_encode(cc.c)) = lower(p.external_id))
+             -- Case-insensitive only where the filesystem is (mirrors
+             -- verifyCwdAgainstDirName): live data holds d:\... and D:\...
+             -- cwds for one directory, but /home/u/App must never verify
+             -- -home-u-app.
+             OR (pg_temp.mm_windows_backed(cc.c)
+                 AND lower(pg_temp.mm_encode(cc.c)) = lower(p.external_id)))
       ORDER BY cc.project_id,
                (pg_temp.mm_encode(cc.c) = p.external_id) DESC,
                cc.uses DESC,
@@ -159,7 +175,8 @@ BEGIN
                     -- is a guess, never evidence.
                     AND NOT (p.external_id LIKE '-%' AND p.path = replace(p.external_id, '-', '/'))
                     AND (pg_temp.mm_encode(pg_temp.mm_canon(p.path)) = p.external_id
-                         OR lower(pg_temp.mm_encode(pg_temp.mm_canon(p.path))) = lower(p.external_id))
+                         OR (pg_temp.mm_windows_backed(pg_temp.mm_canon(p.path))
+                             AND lower(pg_temp.mm_encode(pg_temp.mm_canon(p.path))) = lower(p.external_id)))
                THEN pg_temp.mm_canon(p.path)
              END,
              p.external_id
@@ -243,6 +260,8 @@ BEGIN
     UPDATE projects s
     SET machine = COALESCE(s.machine,
           (SELECT machine FROM projects WHERE id = ANY(husk_ids) AND machine IS NOT NULL LIMIT 1)),
+        data_class = COALESCE(s.data_class,
+          (SELECT data_class FROM projects WHERE id = ANY(husk_ids) AND data_class IS NOT NULL LIMIT 1)),
         last_synced_at = GREATEST(s.last_synced_at,
           (SELECT max(last_synced_at) FROM projects WHERE id = ANY(husk_ids))),
         centroid_vector = NULL,

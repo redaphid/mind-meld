@@ -151,6 +151,19 @@ beforeAll(async () => {
   const userB = await project('-home-bob-Projects-app', '/home/bob/Projects/app', 'other')
   await session(userB, 's-b-1', '/home/bob/Projects/app')
 
+  // 10. Round-1 review repro: two case-DISTINCT unix directories. Unix
+  //     filesystems are case-sensitive, so `/home/u/App` verifies only the
+  //     `-home-u-App` row; against `-home-u-app` it is a different directory
+  //     and must neither rename the row nor let the pair merge.
+  const unixLower = await project('-home-u-app', '/home/u/app', 'zod2')
+  await session(unixLower, 's-case-1', '/home/u/App')
+  const unixUpper = await project('-home-u-App', '-home-u-App', 'zod2')
+  await session(unixUpper, 's-case-2', '/home/u/App')
+
+  // Give the drvfs husk a data_class override the survivor lacks — the merge
+  // must carry it over, not drop it.
+  await db.query(`UPDATE projects SET data_class = 'coding' WHERE external_id = '-mnt-d-tools-comfy'`)
+
   await psqlFile(SCRATCH_DB, join(INIT_DB, '019-canonical-project-paths.sql'))
 }, 120_000)
 
@@ -199,9 +212,35 @@ describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
 
   it('loses no sessions and leaves distinct unix projects alone', async () => {
     const sessions = await db.query('SELECT count(*)::int AS n FROM sessions')
-    expect(sessions.rows[0].n).toBe(12)
+    expect(sessions.rows[0].n).toBe(14)
     expect(await pathOf('-home-alice-Projects-app')).toBe('/home/alice/Projects/app')
     expect(await pathOf('-home-bob-Projects-app')).toBe('/home/bob/Projects/app')
+  })
+
+  it('never verifies unix cwds case-insensitively, and never merges case-distinct unix dirs', async () => {
+    // `/home/u/App` is NOT `-home-u-app`'s directory: the row keeps only an
+    // honest raw name (its old path was the lossy decode, now refused).
+    expect(await pathOf('-home-u-app')).toBe('-home-u-app')
+    // The exact-case row does verify.
+    expect(await pathOf('-home-u-App')).toBe('/home/u/App')
+    // Both rows still exist with their own sessions — no destructive merge.
+    const rows = await db.query(
+      `SELECT p.external_id, count(s.id)::int AS sessions
+       FROM projects p LEFT JOIN sessions s ON s.project_id = p.id
+       WHERE p.external_id IN ('-home-u-app', '-home-u-App')
+       GROUP BY p.external_id ORDER BY p.external_id`
+    )
+    expect(rows.rows).toEqual([
+      { external_id: '-home-u-App', sessions: 1 },
+      { external_id: '-home-u-app', sessions: 1 },
+    ])
+  })
+
+  it('carries a husk data_class override onto the merge survivor', async () => {
+    const survivor = await db.query(
+      `SELECT data_class FROM projects WHERE external_id = 'D--tools-comfy'`
+    )
+    expect(survivor.rows[0].data_class).toBe('coding')
   })
 
   it('turns empty pseudo-paths into NULL without touching the project', async () => {
