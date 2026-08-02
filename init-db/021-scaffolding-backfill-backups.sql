@@ -1,6 +1,18 @@
 -- Undo tables for the scaffolding backfill (issue #37), plus the journal that
 -- makes it safely interruptible.
 --
+-- NUMBERING. This is 021 and not 019, which is what `main` makes look free:
+-- 019 and 020 are both claimed by the open canonical-project-paths branch
+-- (PR #72). Two files with the same number is a merge conflict at best and a
+-- migration that never runs at worst — `schema_migrations` is keyed by
+-- filename, so the second one to land is recorded as already applied. This repo
+-- has been bitten by it before ("Renumber the machine migration to 016 to free
+-- a claimed filename"), which is also why 014 is missing. Before adding a
+-- migration, check the open branches, not just `main`:
+--
+--     git branch -r | xargs -n1 -I{} git ls-tree --name-only {} init-db/
+--
+
 -- These were previously created ad hoc by `scripts/strip-scaffolding.ts` on
 -- first run. A table that holds verbatim conversation text is schema, not a
 -- script detail: it needs to exist before anyone reasons about a restore, it

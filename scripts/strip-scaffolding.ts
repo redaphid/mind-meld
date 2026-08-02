@@ -55,7 +55,7 @@ const COLLECTION = {
   chunks: config.chroma.collections.chunks,
 } as const
 
-// The tables live in `init-db/019-scaffolding-backfill-backups.sql` and are
+// The tables live in `init-db/021-scaffolding-backfill-backups.sql` and are
 // applied by the normal migration runner. This is only a guard for a database
 // that has not been migrated yet, so a backfill cannot start writing with
 // nowhere to put the undo data.
