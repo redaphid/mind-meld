@@ -56,6 +56,13 @@ const fakeStore = (rows: BackfillCandidate[], opts: { failOn?: string } = {}) =>
       record('drainVectorDeletes')
       const drained = journal.length
       chromaDeleted.push(...journal)
+      // The contract the real store implements: draining removes the vector
+      // AND any row still naming it, so an interruption between the two cannot
+      // leave a row pointing at a vector that is gone.
+      for (const id of journal) {
+        const message = /^msg-(\d+)$/.exec(id)
+        if (message) vectorRowsDropped.push(Number(message[1]))
+      }
       journal.length = 0
       return drained
     },
@@ -219,6 +226,21 @@ describe('runBackfill: an interrupted run can be finished (review F3)', () => {
     const crashing = fakeStore([husk(1, 10)], { failOn: 'forgetVectorRow:1' })
     await expect(runBackfill(crashing.store, { apply: true })).rejects.toThrow('simulated crash')
     expect(crashing.journal).toContain('msg-1')
+  })
+
+  it('finishes a crashed row on the next run, vector and row alike', async () => {
+    // Crash between the journal write and the row delete. The re-run cannot see
+    // the message any more — its text is already stripped, so it plans as
+    // `skip` — but the journal still names the vector, and draining it removes
+    // both the vector and the row that would otherwise read as "embedded".
+    const crashed = fakeStore([husk(1, 10)], { failOn: 'forgetVectorRow:1' })
+    await expect(runBackfill(crashed.store, { apply: true })).rejects.toThrow()
+    expect(crashed.journal).toEqual(['msg-1'])
+
+    await crashed.store.drainVectorDeletes()
+    expect(crashed.chromaDeleted).toEqual(['msg-1'])
+    expect(crashed.vectorRowsDropped).toEqual([1])
+    expect(crashed.journal).toEqual([])
   })
 
   it('backs up session chunks before deleting them', async () => {

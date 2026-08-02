@@ -43,8 +43,13 @@ export interface BackfillStore {
   // that names the vector is removed.
   queueVectorDelete(vector: QueuedVector): Promise<void>
   forgetVectorRow(messageId: number): Promise<void>
-  // Deletes every journalled vector from Chroma, then clears the journal.
-  // Idempotent: deleting an id twice is harmless, losing one is not.
+  // Deletes every journalled vector from Chroma AND any `embeddings` row still
+  // naming it, then clears the journal. Both halves matter: a journal entry
+  // means "this vector is meant to be gone", and a crash between the queue and
+  // the row delete would otherwise leave a row pointing at a vector that no
+  // longer exists — which reads as "already embedded" and quietly keeps the
+  // message out of the queue forever. Idempotent: deleting an id twice is
+  // harmless, losing one is not.
   drainVectorDeletes(): Promise<number>
   saveSessionChunks(sessionIds: number[]): Promise<void>
   resetSessions(sessionIds: number[]): Promise<void>

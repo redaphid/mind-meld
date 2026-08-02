@@ -173,6 +173,15 @@ const store: BackfillStore = {
       }
       for (const [collection, ids] of byCollection) {
         await deleteByIds(collection, ids)
+        // The row goes with the vector. A crash between `queueVectorDelete` and
+        // `forgetVectorRow` would otherwise leave an `embeddings` row naming a
+        // vector that no longer exists, which the pending query reads as
+        // "already embedded" — the message would sit out of the queue forever
+        // with nothing wrong-looking anywhere.
+        await query(
+          `DELETE FROM embeddings WHERE chroma_collection = $1 AND chroma_id = ANY($2::text[])`,
+          [collection, ids]
+        )
         // Only now is the intent discharged. Crash before this and the next run
         // deletes the same ids again, which Chroma treats as a no-op.
         await query(
