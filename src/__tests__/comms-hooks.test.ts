@@ -333,6 +333,20 @@ describe('reconcile-labels script', () => {
     expect(result.stdout).toContain('#16');
   });
 
+  it('does not treat a prose #N mention in a PR body as a reference to the issue', async () => {
+    // Real-world false positive: PR #80 (for issue #78) mentioned #75 in prose
+    // and the reconciler wrongly told issue #75 to flip to in-review.
+    sandbox.setResponses(
+      listResponses(
+        [issue(19, ['in-progress'], HOUR / 2)],
+        [{ number: 92, headRefName: 'coordinator/v2', body: 'See the discussion on #19 for background.', isDraft: false, updatedAt: iso(0) }],
+      ),
+    );
+    const result = await sandbox.run(SCRIPT, undefined);
+    expect(result.code).toBe(0);
+    expect(result.stdout.toLowerCase()).toContain('no drift');
+  });
+
   it('applies fixes with --fix and exits 0', async () => {
     sandbox.setResponses([
       ...listResponses([issue(17, ['needs-human'])], []),

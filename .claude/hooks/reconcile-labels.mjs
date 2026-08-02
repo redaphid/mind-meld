@@ -15,8 +15,9 @@
  *   4. `in-progress` but a ready (non-draft) PR references the issue
  *      -> flip to `in-review`.
  *
- * A PR "references" issue N when its body contains #N or its head branch
- * ends in -N. Exit codes: 0 clean/fixed/fail-open, 1 drift found in dry-run.
+ * A PR "references" issue N when its body carries a closing keyword for #N
+ * (closes/fixes/resolves/implements) or its head branch ends in -N; a bare
+ * prose "#N" mention does not count. Exit codes: 0 clean/fixed/fail-open, 1 drift found in dry-run.
  * Writes high-water marks to .claude/coordinator-state.json (gitignored) so
  * coordinator cycles never re-read whole comment histories.
  */
@@ -32,10 +33,14 @@ if (issues === null || prs === null) {
   process.exit(0);
 }
 
+// A PR references issue N only via a closing/implementing keyword or its
+// branch's -N suffix. A bare "#N" prose mention does NOT count — PRs cite
+// unrelated issues all the time.
 const prsReferencing = (issueNumber) =>
   prs.filter(
     (pr) =>
-      new RegExp(`#${issueNumber}\\b`).test(pr.body ?? '') || new RegExp(`-${issueNumber}$`).test(pr.headRefName ?? ''),
+      new RegExp(`\\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?|implements?)\\s+#${issueNumber}\\b`, 'i').test(pr.body ?? '') ||
+      new RegExp(`-${issueNumber}$`).test(pr.headRefName ?? ''),
   );
 
 const state = readState();
