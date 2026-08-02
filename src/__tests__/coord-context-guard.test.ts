@@ -4,13 +4,13 @@
 // coordinator they are not running. The default must therefore be silence.
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve, join, relative, sep } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(here, '../..');
-const HOOK = '.claude/hooks/coordinator-context-guard.sh';
+const HOOK = 'scripts/coord/context-guard.sh';
 
 /**
  * The opt-in variable is set INSIDE the shell command rather than through
@@ -47,6 +47,15 @@ describe('coordinator context guard', () => {
 
   it('is still fail-open: a missing transcript is silent, not an error', () => {
     expect(runGuard('does/not/exist.jsonl', true)).toBe('');
+  });
+
+  it('lives outside any vendor directory, like the comms hooks (#77)', () => {
+    // The coordinator toolchain is not Claude-specific; nothing about measuring
+    // a transcript or moving a label belongs under `.claude/`.
+    expect(existsSync(join(REPO, HOOK))).toBe(true);
+    expect(existsSync(join(REPO, '.claude/hooks'))).toBe(false);
+    const settings = readFileSync(join(REPO, '.claude/settings.json'), 'utf8');
+    expect(settings).not.toContain('.claude/hooks');
   });
 
   it('cleans up its fixture', () => {

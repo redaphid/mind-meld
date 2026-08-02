@@ -66,7 +66,7 @@ if they reach it. A cap is not a bug; a cap you cannot see is.
 
 Three triggers, none of which require the operator to notice anything:
 
-1. **Context pressure** — `.claude/hooks/coordinator-context-guard.sh` measures
+1. **Context pressure** — `scripts/coord/context-guard.sh` measures
    the session transcript and tells the coordinator to hand off before it
    starts dropping detail. A coordinator cannot self-assess its own decline;
    file size is at least a number. The hook is fail-open: any error exits

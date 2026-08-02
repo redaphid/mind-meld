@@ -23,8 +23,10 @@ set -uo pipefail
 # environment (or in .claude/settings.local.json, which is gitignored). Default
 # off: an unset variable means "not the coordinator".
 #
-# Note for the provider-agnostic relocation tracked in #77: this gate is the
-# only thing scoping the guard, so it must travel with the script.
+# This script lives under scripts/, not .claude/, for the same reason the comms
+# hooks do (#77): nothing about measuring a transcript or moving a label is
+# specific to one vendor's agent runtime. `.claude/settings.json` is only the
+# registration that happens to invoke it.
 [ "${COORD_CONTEXT_GUARD:-0}" = "1" ] || exit 0
 
 WARN_BYTES="${COORD_WARN_BYTES:-3500000}"
