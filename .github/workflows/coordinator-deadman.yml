@@ -45,7 +45,13 @@ jobs:
 
           age=$(( ( $(date -u +%s) - $(date -u -d "$hb" +%s) ) / 60 ))
           echo "Heartbeat on #$channel is ${age}m old (threshold ${STALE_MINUTES}m)."
-          [ "$age" -lt "$STALE_MINUTES" ] && exit 0
+          # An `if`, not `[ ... ] && exit 0`: under `set -e` that idiom exits
+          # nonzero when the condition is FALSE, so the job would have failed
+          # exactly when it detected a stall — the one case it exists for.
+          if [ "$age" -lt "$STALE_MINUTES" ]; then
+            echo "Coordinator is alive."
+            exit 0
+          fi
 
           # The label is the idempotency guard: say it once, not every hour.
           if gh issue view "$channel" --json labels -q '.labels[].name' | grep -qx coordinator-stale; then
@@ -56,13 +62,22 @@ jobs:
           gh label create coordinator-stale --color B60205 \
             --description "Active coordinator has missed its heartbeat" 2>/dev/null || true
           gh issue edit "$channel" --add-label coordinator-stale
-          gh issue comment "$channel" --body "⏱️ **Deadman:** no coordinator heartbeat for ${age} minutes (threshold ${STALE_MINUTES}m). The active coordinator is unresponsive, wedged, or gone.
 
-Recover without a design conversation — state is derived from GitHub, not from the stalled session:
+          # Heredoc, not an inline --body: a multi-line string written inline
+          # puts its continuation lines at column 0, which breaks out of this
+          # YAML block scalar and makes the whole workflow fail to parse. That
+          # is exactly how this file died the first time.
+          cat >/tmp/deadman.md <<EOF
+          ⏱️ **Deadman:** no coordinator heartbeat for ${age} minutes (threshold ${STALE_MINUTES}m). The active coordinator is unresponsive, wedged, or gone.
 
-\`\`\`
-scripts/coord/state.sh                                   # what is actually going on
-scripts/coord/handoff.sh --to vNEXT --reason \"predecessor unresponsive\" --force
-\`\`\`
+          Recovery does not route through the stalled session — state is derived from GitHub:
 
-This comment posts once per stall; the label clears on the next heartbeat."
+          \`\`\`
+          scripts/coord/state.sh
+          scripts/coord/handoff.sh --to vNEXT --reason "predecessor unresponsive" --force
+          \`\`\`
+
+          This posts once per stall; the label clears on the next heartbeat.
+          EOF
+          sed -i 's/^          //' /tmp/deadman.md
+          gh issue comment "$channel" --body-file /tmp/deadman.md
