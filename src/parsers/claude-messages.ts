@@ -1,5 +1,5 @@
 import { createReadStream } from 'fs';
-import { createInterface } from 'readline';
+import { createInterface } from 'node:readline';
 import { stat } from 'fs/promises';
 import { basename, dirname, join } from 'path';
 import { normalizeDeep } from '../utils/text-encoding.js';
