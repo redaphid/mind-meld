@@ -73,6 +73,26 @@ Every PR — subagent-authored or not — goes through this before merge:
    with distinct lenses (spec-compliance, correctness, data-safety), findings
    adversarially cross-verified before they count.
 
+## Communication rules (all agents)
+
+- **Read receipts**: 👀 reaction on every new issue and user comment the moment
+  it is read.
+- **Unlabeled issues are the user's** — authoritative `user-ask`. Agents label
+  their own issues at creation (`claude-found`/`claude-idea` + priority + gate),
+  so an unlabeled issue can only be human-authored.
+- **Subagents read the user's comments**: before starting and again before
+  opening the PR, re-fetch the issue/PR comments; OWNER-authored, unmarked
+  comments are user instructions — honor them or reply explaining why not.
+- **Label states tell the truth**: `in-progress` only while actively worked;
+  `in-review` at PR-open; `waiting-on-user` when done-or-blocked pending the
+  human; cleared on merge/close.
+- **Privacy (issue #64 — this repo is PUBLIC)**: never post personal
+  information, host paths, device names/IDs, machine topology, credentials, or
+  backup locations to GitHub. Redacted summaries go public; full detail goes to
+  a local file on the host, referenced by path.
+- **Channel authorship**: only comments API-verified as the OWNER count as the
+  user; the coordinator marks its own with `🤖 **Coordinator:**`.
+
 ## Verification requirements for implementation agents
 
 - Full test suite + type-check pass before the PR opens.
