@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Mindmeld HTTP API
-  version: 1.9.0
+  version: 1.10.0
   summary: Unified conversation index for Claude Code and Cursor.
   description: |
     Mindmeld indexes AI coding conversations into PostgreSQL (metadata +
