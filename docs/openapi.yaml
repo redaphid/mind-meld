@@ -1033,6 +1033,102 @@ paths:
                         error:
                           type: string
 
+  /api/throughput:
+    get:
+      tags: [Monitoring]
+      operationId: getThroughput
+      summary: Is the embedding queue being worked off, and when does it end?
+      description: |
+        A pending count on its own cannot tell a healthy pipeline that is nearly
+        done from one that stalled hours ago from one losing ground to incoming
+        messages. This measures two rates over a recent window — messages
+        embedded, and new messages arriving — and reports the difference, which
+        is the only number an ETA can honestly come from.
+
+        `state` is the summary worth reading first:
+
+        | state | meaning |
+        |---|---|
+        | `caught-up` | nothing left to embed |
+        | `draining` | backlog shrinking; `eta` is populated |
+        | `holding` | work happening, arrivals cancel it out |
+        | `falling-behind` | backlog grew over the window |
+        | `stalled` | a backlog exists and nothing was embedded at all |
+
+        `eta` is null unless the backlog is actually shrinking: computed from a
+        non-positive drain rate it would be infinite or negative, and rendering
+        either as a finish time is worse than admitting there isn't one.
+
+        `pending` uses the same definition as `/status`, so the two screens
+        cannot disagree about how much work is left.
+      parameters:
+        - name: minutes
+          in: query
+          description: |
+            Measurement window. Clamped to 1..1440 — below that a rate is noise,
+            above it the averaging hides what you opened the dashboard to see.
+          schema:
+            type: integer
+            default: 60
+            minimum: 1
+            maximum: 1440
+      responses:
+        '200':
+          description: Current queue state, rates, and projection.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, state, queue, rates, eta, window]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  state:
+                    type: string
+                    enum: [caught-up, draining, holding, falling-behind, stalled]
+                  queue:
+                    type: object
+                    required: [pending, embedded]
+                    properties:
+                      pending:
+                        type: integer
+                      embedded:
+                        type: integer
+                  rates:
+                    type: object
+                    required: [embeddedPerMinute, arrivedPerMinute, netDrainPerMinute]
+                    properties:
+                      embeddedPerMinute:
+                        type: number
+                      arrivedPerMinute:
+                        type: number
+                      netDrainPerMinute:
+                        type: number
+                        description: Positive means the backlog shrinks by this much per minute.
+                  eta:
+                    type: object
+                    required: [secondsRemaining, finishesAt]
+                    properties:
+                      secondsRemaining:
+                        type: integer
+                        nullable: true
+                      finishesAt:
+                        type: string
+                        format: date-time
+                        nullable: true
+                  window:
+                    type: object
+                    required: [minutes, embedded, arrived]
+                    description: The counts the rates were derived from, so a rate is never read bare.
+                    properties:
+                      minutes:
+                        type: integer
+                      embedded:
+                        type: integer
+                      arrived:
+                        type: integer
+
   /api/sync:
     post:
       tags: [Monitoring]

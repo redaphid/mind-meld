@@ -28,6 +28,67 @@ const runSummary = run => {
   return `${parts.join(', ')}${seconds ? ` in ${seconds}s` : ''}`
 }
 
+const fmtDuration = seconds => {
+  if (seconds == null) return null
+  if (seconds < 90) return `${Math.round(seconds)}s`
+  const mins = Math.round(seconds / 60)
+  if (mins < 90) return `${mins}m`
+  const hours = Math.floor(mins / 60)
+  const rem = mins % 60
+  if (hours < 48) return rem ? `${hours}h ${rem}m` : `${hours}h`
+  return `${Math.round(hours / 24)}d`
+}
+
+// A pending count alone cannot tell "working through it" from "stopped" from
+// "losing ground", so the state is what gets the pill and the rate explains it.
+const QUEUE_STATES = {
+  'caught-up': { label: 'Caught up', kind: 'good' },
+  draining: { label: 'Draining', kind: 'good' },
+  holding: { label: 'Holding steady', kind: 'warn' },
+  'falling-behind': { label: 'Falling behind', kind: 'warn' },
+  stalled: { label: 'Stalled', kind: 'warn' },
+}
+
+const QueueThroughput = () => {
+  const t = useApi('/api/throughput', { minutes: 60 })
+
+  useEffect(() => {
+    const id = setInterval(t.reload, 15000)
+    return () => clearInterval(id)
+  }, [t.reload])
+
+  if (t.error) return html`<div class="faint" style="margin-top:10px;font-size:13px">throughput unavailable</div>`
+  if (!t.data) return null
+
+  const { state, rates, eta, window: w } = t.data
+  const meta = QUEUE_STATES[state] ?? { label: state, kind: '' }
+  const etaText = fmtDuration(eta.secondsRemaining)
+
+  return html`
+    <div class="m" style="margin-top:10px">
+      <${Pill} kind=${meta.kind}>${meta.label}<//>
+      ${state === 'draining' &&
+      html`<span>${fmtNum(rates.netDrainPerMinute)}/min net</span>`}
+      ${state === 'falling-behind' &&
+      html`<span
+        >arriving ${fmtNum(rates.arrivedPerMinute)}/min vs ${fmtNum(rates.embeddedPerMinute)}/min
+        embedded</span
+      >`}
+      ${state === 'holding' && html`<span>${fmtNum(rates.embeddedPerMinute)}/min in and out</span>`}
+      ${state === 'stalled' &&
+      html`<span>nothing embedded in the last ${w.minutes}m</span>`}
+      ${etaText && state === 'draining' &&
+      html`<span class="right faint nowrap">~${etaText} remaining</span>`}
+    </div>
+    <div class="faint" style="font-size:12px;margin-top:4px">
+      last ${w.minutes}m: ${fmtExact(w.embedded)} embedded, ${fmtExact(w.arrived)} arrived
+      ${eta.finishesAt && state === 'draining'
+        ? html` · done ${new Date(eta.finishesAt).toLocaleString()}`
+        : ''}
+    </div>
+  `
+}
+
 // Drains pending embeddings on demand instead of waiting out the sync interval.
 // The run is detached server-side and takes minutes, so this polls rather than
 // holding a request open, and it picks up a run someone else started too.
@@ -175,6 +236,7 @@ export const OverviewView = () => {
           ${fmtNum(pending.sessions ?? 0)} sessions pending
         <//>
       </div>
+      <${QueueThroughput} />
       <${IngestionRunner} onFinished=${status.reload} />
     <//>
 

@@ -17,6 +17,7 @@ import { getSessionDigest, getMessages, getMessageById } from './session.js'
 import { createMcpServer } from './tools.js'
 import { getSyncStatus } from '../sync/orchestrator.js'
 import { startSyncRun, getSyncRunState } from './sync-run.js'
+import { getThroughput, clampWindow } from './throughput.js'
 import { getCollectionStats } from '../db/chroma.js'
 import { config } from '../config.js'
 import { ensureEmbeddingModel } from '../embeddings/ollama.js'
@@ -625,6 +626,12 @@ app.post('/api/quarantine/retry', apiRoute('Quarantine retry', async (req, res) 
     limit: Math.min(intParam(req.body?.limit ?? req.query.limit, 100), 500),
   })
   res.json({ status: 'ok', ...result, pending: await countPending() })
+}))
+
+// Is the embedding queue being worked off, how fast, and when does it end?
+// `minutes` sets the measurement window (default 60, clamped to 1..1440).
+app.get('/api/throughput', apiRoute('Throughput', async (req, res) => {
+  res.json({ status: 'ok', ...(await getThroughput(clampWindow(req.query.minutes))) })
 }))
 
 // Trigger an ingestion pass by hand rather than waiting out the sync interval.
