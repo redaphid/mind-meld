@@ -125,6 +125,31 @@ describe('normalizeDeep', () => {
     expect(normalizeDeep({ [`a${NUL}`]: 1, a: 2, [`a${NUL}${NUL}`]: 3 })).toEqual({ a: 2 })
   })
 
+  // Keys that are (or normalize to) Object.prototype member names must not be
+  // mistaken for collisions with values that do not exist. The rebuild goes
+  // through a Map — no prototype chain to lie about membership, no inherited
+  // setter for "__proto__" to invoke.
+  it('keeps a repaired key named after an Object.prototype member', () => {
+    expect(normalizeDeep({ [`toString${NUL}`]: 'x' })).toEqual({ toString: 'x' })
+  })
+
+  it('keeps a clean "__proto__" key as an own property, without pollution', () => {
+    const parsed = JSON.parse('{"__proto__": {"p": 1}, "ok": 2}')
+    const result = normalizeDeep(parsed) as Record<string, unknown>
+    expect(result.ok).toBe(2)
+    expect(Object.getOwnPropertyDescriptor(result, '__proto__')?.value).toEqual({ p: 1 })
+    expect(Object.getPrototypeOf(result)).toBe(Object.prototype)
+    expect(({} as { p?: number }).p).toBeUndefined()
+  })
+
+  it('does not let a "__proto__" entry cascade into swallowing other keys', () => {
+    // The transcript form: the NUL in the key arrives as a JSON escape.
+    const parsed = JSON.parse('{"__proto__": {"z": 1}, "z\\u0000": "v"}')
+    const result = normalizeDeep(parsed) as Record<string, unknown>
+    expect(result.z).toBe('v')
+    expect(Object.getOwnPropertyDescriptor(result, '__proto__')?.value).toEqual({ z: 1 })
+  })
+
   it('passes non-strings through untouched', () => {
     const input = { n: 42, b: true, nil: null, list: [1, 2] }
     expect(normalizeDeep(input)).toEqual(input)
