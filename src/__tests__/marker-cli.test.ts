@@ -106,9 +106,35 @@ describe('marker.mjs CLI', () => {
     expect(out.filter((t) => t.waiting).map((t) => t.number)).toEqual([1, 4]);
   });
 
-  it('survives garbage on stdin without failing the caller', () => {
+  it('distinguishes "no data" from "nothing to report"', () => {
+    // Silence on empty input renders identically to a clean inbox — the same
+    // class of bug as the one this whole change exists to fix. Absence must
+    // announce itself.
+    const empty = run(MARKER, ['unanswered', '--owner', 'owner'], '');
+    expect(empty.status).not.toBe(0);
+    expect(empty.stderr).toMatch(/no comment data/i);
+
+    const clean = run(
+      MARKER,
+      ['unanswered', '--owner', 'owner'],
+      JSON.stringify([
+        {
+          id: 1,
+          user: { login: 'owner' },
+          author_association: 'OWNER',
+          created_at: '2026-08-01T01:00:00Z',
+          html_url: 'https://example.invalid/1',
+          body: `${ROBOT} **Coordinator v2:** answered`,
+        },
+      ]),
+    );
+    expect(clean.status).toBe(0);
+    expect(clean.stdout.trim()).toBe('');
+  });
+
+  it('survives garbage on stdin without pretending the inbox is empty', () => {
     const r = run(MARKER, ['unanswered', '--owner', 'owner'], 'not json');
-    expect(r.status).toBe(0);
+    expect(r.status).not.toBe(0);
   });
 });
 

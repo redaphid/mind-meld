@@ -200,19 +200,31 @@ export function lastWordIsOperators(lastComment) {
  * COORDINATOR marker closes the loop — an agent's progress comment must not
  * bury a question the operator is still waiting on.
  */
-export function unansweredOperatorComments(comments, ownerLogin) {
+export function unansweredOperatorComments(comments, ownerLogin, { generation } = {}) {
   const mine = (Array.isArray(comments) ? comments : []).filter(
     (c) => c?.user?.login === ownerLogin && (c.author_association ?? 'OWNER') === 'OWNER',
   );
-  const lastReplyAt = mine
-    .filter((c) => classifyComment(c.body).isCoordinatorReply)
-    .map((c) => c.created_at)
-    .sort()
-    .pop();
-  return mine.filter(
-    (c) =>
-      !classifyComment(c.body).isMachine && (lastReplyAt === undefined || c.created_at > lastReplyAt),
-  );
+
+  // A reply only closes the loop if the CURRENT generation wrote it. After a
+  // rotation, a predecessor's comment marking the successor's channel answered
+  // would silently hide everything the operator said before the handoff.
+  const closesLoop = (body) => {
+    const c = classifyComment(body);
+    if (!c.isCoordinatorReply) return false;
+    if (!generation) return true;
+    return c.generation === generation;
+  };
+
+  // Cutoff by comment id, never by timestamp. GitHub timestamps are
+  // second-resolution, so an ask posted in the same second as a reply compares
+  // as "not after it" and disappears; and `created_at` does not move when a
+  // comment is EDITED into coordinator form, so a timestamp cutoff can be
+  // rewritten after the fact. Ids only ever increase and an edit cannot touch
+  // them.
+  const idOf = (c) => Number(c?.id ?? 0);
+  const lastReplyId = mine.filter((c) => closesLoop(c.body)).reduce((a, c) => Math.max(a, idOf(c)), -Infinity);
+
+  return mine.filter((c) => !classifyComment(c.body).isMachine && idOf(c) > lastReplyId);
 }
 
 // ---------------------------------------------------------------------------
@@ -288,8 +300,18 @@ function main(argv) {
     }
     case 'unanswered': {
       const owner = argValue(rest, '--owner');
-      const comments = parseComments(readStdin());
-      for (const c of unansweredOperatorComments(comments, owner)) {
+      const generation = argValue(rest, '--generation');
+      const raw = readStdin();
+      const comments = parseComments(raw);
+      // No data must never render as "nothing to report" — silence on failure
+      // is the same class of bug as an agent comment burying an operator ask.
+      if (!raw.trim() || (comments.length === 0 && raw.trim())) {
+        process.stderr.write(
+          'marker: no comment data on stdin — this is a FAILURE to read the inbox, not an empty inbox\n',
+        );
+        return 3;
+      }
+      for (const c of unansweredOperatorComments(comments, owner, { generation })) {
         const first = String(c.body ?? '').split('\n')[0];
         process.stdout.write(`- [${c.created_at}] ${c.html_url}\n  ${first}\n`);
       }

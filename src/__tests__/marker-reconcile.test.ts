@@ -49,6 +49,99 @@ describe('machineAuthorship: signals that a body was written by a machine', () =
   });
 });
 
+describe('machineAuthorship: it must never put words in the operator’s mouth', () => {
+  // Stamping one of the operator's own comments as machine-authored is worse
+  // than the bug this tool fixes: it misattributes his words and then teaches
+  // every downstream tool to ignore them. So `--fix` needs evidence that a
+  // MACHINE wrote it, not evidence that the writing is long and tidy.
+
+  it('does not read quoted agent text as the operator being a machine', () => {
+    // The operator pasting an agent's report back at it, to complain about it,
+    // is the most likely way this ever goes wrong — and it scored 10/3 before.
+    const body =
+      '> Cycle 3 green: 24 tests passing, type-check clean.\n> Next: the docs.\n\nno. stop reporting and answer my question.';
+    const r = rec.machineAuthorship(body);
+    expect(r.isMachine).toBe(false);
+    expect(r.conclusive).toBe(false);
+  });
+
+  it('does not read a fenced paste as the operator being a machine', () => {
+    const body =
+      'this is what I keep getting:\n\n```\nCycle 3 green: 24 tests passing, type-check clean.\n```\n\nwhy?';
+    expect(rec.machineAuthorship(body).conclusive).toBe(false);
+  });
+
+  it('does not read the protocol quoted in backticks as machine evidence', () => {
+    const body =
+      'stop ending every comment with `Next:` and `type-check clean` — I do not care about the gates, I care about the answer';
+    expect(rec.machineAuthorship(body).conclusive).toBe(false);
+  });
+
+  it('never marks a long, tidy operator comment as safe to fix', () => {
+    // Structure alone is not evidence. The operator writes long comments with
+    // headings; that must never be enough on its own.
+    const body =
+      '## What I actually want\n\n' +
+      'I keep coming back to this and I think the shape is wrong. '.repeat(8) +
+      '\n\nDo it the other way.\n\nAnd check the other thing too.\n\nThen tell me.';
+    expect(rec.machineAuthorship(body).conclusive).toBe(false);
+  });
+
+  it('requires a machine-specific signal before a body is auto-fixable', () => {
+    const stylistic = rec.machineAuthorship(
+      '## Summary\n\n- a\n- b\n\n## Detail\n\n```\nx\n```\n\n' + 'padding. '.repeat(60),
+    );
+    expect(stylistic.isMachine).toBe(true); // still reported
+    expect(stylistic.conclusive).toBe(false); // but never auto-stamped
+
+    const conclusive = rec.machineAuthorship(
+      'Cycle 3 green: the reconciler now splits its signal table into conclusive and stylistic tiers, ' +
+        'so structure alone can never trigger an edit.\n\n24 tests passing, type-check clean.\n\n' +
+        'Next: the docs, then a live dry run over the last fifty threads.',
+    );
+    expect(conclusive.conclusive).toBe(true);
+  });
+
+  it('treats a generated footer as machine evidence regardless of length', () => {
+    // A footer is emitted by tooling, not a phrase a person types, so length
+    // adds nothing — unlike the gate phrases, which the operator can use in a
+    // four-word question.
+    const r = rec.machineAuthorship('done\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)');
+    expect(r.conclusive).toBe(true);
+  });
+
+  it.each([
+    ['a terse question using gate words', 'is type-check clean?'],
+    ['a terse instruction', 'make sure 349 tests passing before you merge'],
+    ['a one-line verdict demand', 'verdict: just fix it'],
+  ])('never auto-fixes %s — a machine report is never four words', (_label, body) => {
+    expect(rec.machineAuthorship(body).conclusive).toBe(false);
+  });
+
+  it.each([
+    [
+      'a Claude Code footer',
+      'Opened the PR against main with the parser boundary fix and a regression test.\n\n' +
+        'The branch is rebased and the checks came back green.\n\n' +
+        '🤖 Generated with [Claude Code](https://claude.com/claude-code)',
+    ],
+    [
+      'a cycle report',
+      'Cycle 3 green: added the reconciler, with its signal table split into conclusive and stylistic tiers ' +
+        'so that structure alone can never trigger an edit.\n\n24 tests passing, type-check clean.\n\n' +
+        'Next: wiring the docs and running a live dry run.',
+    ],
+    [
+      'a review verdict',
+      '## Review\n\n**Verdict: request changes**\n\n### S1 — the parser drops data\n\n' +
+        'The boundary at line 40 discards the tail of every multi-byte record, silently, ' +
+        'so a session ending mid-character loses its final message with no error anywhere.',
+    ],
+  ])('still finds %s conclusive', (_label, body) => {
+    expect(rec.machineAuthorship(body).conclusive).toBe(true);
+  });
+});
+
 describe('findViolations', () => {
   const owner = 'redaphid';
   const c = (over: Record<string, unknown>) => ({

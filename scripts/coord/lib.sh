@@ -52,9 +52,15 @@ owner_login() {
 # `<!-- coord-heartbeat -->` that opens every heartbeat, so the coordinator's
 # own heartbeat came back as an unanswered operator message. Only a
 # `🤖 **Coordinator vN:**` marker closes the loop now.
+#
+# The generation is passed so a PREDECESSOR's reply cannot mark a successor's
+# channel answered — on a freshly rotated channel that would hide everything
+# the operator said before the rotation.
 unanswered_operator_comments() {
-  local issue="$1" owner
+  local issue="$1" owner gen
   owner="$(owner_login)"
+  gen="$(active_generation "$issue" 2>/dev/null || true)"
   gh api "repos/$REPO/issues/$issue/comments" --paginate --jq '.[]' \
-    | node "$(dirname "${BASH_SOURCE[0]}")/marker.mjs" unanswered --owner "$owner"
+    | node "$(dirname "${BASH_SOURCE[0]}")/marker.mjs" unanswered --owner "$owner" \
+        ${gen:+--generation "$gen"}
 }

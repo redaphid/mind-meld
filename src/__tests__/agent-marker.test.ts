@@ -265,6 +265,39 @@ describe('unansweredOperatorComments', () => {
     expect(out).toEqual([]);
   });
 
+  it('keys the cutoff on comment id, not created_at', () => {
+    // A comment EDITED into coordinator form keeps its original created_at, so
+    // a timestamp cutoff rewinds past every ask made since. Ids only ever
+    // increase, so they cannot be rewritten by an edit.
+    const out = marker.unansweredOperatorComments(
+      [
+        c({
+          id: 150,
+          created_at: '2026-08-01T02:00:00Z',
+          body: `${ROBOT} **Coordinator v2:** answered the first`,
+        }),
+        // Same second, posted after: GitHub timestamps are second-resolution,
+        // so `created_at > cutoff` is false and the ask vanishes. Ids order it
+        // correctly, and an edit cannot rewrite an id.
+        c({ id: 200, created_at: '2026-08-01T02:00:00Z', body: 'and one more thing' }),
+      ],
+      owner,
+    );
+    expect(out.map((x: { id: number }) => x.id)).toEqual([200]);
+  });
+
+  it('does not let a predecessor coordinator answer for its successor', () => {
+    // After a rotation to v3, a v2 comment must not mark the v3 channel
+    // answered — that silently hides everything said before the rotation.
+    const comments = [
+      c({ id: 1, body: 'the ask' }),
+      c({ id: 2, body: `${ROBOT} **Coordinator v2:** on it` }),
+    ];
+    expect(marker.unansweredOperatorComments(comments, owner, { generation: 'v3' }).map((x: { id: number }) => x.id)).toEqual([1]);
+    // The current generation still closes the loop.
+    expect(marker.unansweredOperatorComments(comments, owner, { generation: 'v2' })).toEqual([]);
+  });
+
   it('ignores comments from anyone but the repo owner — the repo is public', () => {
     const out = marker.unansweredOperatorComments(
       [c({ id: 5, user: { login: 'stranger' }, author_association: 'NONE', body: 'hello' })],
