@@ -17,11 +17,11 @@ describe('canonicalizeProjectPath', () => {
   it.each([
     // [input, canonical]
     // WSL / unix paths pass through
-    ['/home/hypnodroid/Projects/mind-meld', '/home/hypnodroid/Projects/mind-meld'],
+    ['/home/alice/Projects/mind-meld', '/home/alice/Projects/mind-meld'],
     ['/mnt/d/tools/comfy', '/mnt/d/tools/comfy'],
     // Windows backslash form -> forward slashes
     ['D:\\mechs\\mindmeld', 'D:/mechs/mindmeld'],
-    ['C:\\Users\\hypnodroid\\Worktrees\\nfc-bead\\multi-demo', 'C:/Users/hypnodroid/Worktrees/nfc-bead/multi-demo'],
+    ['C:\\Users\\alice\\Worktrees\\nfc-bead\\multi-demo', 'C:/Users/alice/Worktrees/nfc-bead/multi-demo'],
     // Already-forward-slash Windows form is stable
     ['D:/mechs/mindmeld', 'D:/mechs/mindmeld'],
     // Drive letter case is normalized up (live data holds d:\Projects\sporefall-art)
@@ -47,7 +47,7 @@ describe('canonicalizeProjectPath', () => {
     ['  /home/user/x  ', '/home/user/x'],
     // Non-paths pass through untouched: raw encoded dir names, pseudo-projects
     ['D--mechs-comfy', 'D--mechs-comfy'],
-    ['-home-hypnodroid-Projects-clasp-laser-cube', '-home-hypnodroid-Projects-clasp-laser-cube'],
+    ['-home-alice-Projects-clasp-laser-cube', '-home-alice-Projects-clasp-laser-cube'],
     ['phone', 'phone'],
     ['android-post-notifications', 'android-post-notifications'],
   ])('%s -> %s', (input, expected) => {
@@ -63,7 +63,7 @@ describe('canonicalizeProjectPath', () => {
 
   it('is idempotent over every matrix row', () => {
     for (const input of [
-      '/home/hypnodroid/Projects/mind-meld',
+      '/home/alice/Projects/mind-meld',
       'D:\\mechs\\mindmeld',
       'd:',
       '\\\\server\\share\\dir',
@@ -80,10 +80,10 @@ describe('encodeClaudeProjectDir', () => {
   // These pairs are real (external_id, session cwd) rows from the live DB —
   // the encode must reproduce Claude Code's own directory names.
   it.each([
-    ['/home/hypnodroid/Projects/mind-meld', '-home-hypnodroid-Projects-mind-meld'],
-    ['/home/redaphid/Projects/rogue-gm/.claude/worktrees/sonnet-gm-latency', '-home-redaphid-Projects-rogue-gm--claude-worktrees-sonnet-gm-latency'],
+    ['/home/alice/Projects/mind-meld', '-home-alice-Projects-mind-meld'],
+    ['/home/bob/Projects/rogue-gm/.claude/worktrees/sonnet-gm-latency', '-home-bob-Projects-rogue-gm--claude-worktrees-sonnet-gm-latency'],
     ['D:/mechs/win-setup', 'D--mechs-win-setup'],
-    ['C:/Users/hypnodroid/wsl', 'C--Users-hypnodroid-wsl'],
+    ['C:/Users/alice/wsl', 'C--Users-alice-wsl'],
     ['/mnt/d/tools/comfy', '-mnt-d-tools-comfy'],
     ['D:/', 'D--'],
   ])('%s -> %s', (path, encoded) => {
@@ -94,7 +94,7 @@ describe('encodeClaudeProjectDir', () => {
 describe('verifyCwdAgainstDirName', () => {
   it('accepts a cwd that re-encodes to the directory name', () => {
     expect(verifyCwdAgainstDirName('D--mechs-win-setup', 'D:\\mechs\\win-setup')).toBe(true)
-    expect(verifyCwdAgainstDirName('-home-redaphid-Projects-fish-shell-stuff', '/home/redaphid/Projects/fish-shell-stuff')).toBe(true)
+    expect(verifyCwdAgainstDirName('-home-bob-Projects-fish-shell-stuff', '/home/bob/Projects/fish-shell-stuff')).toBe(true)
     expect(verifyCwdAgainstDirName('D--', 'D:\\')).toBe(true)
   })
 
@@ -120,8 +120,8 @@ describe('verifyCwdAgainstDirName', () => {
     // project directory is the worktree. Using that cwd would misname the row.
     expect(
       verifyCwdAgainstDirName(
-        '-home-redaphid-Projects-rogue-brain--claude-worktrees-starry-jingling-stearns',
-        '/home/redaphid/Projects/rogue-brain'
+        '-home-bob-Projects-rogue-brain--claude-worktrees-starry-jingling-stearns',
+        '/home/bob/Projects/rogue-brain'
       )
     ).toBe(false)
   })
@@ -164,11 +164,11 @@ describe('resolveProjectPath', () => {
   it('falls back when the cwd belongs to a different directory', () => {
     expect(
       resolveProjectPath({
-        dirName: '-home-redaphid-Projects-rogue-brain--claude-worktrees-starry-jingling-stearns',
-        cwd: '/home/redaphid/Projects/rogue-brain',
+        dirName: '-home-bob-Projects-rogue-brain--claude-worktrees-starry-jingling-stearns',
+        cwd: '/home/bob/Projects/rogue-brain',
       })
     ).toEqual({
-      path: '-home-redaphid-Projects-rogue-brain--claude-worktrees-starry-jingling-stearns',
+      path: '-home-bob-Projects-rogue-brain--claude-worktrees-starry-jingling-stearns',
       verified: false,
     })
   })
@@ -220,9 +220,9 @@ describe('projectPathEquivalenceKey', () => {
   })
 
   it('keeps unix paths exact-case and distinct across users', () => {
-    expect(projectPathEquivalenceKey('/home/hypnodroid/Projects/mind-meld')).toBe('/home/hypnodroid/Projects/mind-meld')
-    expect(projectPathEquivalenceKey('/home/hypnodroid/Projects/mind-meld')).not.toBe(
-      projectPathEquivalenceKey('/home/redaphid/Projects/mind-meld')
+    expect(projectPathEquivalenceKey('/home/alice/Projects/mind-meld')).toBe('/home/alice/Projects/mind-meld')
+    expect(projectPathEquivalenceKey('/home/alice/Projects/mind-meld')).not.toBe(
+      projectPathEquivalenceKey('/home/bob/Projects/mind-meld')
     )
     expect(projectPathEquivalenceKey('/home/user/App')).not.toBe(projectPathEquivalenceKey('/home/user/app'))
   })
@@ -241,7 +241,7 @@ describe('projectPathEquivalenceKey', () => {
 describe('findEquivalentIn', () => {
   const rows = [
     { id: 1, path: 'D:/tools/comfy' },
-    { id: 2, path: '/home/redaphid/Projects/mind-meld' },
+    { id: 2, path: '/home/bob/Projects/mind-meld' },
     { id: 3, path: null },
     { id: 4, path: 'D--mechs-comfy' }, // raw fallback row: must never be adopted into
   ]
@@ -257,11 +257,11 @@ describe('findEquivalentIn', () => {
     expect(findEquivalentIn(rows, '-mnt-d-tools-comfy', null)?.id).toBe(1)
     expect(findEquivalentIn(rows, 'D--tools-comfy', null)?.id).toBe(1)
     expect(findEquivalentIn(rows, 'd--TOOLS-comfy', null)?.id).toBe(1)
-    expect(findEquivalentIn(rows, '-home-redaphid-Projects-mind-meld', null)?.id).toBe(2)
+    expect(findEquivalentIn(rows, '-home-bob-Projects-mind-meld', null)?.id).toBe(2)
   })
 
   it('does not case-fold unix dir names', () => {
-    expect(findEquivalentIn(rows, '-home-redaphid-projects-MIND-meld', null)).toBeNull()
+    expect(findEquivalentIn(rows, '-home-bob-projects-MIND-meld', null)).toBeNull()
   })
 
   // Round-2 finding 1, runtime half: this is the standing write-layer defect —

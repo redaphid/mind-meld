@@ -85,13 +85,13 @@ export const config = {
 
   // Ollama
   ollama: {
-    // One ollama on soul, reached over the SSH tunnel. Serves both bge-m3
+    // One Ollama on the GPU host, reached over the SSH tunnel. Serves both bge-m3
     // (vectorization) and qwen3 (generation/summarization).
     url: getEnv("OLLAMA_URL", "http://localhost:11434"),
     timeoutMs: getEnvInt("OLLAMA_TIMEOUT_MS", 120000), // 2 minutes
     maxRetries: getEnvInt("OLLAMA_MAX_RETRIES", 3),
     retryDelayMs: getEnvInt("OLLAMA_RETRY_DELAY_MS", 5000), // 5 seconds between retries
-    // Max requests crossing the SSH tunnel to soul at once. The tunnel — not the
+    // Max requests crossing the SSH tunnel to that host at once. The tunnel — not the
     // GPU — is the bottleneck: one request is ~4-6s, but concurrent ones saturate
     // it and each balloons to ~30s. Serialize (1) by default; raise only if Ollama
     // moves onto the same host as the sync (then the tunnel is gone).

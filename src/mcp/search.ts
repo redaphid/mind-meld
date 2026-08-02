@@ -64,7 +64,8 @@ export class UnknownDataClassError extends Error {
 }
 
 // Every class in use: source classifications plus project overrides.
-const listKnownDataClasses = async (): Promise<string[]> => {
+// Shared with ingest, which names this vocabulary when a caller must classify.
+export const listKnownDataClasses = async (): Promise<string[]> => {
   const result = await query<{ data_class: string }>(
     `SELECT DISTINCT data_class FROM (
        SELECT data_class FROM sources
@@ -155,11 +156,6 @@ const composeQueryVector = async (
   return normalizeVector(vec)
 }
 
-// Matches the caller's cwd against stored (canonical, #33) project paths in
-// every spelling of the same directory: `D:\x`, `D:/x` and `/mnt/d/x` all find
-// each other, case-insensitively where the filesystem is. The caller sends
-// whatever its OS gave it — normalization is automatic here, never the
-// caller's job.
 // Every directory the cwd is inside, itself first: `D:/a/b` -> `D:/a/b`,
 // `D:/a`, `D:/`. Enumerating these lets an ancestor project be found by exact
 // equality instead of by using the stored path as a LIKE pattern — which both

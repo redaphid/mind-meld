@@ -140,7 +140,7 @@ DECLARE
   history_repointed integer := 0;
   quarantine_repointed integer := 0;
   g record;
-  survivor_id integer;
+  keeper_id integer;
   husk_ids integer[];
   n integer;
   win_machines text[];
@@ -257,7 +257,7 @@ BEGIN
   WHERE p.path IS DISTINCT FROM pg_temp.mm_canon(p.path);
   GET DIAGNOSTICS canonicalized = ROW_COUNT;
 
-  -- Merge rows that are now provably the same directory. Survivor: most
+  -- Merge rows that are now provably the same directory. Keeper: most
   -- sessions, then oldest row, then lowest id. The key is computed once per
   -- row so the Windows-backed decision (which depends on the row's machine,
   -- not on the path's shape) is applied consistently everywhere below.
@@ -274,14 +274,14 @@ BEGIN
     GROUP BY 1, 2
     HAVING count(*) > 1
   LOOP
-    SELECT p.id INTO survivor_id
+    SELECT p.id INTO keeper_id
     FROM projects p
     LEFT JOIN LATERAL (SELECT count(*) AS sessions FROM sessions s WHERE s.project_id = p.id) sc ON true
     WHERE p.id = ANY(g.ids)
     ORDER BY sc.sessions DESC, p.created_at ASC NULLS LAST, p.id ASC
     LIMIT 1;
 
-    husk_ids := array_remove(g.ids, survivor_id);
+    husk_ids := array_remove(g.ids, keeper_id);
 
     -- The merge is justified by "one host, one directory, seen through two
     -- filesystems". Enforce that premise instead of assuming it: the same
@@ -306,19 +306,19 @@ BEGIN
       RAISE EXCEPTION 'migration 019: session external_id collision while merging projects % (key %)', g.ids, g.k;
     END IF;
 
-    UPDATE sessions SET project_id = survivor_id WHERE project_id = ANY(husk_ids);
+    UPDATE sessions SET project_id = keeper_id WHERE project_id = ANY(husk_ids);
     GET DIAGNOSTICS n = ROW_COUNT;
     sessions_repointed := sessions_repointed + n;
 
-    UPDATE history_entries SET project_id = survivor_id WHERE project_id = ANY(husk_ids);
+    UPDATE history_entries SET project_id = keeper_id WHERE project_id = ANY(husk_ids);
     GET DIAGNOSTICS n = ROW_COUNT;
     history_repointed := history_repointed + n;
 
-    UPDATE sync_quarantine SET project_id = survivor_id WHERE project_id = ANY(husk_ids);
+    UPDATE sync_quarantine SET project_id = keeper_id WHERE project_id = ANY(husk_ids);
     GET DIAGNOSTICS n = ROW_COUNT;
     quarantine_repointed := quarantine_repointed + n;
 
-    -- Absorb what the survivor lacks; a merged project's centroid is stale by
+    -- Absorb what the keeper lacks; a merged project's centroid is stale by
     -- definition, so clear it for the periodic recompute.
     UPDATE projects s
     SET machine = COALESCE(s.machine,
@@ -330,7 +330,7 @@ BEGIN
         centroid_vector = NULL,
         centroid_message_count = NULL,
         centroid_computed_at = NULL
-    WHERE s.id = survivor_id;
+    WHERE s.id = keeper_id;
 
     DELETE FROM projects WHERE id = ANY(husk_ids);
     GET DIAGNOSTICS n = ROW_COUNT;

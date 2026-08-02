@@ -185,7 +185,7 @@ beforeAll(async () => {
   const mntUpper = await project('-mnt-d-Data', '/mnt/d/Data', 'linuxbox')
   await session(mntUpper, 's-mnt-2', '/mnt/d/Data')
 
-  // Give the drvfs husk a data_class override the survivor lacks — the merge
+  // Give the drvfs husk a data_class override the keeper lacks — the merge
   // must carry it over, not drop it.
   await db.query(`UPDATE projects SET data_class = 'coding' WHERE external_id = '-mnt-d-tools-comfy'`)
 
@@ -222,15 +222,15 @@ describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
 
   it('merges the drvfs pair into the session-richest row and repoints sessions', async () => {
     expect(await pathOf('-mnt-d-tools-comfy')).toBeUndefined() // husk deleted
-    const survivor = await db.query(
+    const keeper = await db.query(
       `SELECT p.id, p.path, count(s.id)::int AS sessions
        FROM projects p LEFT JOIN sessions s ON s.project_id = p.id
        WHERE p.external_id = 'D--tools-comfy'
        GROUP BY p.id, p.path`
     )
-    expect(survivor.rows).toHaveLength(1)
-    expect(survivor.rows[0].path).toBe('D:/tools/comfy')
-    expect(survivor.rows[0].sessions).toBe(3) // 2 native + 1 adopted from WSL twin
+    expect(keeper.rows).toHaveLength(1)
+    expect(keeper.rows[0].path).toBe('D:/tools/comfy')
+    expect(keeper.rows[0].sessions).toBe(3) // 2 native + 1 adopted from WSL twin
   })
 
   it('merges drive-case duplicates', async () => {
@@ -298,11 +298,11 @@ describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
     expect(backup.rows.length).toBeGreaterThan(live.rows[0].n)
   })
 
-  it('carries a husk data_class override onto the merge survivor', async () => {
-    const survivor = await db.query(
+  it('carries a husk data_class override onto the merge keeper', async () => {
+    const keeper = await db.query(
       `SELECT data_class FROM projects WHERE external_id = 'D--tools-comfy'`
     )
-    expect(survivor.rows[0].data_class).toBe('coding')
+    expect(keeper.rows[0].data_class).toBe('coding')
   })
 
   // Migration 020 (the operator's OS directive on #33). It seeds only what is
@@ -371,14 +371,14 @@ describe.skipIf(!dbAvailable)('upsertProject normalizes and adopts automatically
   it('adopts the surviving row instead of resurrecting a merged twin', async () => {
     // 019 merged -mnt-d-tools-comfy into D--tools-comfy. A later sync of the
     // WSL-side directory starts from just the dir name — same row, no twin.
-    const survivor = await db.query(`SELECT id FROM projects WHERE external_id = 'D--tools-comfy'`)
+    const keeper = await db.query(`SELECT id FROM projects WHERE external_id = 'D--tools-comfy'`)
     const adoptedId = await queries.upsertProject(
       sourceId,
       '-mnt-d-tools-comfy',
       '-mnt-d-tools-comfy',
       '-mnt-d-tools-comfy'
     )
-    expect(adoptedId).toBe(survivor.rows[0].id)
+    expect(adoptedId).toBe(keeper.rows[0].id)
     const twins = await db.query(`SELECT id FROM projects WHERE external_id = '-mnt-d-tools-comfy'`)
     expect(twins.rows).toEqual([])
   })

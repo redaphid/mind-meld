@@ -278,4 +278,9 @@ What runs when, so you know why something isn't findable yet:
 | Warmup filter | Every 6 hours (`mindmeld-warmups`) | Warmup/automated sessions get flagged out of results |
 
 Ingested conversations (`POST /api/ingest`) skip sync but still wait for the next
-embedding run before semantic search finds them.
+embedding run before semantic search finds them. An ingest that would create a
+**new** source must say what class of data it is (`dataClass: "meetings"`,
+`"personal"`, `"coding"`, … — open vocabulary, lowercase) or it is rejected
+with `400`; the error names the classes already in use. Existing sources keep
+their class — ingest never reclassifies — and only `coding`-class data is
+visible to the default `search`. See `docs/openapi.yaml` for the full payload.

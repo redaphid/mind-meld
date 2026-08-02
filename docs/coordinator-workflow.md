@@ -5,11 +5,34 @@ implementation to subagents. The human sets direction and approves designs; the
 coordinator runs the machinery. Labels and their authority semantics are
 defined in issue #34 — read that first.
 
+## Topology (v2, issue #75)
+
+Two layers sit above the implementation agents:
+
+- **Interactive session**: the session the operator actually types into. It
+  stays free as aggressively as possible — it delegates everything (including
+  coordination itself) and returns to the prompt. It does not implement, does
+  not review, does not babysit; it spawns/continues a coordinator agent and
+  relays only what needs a human decision.
+- **Coordinator agent**: a delegated agent that runs the cycle below. The
+  operator and the coordinator talk on **issue #66** (the coordinator
+  channel) — either party can start a thread there, so the operator can steer
+  the coordinator without going through the interactive session at all.
+
+State between cycles is CACHED, never depended on: see "Persistent cycle
+state" below. The comms protocol all agents follow is `AGENTS.md` at the repo
+root (short form) and `docs/comms-protocol.md` (full form with commands).
+Both are provider-agnostic on purpose; the enforcement scripts under
+`scripts/comms/` are plain node, and a runtime-specific settings file such as
+`.claude/settings.json` only points at them.
+
 ## Roles
 
-- **Coordinator** (the long-running session): polls health, triages and
+- **Coordinator** (delegated agent, see Topology): polls health, triages and
   validates issues, delegates, reviews-by-proxy, merges, releases, deploys.
   Never implements code.
+- **Interactive session**: the operator's prompt. Delegates to the
+  coordinator, stays free, surfaces decisions.
 - **Implementation agent**: one issue (or tightly related pair) per agent, in
   an isolated git worktree. Opens a PR; never pushes to main.
 - **Review agent**: fresh context, no knowledge of the implementation. Its job
@@ -40,7 +63,9 @@ defined in issue #34 — read that first.
    merged up with main.
 7. **Status board**: GitHub reflects everything — `in-progress` on delegation,
    `in-review` at PR-open, cleared on merge/close, a status comment at each
-   transition.
+   transition. Every cycle runs `pnpm run reconcile:labels` (dry-run) and, on
+   drift, `pnpm run reconcile:labels --fix` — labels are not allowed to rot
+   between cycles.
 8. **End-of-cycle report**: every cycle ends with a message to the human:
    release notes (what merged/released/deployed, or what's in flight) and the
    explicit list of verification steps taken this cycle with their results.
@@ -116,6 +141,99 @@ authorship is by marker: the orchestrator's comments start with
 implementation/review agents never post there. The orchestrator 👀-reacts to
 each user comment on read, acts on it, and replies in-channel. Checked every
 cycle and whenever the orchestrator is active between cycles.
+
+## Persistent cycle state
+
+`.coord-state.json` (gitignored, local to each checkout) holds the
+coordinator's high-water marks so a cycle need not re-read a whole
+conversation history:
+
+```json
+{
+  "issues": { "66": { "lastSeenCommentId": 123456789 } },
+  "prs": { "77": { "lastReviewedSha": "abc123" } },
+  "lastReconcileAt": "2026-08-02T00:00:00.000Z"
+}
+```
+
+- **Read it first** each cycle; fetch only comments/commits newer than the
+  recorded marks (`gh api ... --jq` filtered by id/SHA).
+- **Update it after acting** — `reconcile-labels.mjs` already maintains
+  `issues.*.lastSeenCommentId` for the issues it inspects and
+  `lastReconcileAt`; the coordinator maintains `prs.*.lastReviewedSha` when a
+  review round completes.
+- Helpers live in `scripts/comms/lib.mjs` (`readState`/`writeState`).
+- **It is a cache, not a source of truth.** `scripts/coord/state.sh` derives
+  the whole coordination state from GitHub precisely so a brand-new cycle on
+  a clean machine is current in one page; nothing here may weaken that.
+  Deleting `.coord-state.json` costs API calls, never correctness.
+- For recall beyond the state file ("when did we decide X?", "what did the
+  operator say about Y last month?"), query **mindmeld itself** via its MCP
+  `search` tool — every past session is indexed.
+
+## Enforcement scripts
+
+The enforcement logic lives in `scripts/comms/` — plain node, zero
+dependencies, all fail-open (a network or `gh` failure warns and never blocks
+the session). Each is a normal executable script: a human or CI can run it
+directly, and any agent runtime can wire it to whatever lifecycle event it
+calls a "hook". For Claude Code specifically, `.claude/settings.json` is a
+thin adapter that maps two of them to `Stop` and `PostToolUse` and contains
+no logic of its own.
+
+- **Session stop** (`stop-pr-progress.mjs`): if the current branch has an open PR
+  with pushes newer than its last comment, the stop is blocked once with
+  instructions to post a progress comment (`stop_hook_active` prevents
+  loops).
+- **After a shell command** (`post-pr-create.mjs`): after `gh pr create`,
+  warns the agent if the linked issue (branch `-<n>` suffix or `#<n>` in the
+  command) was not flipped to `in-review`.
+- **Label reconciler** (`reconcile-labels.mjs`, also
+  `pnpm run reconcile:labels`): dry-run prints drift and exits 1; `--fix`
+  applies. Rules: `needs-human` cleared when the last comment is an unmarked
+  OWNER response; stale `in-progress` (no open PR, quiet > 4h — tune with
+  `RECONCILE_STALE_HOURS`) removed; `in-review` with no open PR removed;
+  `in-progress` with a ready PR flipped to `in-review`.
+
+Tests: `src/__tests__/comms-hooks.test.ts` (black-box, stubbed `gh`) — which
+also asserts the layout rule itself: the protocol doc and every enforcement
+script must stay outside `.claude/`, and the settings file may only point at
+them.
+
+### Relationship to `scripts/coord/`
+
+Two script families, deliberately not merged:
+
+- `scripts/coord/*.sh` (issue #78) — coordinator **lifecycle**: handoff,
+  heartbeat, deadman, and state derived from GitHub on demand.
+- `scripts/comms/*.mjs` (issue #75) — **protocol enforcement**: hook-shaped
+  entry points (JSON on stdin, meaning in the exit code) plus the label
+  reconciler.
+
+They share conventions rather than code, because they are different shapes
+(long-lived bash operator tooling vs. short-lived hook processes) and
+different languages. The shared conventions: only `author_association ==
+OWNER` counts as the operator, and a leading `🤖` marks a machine-authored
+comment — `unanswered_operator_comments` in `scripts/coord/lib.sh` and
+`isAgentMarked` in `scripts/comms/lib.mjs` must agree on that, forever. The
+reconciler deliberately does NOT re-implement handoff, heartbeat, or state
+derivation; the deadman and context guard stay exactly as #80 left them.
+
+## Migration notes (for the running coordinator)
+
+1. Pull main; the hooks activate on the next session start (project
+   `.claude/settings.json`, which now points at `scripts/comms/`).
+2. Start each cycle by reading `AGENTS.md` (or `docs/comms-protocol.md` for
+   the full form) and `.coord-state.json`; create the latter on first run
+   with `pnpm run reconcile:labels`. If you have an old
+   `.claude/coordinator-state.json`, delete it — it is a cache, so nothing is
+   lost.
+3. Delegation prompts can point agents at `AGENTS.md` +
+   `docs/comms-protocol.md` instead of restating the comms rules inline.
+   Neither path assumes a particular agent runtime.
+4. The interactive session should hand the cycle to a coordinator agent and
+   return to the prompt; steer the coordinator on issue #66, not in chat,
+   whenever the operator is remote.
 
 ## Approvals from mobile
 
