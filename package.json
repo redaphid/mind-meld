@@ -38,7 +38,6 @@
     "mark:warmups": "tsx scripts/mark-warmups.ts",
     "quarantine": "tsx scripts/retry-quarantine.ts",
     "strip:scaffolding": "tsx scripts/strip-scaffolding.ts",
-    "reconcile:labels": "node scripts/comms/reconcile-labels.mjs",
     "icons": "node scripts/make-icons.mjs",
     "search": "tsx scripts/search.ts",
     "stats": "tsx scripts/stats.ts",
