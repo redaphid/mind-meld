@@ -52,8 +52,13 @@ const IngestPayloadSchema = z.object({
   sourceDisplayName: z.string().optional(),
   // Classification for the source ('coding' | 'personal' | 'meetings' | ...,
   // open vocabulary). Omitted, a new source defaults to 'personal' — fail
-  // closed — and an existing source keeps its current class.
-  dataClass: z.string().max(32).optional(),
+  // closed — and an existing source keeps its current class. Normalized like
+  // the search side: a source stamped "Coding " would be unreachable.
+  dataClass: z
+    .string()
+    .max(32)
+    .optional()
+    .transform(s => s?.trim().toLowerCase() || undefined),
   // The sending computer. Omitted means "unknown" — we record nothing rather
   // than mislabelling it as the machine running this server.
   machine: z.string().max(64).optional(),
