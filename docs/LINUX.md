@@ -6,22 +6,12 @@ machine** that feeds a remote brain (see [MULTI-MACHINE.md](MULTI-MACHINE.md)).
 
 ## Paths
 
-Set the Cursor path (the default is the macOS location). Claude Code is the same
-on both:
+Claude Code lives at the same path on macOS and Linux:
 
 ```bash
 # .env
 CLAUDE_CODE_PATH=~/.claude                              # same as macOS
-CURSOR_PATH=~/.config/Cursor/User/globalStorage         # read by the CLI / sync
-CURSOR_GLOBALSTATE_PATH=~/.config/Cursor/User/globalStorage  # read by compose's bind mount
 ```
-
-Both names exist and are **not** interchangeable: `src/config.ts` reads
-`CURSOR_PATH`, while `docker-compose.local.yml`'s bind mount reads
-`CURSOR_GLOBALSTATE_PATH`. Set whichever your setup uses — or both.
-
-If you don't use Cursor, point them at any existing empty directory so the Docker
-bind mount / copy step doesn't error.
 
 ## Ollama on Linux
 

@@ -3,7 +3,7 @@
 Mindmeld is designed to run as **one central index** ("the brain") that many
 machines feed into and query. You run the full stack (Postgres + Chroma + MCP +
 sync) on a single always-on **host**, and every other machine (laptops, other
-desktops) connects to it — writing its own Claude Code / Cursor conversations in,
+desktops) connects to it — writing its own Claude Code conversations in,
 and reading the merged index back out.
 
 ```
@@ -121,7 +121,6 @@ EMBEDDING_DIMENSIONS=1024
 SUMMARIZE_MODEL=qwen3:8b            # match the host's summarizer
 
 CLAUDE_CODE_PATH=~/.claude
-CURSOR_PATH=~/.config/Cursor/User/globalStorage   # Linux; omit if unused
 ```
 
 ```bash

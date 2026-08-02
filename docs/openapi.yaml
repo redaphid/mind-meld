@@ -3,7 +3,7 @@ openapi: 3.1.0
 info:
   title: Mindmeld HTTP API
   version: 1.10.0
-  summary: Unified conversation index for Claude Code and Cursor.
+  summary: Unified conversation index for Claude Code.
   description: |
     Mindmeld indexes AI coding conversations into PostgreSQL (metadata +
     full-text search) and Chroma (vector embeddings), and serves them back over
@@ -274,7 +274,7 @@ paths:
           description: Restrict to one source.
           schema:
             type: string
-            examples: ['claude_code', 'cursor']
+            examples: ['claude_code', 'android']
         - name: since
           in: query
           description: |
@@ -1208,7 +1208,7 @@ components:
       properties:
         name:
           type: string
-          examples: ['claude_code', 'cursor', 'huddle']
+          examples: ['claude_code', 'android', 'huddle']
         lastSync:
           description: Timestamp of the last completed sync, or `null` if never synced.
           oneOf:

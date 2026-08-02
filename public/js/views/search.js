@@ -25,7 +25,6 @@ const SINCE = [
 const SOURCES = [
   ['', 'All sources'],
   ['claude_code', 'Claude Code'],
-  ['cursor', 'Cursor'],
   ['huddle', 'Huddle'],
   ['android', 'Android'],
 ]
@@ -131,7 +130,7 @@ export const SearchView = () => {
     ${!submitted &&
     html`<${Empty}>
       Search across ${' '}
-      <strong>every</strong> indexed Claude Code and Cursor conversation.<br />
+      <strong>every</strong> indexed Claude Code conversation.<br />
       <span class="faint"
         >Vector matches meaning, full-text matches exact words, hybrid fuses both.</span
       >

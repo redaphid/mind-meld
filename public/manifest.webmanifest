@@ -1,7 +1,7 @@
 {
   "name": "Mindmeld",
   "short_name": "Mindmeld",
-  "description": "Search and explore every indexed Claude Code and Cursor conversation.",
+  "description": "Search and explore every indexed Claude Code conversation.",
   "start_url": "/#/overview",
   "scope": "/",
   "display": "standalone",

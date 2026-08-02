@@ -1,6 +1,6 @@
 # Mindmeld - Unified Conversation Index
 
-Mindmeld syncs conversations from Claude Code and Cursor into a unified PostgreSQL + Chroma database for full-text and semantic search across all AI conversations.
+Mindmeld syncs conversations from Claude Code into a unified PostgreSQL + Chroma database for full-text and semantic search across all AI conversations.
 
 ## Ports (Non-Standard to Avoid Conflicts)
 
@@ -28,7 +28,6 @@ pnpm run sync
 ```bash
 pnpm run sync              # Full sync (incremental by default)
 pnpm run sync -- --full    # Force full re-sync
-pnpm run sync -- -s cursor # Sync only Cursor
 
 pnpm run sync:embeddings        # Generate pending embeddings
 pnpm run compute:centroids # Compute session/project centroids for weighted search

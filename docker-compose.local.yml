@@ -78,7 +78,6 @@ services:
       SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-3600}
     volumes:
       - ${CLAUDE_CODE_PATH:?CLAUDE_CODE_PATH is required}:/root/.claude:ro
-      - ${CURSOR_GLOBALSTATE_PATH:?CURSOR_GLOBALSTATE_PATH is required}:/root/.config/Cursor/User/globalStorage:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

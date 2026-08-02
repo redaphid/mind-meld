@@ -54,7 +54,7 @@ by centroid.
 | `cwd` | string | — | Working directory. Matching projects get a `+0.5` score boost |
 | `projectOnly` | boolean | `false` | Restrict to the `cwd` project instead of just boosting it |
 | `since` | string | — | Time floor. See [formats](#since-formats) |
-| `source` | string | — | `claude_code`, `cursor`, or any ingested source key |
+| `source` | string | — | `claude_code`, `android`, or any ingested source key |
 | `likeSession` / `unlikeSession` | string[] | — | Weighted session centroids |
 | `likeProject` / `unlikeProject` | string[] | — | Weighted project centroids |
 | `includeAutomated` | boolean | `false` | Include non-interactive sessions (monitoring jobs, health checks, huddles). *stdio server only* |
