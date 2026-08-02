@@ -16,6 +16,7 @@ import {
   formatChunk,
 } from './session.js'
 import { getHealth, formatHealth } from './health.js'
+import { resolveTitle } from './title.js'
 
 const server = new McpServer({
   name: 'mindmeld',
@@ -225,12 +226,13 @@ server.prompt(
 
     const recentResult = await query<{
       id: number
-      title: string
+      title: string | null
+      summary: string | null
       project_name: string
       started_at: Date
       message_count: number
     }>(
-      `SELECT s.id, s.title, p.name as project_name, s.started_at, s.message_count
+      `SELECT s.id, s.title, s.summary, p.name as project_name, s.started_at, s.message_count
        FROM sessions s
        JOIN projects p ON s.project_id = p.id
        WHERE p.id = ANY($1::int[]) AND s.deleted_at IS NULL
@@ -246,7 +248,7 @@ server.prompt(
 
     for (const session of recentResult.rows) {
       assert(session.started_at, `Missing started_at for session ${session.id}`)
-      contextText += `- **${session.title ?? 'Untitled'}** (${session.started_at.toISOString().split('T')[0]}) - ${session.message_count} messages [ID: ${session.id}]\n`
+      contextText += `- **${resolveTitle(session).title ?? `Session ${session.id} (no title — not summarized yet)`}** (${session.started_at.toISOString().split('T')[0]}) - ${session.message_count} messages [ID: ${session.id}]\n`
     }
 
     contextText += `\n---\n\nUse the \`search\` tool with your current task description to find more specific relevant conversations.`

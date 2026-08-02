@@ -7,6 +7,7 @@ import { query } from '../db/postgres.js'
 import { getCollection } from '../db/chroma.js'
 import { config } from '../config.js'
 import { normalizeVector } from '../utils/vector-math.js'
+import { notWarmup } from '../mcp/title.js';
 
 const BGE_DIMENSIONS = 1024 // BGE-M3 model dimensions
 const BATCH_SIZE = 100 // Fetch embeddings in batches to avoid memory limits
@@ -222,7 +223,7 @@ export const computeAllSessionCentroids = async (): Promise<void> => {
      JOIN messages m ON s.id = m.session_id
      JOIN embeddings e ON m.id = e.message_id
      WHERE e.chroma_collection = $1
-       AND s.title != 'Warmup'
+       AND ${notWarmup('s')}
      ORDER BY s.id`,
     [config.chroma.collections.messages]
   )

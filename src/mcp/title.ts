@@ -64,3 +64,18 @@ export const resolveTitle = (row: { title: string | null; summary: string | null
 
   return { title: openingSentence(line), titleSource: 'summary' }
 }
+
+/**
+ * The "not a warmup session" SQL predicate, NULL-safe.
+ *
+ * Warmup sessions are marked by setting their title to the literal 'Warmup'
+ * (scripts/mark-warmups.ts) and are excluded from summarization, centroids and
+ * the health counts. The exclusions were written as `title != 'Warmup'`, which
+ * was fine while every session had a title. Now that an unsummarized Claude
+ * Code session has none, `NULL != 'Warmup'` evaluates to NULL rather than true
+ * and the row is dropped — which would have quietly removed every untitled
+ * session from the summarization batch, i.e. exactly the sessions that need a
+ * summary in order to get a title at all.
+ */
+export const notWarmup = (alias?: string): string =>
+  `${alias ? `${alias}.` : ''}title IS DISTINCT FROM 'Warmup'`

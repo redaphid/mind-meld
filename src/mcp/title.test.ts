@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { resolveTitle } from './title.js'
+import { resolveTitle, notWarmup } from './title.js'
 
 describe('resolveTitle', () => {
   it('uses a stored title when the source supplied a real one', () => {
@@ -64,5 +64,21 @@ describe('resolveTitle', () => {
       title: long,
       titleSource: 'source',
     })
+  })
+})
+
+// Once titles can be NULL (#95), `title != 'Warmup'` stops being a filter and
+// becomes a trap: NULL != 'Warmup' is NULL, not true, so every untitled session
+// silently drops out of the summarization batch, the centroid batch and the
+// health counts — the exact sessions that most need summarizing.
+describe('notWarmup', () => {
+  it('is NULL-safe, so an untitled session is not silently excluded', () => {
+    expect(notWarmup('s')).toBe("s.title IS DISTINCT FROM 'Warmup'")
+    expect(notWarmup()).toBe("title IS DISTINCT FROM 'Warmup'")
+  })
+
+  it('never emits a plain inequality', () => {
+    expect(notWarmup('s')).not.toContain('!=')
+    expect(notWarmup('s')).not.toContain('<>')
   })
 })

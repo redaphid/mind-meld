@@ -10,6 +10,7 @@ import { generateEmbeddings, ensureEmbeddingModel } from "./ollama.js";
 import { summarizeConversation, ensureSummarizeModel, combineSummaries } from "./summarize.js";
 import { persistSessionChunks, SessionMessage } from "./chunks.js";
 import { classifyNoise } from "./classify.js";
+import { notWarmup } from '../mcp/title.js';
 
 export interface BatchEmbeddingStats {
   processed: number;
@@ -400,7 +401,7 @@ export async function updateAggregateEmbeddings(): Promise<{
      JOIN sources src ON p.source_id = src.id
      LEFT JOIN embeddings e ON e.chroma_collection = $1 AND e.chroma_id = 'session-' || s.id::text
      WHERE s.message_count > 0
-       AND s.title != 'Warmup'  -- Exclude noise sessions
+       AND ${notWarmup('s')}  -- Exclude noise sessions (NULL-safe: an untitled session is not a warmup)
        AND s.deleted_at IS NULL  -- Skip soft-deleted noise (filtered out of search anyway)
        AND s.is_automated = false  -- Skip automated sessions (filtered out of search anyway)
        AND (s.ended_at IS NULL OR s.ended_at < NOW() - INTERVAL '30 minutes')  -- Defer still-active sessions: don't re-summarize a live conversation from scratch as it grows
