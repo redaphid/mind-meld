@@ -36,6 +36,38 @@ pnpm run search "query"    # Search conversations
 pnpm run stats             # Show sync statistics
 ```
 
+## Web UI
+
+The browser app lives in `public/` and is served at `/` by the same process as
+the MCP endpoint (port 3847). No build step: Preact and htm are vendored under
+`public/vendor/` and loaded through an import map, so what is committed is what
+runs — edit a file, reload the page.
+
+- Views: status, search (vector / full-text / hybrid), browse, session reader,
+  logs, quarantine.
+- It is a PWA: installable, and the service worker keeps the last state readable
+  when the tunnel drops. Bump `VERSION` in `public/sw.js` when shell files change.
+- Icons are generated, not hand-drawn: `pnpm run icons`.
+
+Reaching it through the Cloudflare tunnel requires that hostname in
+`ALLOWED_HOSTS` (comma-separated, added to the localhost defaults). There is no
+authentication — see the trust-model note in `docs/openapi.yaml`.
+
+## When sync cannot process a record
+
+Nothing is dropped. A record that fails to parse or insert goes to
+`sync_quarantine` whole — raw bytes, base64 so nothing in them can break the
+copy — and the rest of the session still indexes.
+
+```bash
+pnpm run quarantine            # what is waiting, and why
+pnpm run quarantine -- --retry # replay it
+```
+
+Also at `/#/quarantine` in the UI, and `GET /api/quarantine` /
+`POST /api/quarantine/retry`. `quarantined` on `/status` is the number to alert
+on: non-zero means data is waiting, not lost.
+
 ## Search
 
 ### Weighted Centroid Search

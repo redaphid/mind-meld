@@ -1,0 +1,227 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+
+const { query, insertMessage, updateSessionStats, getSessionByExternalId } = vi.hoisted(() => ({
+  query: vi.fn(),
+  insertMessage: vi.fn(),
+  updateSessionStats: vi.fn(),
+  getSessionByExternalId: vi.fn(),
+}))
+
+vi.mock('../db/postgres.js', () => ({
+  query,
+  queries: { insertMessage, updateSessionStats, getSessionByExternalId },
+}))
+vi.mock('../config.js', () => ({ config: { machine: 'test-box' } }))
+
+const { quarantine, encodePayload, decodePayload, replayQuarantine, listQuarantine } = await import(
+  './quarantine.js'
+)
+
+const NUL = String.fromCharCode(0)
+
+beforeEach(() => {
+  query.mockReset().mockResolvedValue({ rows: [{ id: 1 }] })
+  insertMessage.mockReset().mockResolvedValue(1)
+  updateSessionStats.mockReset().mockResolvedValue(undefined)
+  getSessionByExternalId.mockReset().mockResolvedValue(null)
+})
+
+const input = (over = {}) => ({
+  source: 'claude_code',
+  filePath: '/p/session.jsonl',
+  recordKey: 'line:12',
+  stage: 'parse' as const,
+  payload: '{"broken"',
+  error: new Error('Unexpected end of JSON input'),
+  ...over,
+})
+
+describe('payload encoding', () => {
+  // The whole point of base64: the bytes that broke the original insert must not
+  // be able to break the insert that preserves them.
+  it('round-trips content that postgres would reject as text', () => {
+    const poison = `wsl${NUL}--list${NUL}`
+    expect(decodePayload(encodePayload(poison))).toBe(poison)
+    expect(encodePayload(poison)).toMatch(/^[A-Za-z0-9+/=]*$/)
+  })
+
+  it('round-trips multibyte text', () => {
+    const text = '汉字 · émoji 🧠 · "quotes"'
+    expect(decodePayload(encodePayload(text))).toBe(text)
+  })
+})
+
+describe('quarantine', () => {
+  it('stores the payload base64-encoded, never as raw text', async () => {
+    await quarantine(input({ payload: `bad${NUL}line` }))
+    const params = query.mock.calls[0][1] as string[]
+    expect(params).toContain(encodePayload(`bad${NUL}line`))
+    expect(params.some(p => typeof p === 'string' && p.includes(NUL))).toBe(false)
+  })
+
+  it('records the reporting machine and the error message', async () => {
+    await quarantine(input())
+    const params = query.mock.calls[0][1] as unknown[]
+    expect(params).toContain('test-box')
+    expect(params).toContain('Unexpected end of JSON input')
+  })
+
+  // A second sync over the same file must not pile up duplicate rows.
+  it('upserts on the record key and counts the attempt', async () => {
+    await quarantine(input())
+    const sql = query.mock.calls[0][0] as string
+    expect(sql).toContain('ON CONFLICT (source, file_path, record_key) DO UPDATE')
+    expect(sql).toContain('attempts = sync_quarantine.attempts + 1')
+  })
+
+  // The store of last resort must not be able to take sync down with it.
+  it('returns null instead of throwing when even this write fails', async () => {
+    query.mockRejectedValueOnce(new Error('disk full'))
+    await expect(quarantine(input())).resolves.toBeNull()
+  })
+})
+
+describe('replayQuarantine', () => {
+  const row = (over = {}) => ({
+    id: 5,
+    source: 'claude_code',
+    machine: 'test-box',
+    file_path: '/p/session.jsonl',
+    record_key: 'uuid:abc',
+    line_number: 12,
+    session_external_id: 'sess-1',
+    session_id: 77,
+    project_id: 3,
+    stage: 'insert',
+    error: 'boom',
+    attempts: 1,
+    first_seen_at: '2026-01-01T00:00:00Z',
+    last_attempt_at: '2026-01-01T00:00:00Z',
+    resolved_at: null,
+    payload_base64: encodePayload(
+      JSON.stringify({
+        uuid: 'abc',
+        parentUuid: null,
+        role: 'user',
+        contentText: 'hello',
+        timestamp: '2026-01-01T00:00:00Z',
+        sequenceNum: 4,
+        isSidechain: false,
+      })
+    ),
+    ...over,
+  })
+
+  it('re-inserts the stored record and marks it resolved', async () => {
+    query.mockResolvedValueOnce({ rows: [row()] }).mockResolvedValue({ rows: [] })
+
+    const result = await replayQuarantine({ limit: 10 })
+
+    expect(result).toMatchObject({ attempted: 1, recovered: 1 })
+    expect(insertMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 77, externalId: 'abc', contentText: 'hello' })
+    )
+    // The timestamp must go back in as a Date, not the string it was stored as.
+    expect(insertMessage.mock.calls[0][0].timestamp).toBeInstanceOf(Date)
+    expect(query.mock.calls.some(c => String(c[0]).includes('SET resolved_at = NOW()'))).toBe(true)
+  })
+
+  it('re-parses a parse-stage record through the same parser sync uses', async () => {
+    const line = JSON.stringify({
+      type: 'user',
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId: 'sess-1',
+      timestamp: '2026-01-01T00:00:00Z',
+      message: { role: 'user', content: 'recovered text' },
+    })
+    query
+      .mockResolvedValueOnce({ rows: [row({ stage: 'parse', payload_base64: encodePayload(line) })] })
+      .mockResolvedValue({ rows: [] })
+
+    const result = await replayQuarantine({ limit: 10 })
+
+    expect(result.recovered).toBe(1)
+    expect(insertMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ externalId: 'u1', contentText: 'recovered text' })
+    )
+  })
+
+  it('keeps the row and bumps the attempt when the replay fails again', async () => {
+    query.mockResolvedValueOnce({ rows: [row()] }).mockResolvedValue({ rows: [] })
+    insertMessage.mockRejectedValueOnce(new Error('still broken'))
+
+    const result = await replayQuarantine({ limit: 10 })
+
+    expect(result).toMatchObject({ attempted: 1, recovered: 0 })
+    expect(result.outcomes[0].error).toContain('still broken')
+    expect(query.mock.calls.some(c => String(c[0]).includes('attempts = attempts + 1'))).toBe(true)
+  })
+
+  it('resolves the session from the project when none was recorded', async () => {
+    query.mockResolvedValueOnce({ rows: [row({ session_id: null })] }).mockResolvedValue({ rows: [] })
+    getSessionByExternalId.mockResolvedValue({ id: 91 })
+
+    await replayQuarantine({ limit: 10 })
+
+    expect(getSessionByExternalId).toHaveBeenCalledWith(3, 'sess-1')
+    expect(insertMessage).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 91 }))
+  })
+
+  it('reports rather than throws when the session still does not exist', async () => {
+    query.mockResolvedValueOnce({ rows: [row({ session_id: null })] }).mockResolvedValue({ rows: [] })
+
+    const result = await replayQuarantine({ limit: 10 })
+
+    expect(result.recovered).toBe(0)
+    expect(result.outcomes[0].error).toContain('re-sync the file first')
+    expect(insertMessage).not.toHaveBeenCalled()
+    // The row must show what is blocking it now, not the error it arrived with.
+    expect(query.mock.calls.some(c => String(c[0]).includes('attempts = attempts + 1'))).toBe(true)
+  })
+})
+
+describe('listQuarantine', () => {
+  it('hides resolved records unless asked for them', async () => {
+    query.mockResolvedValue({ rows: [] })
+    await listQuarantine({ limit: 10, offset: 0 })
+    expect(query.mock.calls[0][0]).toContain('WHERE resolved_at IS NULL')
+
+    query.mockClear()
+    await listQuarantine({ limit: 10, offset: 0, includeResolved: true })
+    expect(query.mock.calls[0][0]).not.toContain('WHERE resolved_at IS NULL')
+  })
+
+  it('omits payloads from a listing by default and decodes them when asked', async () => {
+    query.mockResolvedValue({ rows: [] })
+    await listQuarantine({ limit: 10, offset: 0 })
+    expect(query.mock.calls[0][0]).not.toContain('payload_base64')
+
+    query.mockClear().mockResolvedValue({
+      rows: [
+        {
+          id: 1,
+          source: 'claude_code',
+          machine: null,
+          file_path: '/p',
+          record_key: 'line:1',
+          line_number: 1,
+          session_external_id: null,
+          session_id: null,
+          project_id: null,
+          stage: 'parse',
+          error: 'e',
+          attempts: 1,
+          first_seen_at: 'x',
+          last_attempt_at: 'x',
+          resolved_at: null,
+          payload_base64: encodePayload('raw line'),
+          total: '1',
+        },
+      ],
+    })
+    const result = await listQuarantine({ limit: 10, offset: 0, withPayload: true })
+    expect(result.items[0].payload).toBe('raw line')
+    expect(result.total).toBe(1)
+  })
+})

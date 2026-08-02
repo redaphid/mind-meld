@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Mindmeld HTTP API
-  version: 1.7.1
+  version: 1.10.0
   summary: Unified conversation index for Claude Code and Cursor.
   description: |
     Mindmeld indexes AI coding conversations into PostgreSQL (metadata +
@@ -13,17 +13,33 @@ info:
       Streamable HTTP endpoint. This is what Claude Code talks to, and where
       search/retrieval lives. Its JSON-RPC methods are *not* modelled as REST
       paths here; see the `tools` list in `docs/USAGE.md` for the tool contracts.
-    * **REST** — `/health`, `/status`, `/openapi.yaml`, and `/api/ingest`, for
-      monitoring and for pushing conversations from sources Mindmeld does not
-      sync itself (e.g. Slack huddle transcripts).
+    * **REST** — everything else, in one dialect: camelCase keys, a
+      `{ status, <resource> }` envelope, and `{ status: 'error', error }` on
+      failure. It covers monitoring (`/health`, `/status`, `/api/logs`,
+      `/api/machines`, `/api/activity`), reading the index (`/api/search`,
+      `/api/projects`, `/api/sessions`, `/api/messages`), and ingest
+      (`/api/ingest`) for sources Mindmeld does not sync itself.
+    * **UI** — `/`, the browser app in `public/`, which is built on the REST
+      endpoints below and nothing else.
+
+    ### No truncation
+
+    Strings are never silently cut. Large results page (`limit`/`offset`, or a
+    message-id range); the single exception is one message larger than a whole
+    page budget, which comes back explicitly flagged `truncated: true` with a
+    pointer to `/api/messages/{id}` for the full text.
 
     ### Trust model
 
     There is **no authentication**. The server binds to a Host header allowlist
-    (`localhost`, `127.0.0.1`, `mcp`) and is meant to be reached over loopback,
-    an SSH tunnel, or an authenticated Cloudflare Tunnel — never exposed
-    directly to a network you do not control. `/api/ingest` writes to the index
-    unauthenticated, so anything that can reach the port can write to your brain.
+    (`localhost`, `127.0.0.1`, `[::1]`, `mcp`, plus anything in the
+    `ALLOWED_HOSTS` env var) and is meant to be reached over loopback, an SSH
+    tunnel, or an authenticated Cloudflare Tunnel — never exposed directly to a
+    network you do not control. Reaching it through a tunnel means adding that
+    hostname to `ALLOWED_HOSTS`, which makes the UI and every read endpoint
+    reachable by anyone who can resolve it: put an access policy in front.
+    `/api/ingest` writes to the index unauthenticated, so anything that can
+    reach the port can write to your brain.
 
   license:
     name: See repository
@@ -42,6 +58,10 @@ tags:
     description: Liveness and pipeline-progress endpoints.
   - name: Ingest
     description: Push conversations from sources Mindmeld does not sync itself.
+  - name: Read
+    description: Search and read the index — the endpoints the browser UI runs on.
+  - name: UI
+    description: The browser app served from `public/`.
 
 paths:
   /health:
@@ -71,6 +91,8 @@ paths:
       operationId: getStatus
       summary: Sync, embedding, and collection status
       description: |
+        Also served at `/api/status`.
+
         Aggregates per-source sync state, index totals, the embedding backlog,
         Chroma collection sizes, and the most recent non-warmup session. Queries
         Postgres on every call; Chroma is best-effort, so `chroma.collections`
@@ -182,6 +204,770 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/IngestError'
+
+  /:
+    get:
+      tags: [UI]
+      operationId: getApp
+      summary: The browser UI
+      description: |
+        Serves the single-page app in `public/` — an installable PWA (Preact via
+        an import map, no build step) that reads the same REST endpoints
+        documented here. Routing is hash-based (`/#/search?q=…`), so every view
+        is one static document and no server rewrite is involved.
+
+        `index.html` and `sw.js` are sent with `Cache-Control: no-cache` so a
+        deploy can never leave a stale shell talking to a newer API.
+      responses:
+        '200':
+          description: The app shell.
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /api/search:
+    get:
+      tags: [Read]
+      operationId: search
+      summary: Search conversations
+      description: |
+        The REST form of the `search` MCP tool, returning structured hits instead
+        of rendered text. Three modes:
+
+        * `semantic` — vector similarity in Chroma, run across three tiers
+          (whole sessions, chunk summaries, individual messages).
+        * `text` — Postgres full-text search over message bodies.
+        * `hybrid` (default) — both, fused with reciprocal rank fusion.
+
+        Each hit names the tier that matched (`matchedTier`) and, where the match
+        was narrower than the whole session, a `cursor` pointing at the chunk or
+        message — hand that straight to `/api/sessions/{id}/messages` to read the
+        matched region.
+
+        Snippets mark matched terms with `**` (markdown bold), the same rendering
+        the MCP tool produces.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: Query text. Blank or missing is a `400` — there is nothing to rank against.
+          schema:
+            type: string
+          example: how did I set up the cloudflare tunnel
+        - name: mode
+          in: query
+          schema:
+            type: string
+            enum: [hybrid, semantic, text]
+            default: hybrid
+        - name: limit
+          in: query
+          description: Hits to return. Capped at 100.
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+        - name: source
+          in: query
+          description: Restrict to one source.
+          schema:
+            type: string
+            examples: ['claude_code', 'cursor']
+        - name: since
+          in: query
+          description: |
+            Natural-language or absolute cutoff, parsed with chrono
+            (`7 days ago`, `last tuesday`, `2026-01-01`).
+          schema:
+            type: string
+        - name: not
+          in: query
+          description: |
+            Negative query. Its embedding is subtracted from the query vector,
+            steering results away from a neighbouring topic.
+          schema:
+            type: string
+        - name: cwd
+          in: query
+          description: |
+            A working directory. Sessions from projects at or under this path are
+            boosted, and their project ids come back in `projectIds`.
+          schema:
+            type: string
+        - name: projectOnly
+          in: query
+          description: Restrict results to the projects matching `cwd`, rather than merely boosting them.
+          schema:
+            type: boolean
+            default: false
+        - name: includeAutomated
+          in: query
+          description: |
+            Include sessions classified as automated (warmups, monitoring runs).
+            Excluded by default because they crowd out real conversations.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Ranked hits, best first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, query, mode, count, projectIds, results]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  query:
+                    type: string
+                  mode:
+                    type: string
+                    enum: [hybrid, semantic, text]
+                  count:
+                    type: integer
+                  projectIds:
+                    type: array
+                    description: Project ids matching `cwd`, empty when `cwd` was not given.
+                    items:
+                      type: integer
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SearchHit'
+        '400':
+          description: Missing `q`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+        '500':
+          description: Search failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /api/projects:
+    get:
+      tags: [Read]
+      operationId: listProjects
+      summary: Every indexed project
+      description: |
+        The full inventory, ordered by most recent session. Counts include
+        automated sessions — this is what was indexed, not what search would
+        surface. Unpaged: one row per project, and projects are counted in the
+        hundreds, not the millions.
+      responses:
+        '200':
+          description: All projects.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, count, projects]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  count:
+                    type: integer
+                  projects:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Project'
+        '500':
+          description: Query failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /api/sessions:
+    get:
+      tags: [Read]
+      operationId: listSessions
+      summary: Browse sessions
+      description: |
+        Sessions newest first, filterable and paged. `total` is the count before
+        paging, so a client can size its pager without a second call.
+
+        Summaries come back whole; when a page is too large, ask for a smaller
+        `limit` or a later `offset` rather than expecting a cut response.
+      parameters:
+        - name: limit
+          in: query
+          description: Capped at 200.
+          schema:
+            type: integer
+            default: 30
+            minimum: 1
+            maximum: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+        - name: projectId
+          in: query
+          schema:
+            type: integer
+        - name: source
+          in: query
+          schema:
+            type: string
+        - name: machine
+          in: query
+          description: The computer that indexed the session's project.
+          schema:
+            type: string
+        - name: q
+          in: query
+          description: Case-insensitive substring match on session title or project name.
+          schema:
+            type: string
+        - name: includeAutomated
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: One page of sessions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, total, count, sessions]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  total:
+                    type: integer
+                    description: Matching sessions before paging.
+                  count:
+                    type: integer
+                    description: Sessions in this page.
+                  sessions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SessionListItem'
+        '500':
+          description: Query failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /api/sessions/{id}:
+    get:
+      tags: [Read]
+      operationId: getSessionDigest
+      summary: Session digest — summary plus chunk manifest
+      description: |
+        The middle rung between a search hit and raw messages: the session's
+        summary, and a manifest of its chunks. A chunk is a summary of a *span*
+        of messages (dozens of them), carrying the message-id range that span
+        covers — feed that range to `/api/sessions/{id}/messages` to read it.
+
+        No raw messages are returned here, however large the session.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: chunkOffset
+          in: query
+          description: First chunk to return.
+          schema:
+            type: integer
+            default: 0
+        - name: chunkLimit
+          in: query
+          description: Chunks per page. Capped at 200.
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+      responses:
+        '200':
+          description: The digest.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, digest]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  digest:
+                    $ref: '#/components/schemas/Digest'
+        '404':
+          description: No such session, or it has been soft-deleted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /api/sessions/{id}/messages:
+    get:
+      tags: [Read]
+      operationId: getSessionMessages
+      summary: Read raw messages
+      description: |
+        Two ways to read: a window (`offset` + `limit`), or a message-id range
+        (`startMessageId` + `endMessageId`, straight off a digest's chunk
+        manifest). A range read ignores `offset`.
+
+        Every page is bounded by a character budget, and messages are kept whole
+        inside it — the page ends early rather than splitting one. When a single
+        message is larger than the entire budget it comes back with
+        `truncated: true`, `text` holding the leading slice and `chars` the true
+        length; `GET /api/messages/{id}` returns it whole. That is the only place
+        in this API where a string is ever cut, and it is always labelled.
+
+        `nextOffset` / `nextStartMessageId` carry the cursor for the next page;
+        both `null` means the read is complete.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          description: Ignored when `startMessageId` is given.
+          schema:
+            type: integer
+            default: 0
+        - name: limit
+          in: query
+          description: Messages to fetch before the budget applies. Capped at 100.
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: startMessageId
+          in: query
+          description: Start of a message-id range. Must be paired with `endMessageId`.
+          schema:
+            type: integer
+        - name: endMessageId
+          in: query
+          schema:
+            type: integer
+        - name: maxChars
+          in: query
+          description: Character budget for the page. Capped at 200000.
+          schema:
+            type: integer
+            default: 60000
+            maximum: 200000
+      responses:
+        '200':
+          description: One page of messages.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessagesPage'
+        '404':
+          description: No messages for that session or range.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /api/messages/{id}:
+    get:
+      tags: [Read]
+      operationId: getMessage
+      summary: One message, whole
+      description: |
+        Uncapped. The escape hatch for a message that a page returned with
+        `truncated: true` — reaching a 271K-character message takes this
+        deliberate call and can never happen by accident through a page read.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: The message.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, message]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  message:
+                    $ref: '#/components/schemas/Message'
+        '404':
+          description: No such message.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /api/machines:
+    get:
+      tags: [Monitoring]
+      operationId: getMachines
+      summary: What each computer has indexed
+      description: |
+        Several machines sync into one database. Every project records the
+        machine that indexed it, so this answers "what has each computer
+        contributed, and when did it last do so".
+
+        `machines` is ordered by most recent indexing. `logWriters` is every
+        process that has ever shipped logs — a machine that has gone quiet shows
+        up here with a stale `lastLoggedAt` instead of silently disappearing.
+      responses:
+        '200':
+          description: Per-machine activity.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, thisMachine, lastIndexedMachine, machines, logWriters]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  thisMachine:
+                    type: string
+                    description: '`MACHINE_NAME` of the process serving this request.'
+                  lastIndexedMachine:
+                    description: Machine whose sync landed most recently; `null` if nothing is indexed.
+                    oneOf:
+                      - type: 'null'
+                      - type: string
+                  machines:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MachineActivity'
+                  logWriters:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LogWriter'
+
+  /api/activity:
+    get:
+      tags: [Monitoring]
+      operationId: getActivity
+      summary: Sessions and messages per day
+      description: |
+        One entry per day, oldest first, with empty days included — a gap in
+        indexing reads as a gap rather than as a missing point.
+      parameters:
+        - name: days
+          in: query
+          description: Days back from today, inclusive.
+          schema:
+            type: integer
+            default: 30
+            minimum: 1
+            maximum: 365
+      responses:
+        '200':
+          description: Daily counts.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, days, activity]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  days:
+                    type: integer
+                  activity:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ActivityDay'
+
+  /api/logs:
+    get:
+      tags: [Monitoring]
+      operationId: getLogs
+      summary: Logs from every mindmeld process
+      description: |
+        Every process — sync, mcp, centroids — writes its console output to a
+        shared table, so this shows the whole deployment and not just the server
+        answering the call. Newest first.
+
+        Also served at `/logs`, which is shorter to type on a phone.
+
+        Messages are returned whole; page with `offset` rather than expecting a
+        cut line.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            minimum: 1
+            maximum: 500
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+        - name: level
+          in: query
+          schema:
+            type: string
+            enum: [log, warn, error]
+        - name: machine
+          in: query
+          schema:
+            type: string
+        - name: service
+          in: query
+          schema:
+            type: string
+            examples: ['sync', 'mcp']
+        - name: contains
+          in: query
+          description: Case-insensitive substring match on the message.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: One page of log entries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogsPage'
+        '400':
+          description: Bad paging or an unknown level.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /api/logs/{machine}:
+    get:
+      tags: [Monitoring]
+      operationId: getMachineLogs
+      summary: One machine's logs and indexing
+      description: |
+        The same feed narrowed to one computer, plus what that computer has
+        indexed and the sessions it most recently synced. Also served at
+        `/logs/{machine}`.
+
+        A machine counts as known if it has indexed projects *or* shipped logs;
+        only when neither is true is it a `404`.
+      parameters:
+        - name: machine
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 500
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: level
+          in: query
+          schema:
+            type: string
+            enum: [log, warn, error]
+        - name: service
+          in: query
+          schema:
+            type: string
+        - name: contains
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Logs, activity, and recent sessions for that machine.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/LogsPage'
+                  - type: object
+                    properties:
+                      machine:
+                        type: string
+                      isThisMachine:
+                        type: boolean
+                      activity:
+                        oneOf:
+                          - type: 'null'
+                          - $ref: '#/components/schemas/MachineActivity'
+                      sessions:
+                        type: array
+                        description: That machine's most recently synced sessions.
+                        items:
+                          $ref: '#/components/schemas/MachineSession'
+        '404':
+          description: Nothing recorded for that machine.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    const: error
+                  error:
+                    type: string
+                  knownMachines:
+                    type: array
+                    items:
+                      type: string
+
+  /api/quarantine:
+    get:
+      tags: [Monitoring]
+      operationId: listQuarantine
+      summary: Records sync could not process
+      description: |
+        Sync's dead-letter store. Anything that could not be parsed or inserted
+        is kept here whole — the raw bytes, base64 at rest so that nothing in a
+        record can break the write that preserves it — with the file, line,
+        session and error that produced it.
+
+        A non-zero `pending` means data is *waiting*, not that data was lost. It
+        is the number to alert on.
+
+        Payloads are omitted from a listing unless `withPayload` is set; that is
+        paging, not truncation, and a payload is always returned whole.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: includeResolved
+          in: query
+          description: Include records a replay has already recovered. Resolved rows are kept, not deleted.
+          schema:
+            type: boolean
+            default: false
+        - name: withPayload
+          in: query
+          description: Decode and include each record's stored payload.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Quarantined records, most recently attempted first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, total, count, pending, records]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  total:
+                    type: integer
+                    description: Records matching the filter, before paging.
+                  count:
+                    type: integer
+                  pending:
+                    type: integer
+                    description: Unresolved records, regardless of this page's filter.
+                  records:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/QuarantinedRecord'
+
+  /api/quarantine/retry:
+    post:
+      tags: [Monitoring]
+      operationId: retryQuarantine
+      summary: Replay quarantined records
+      description: |
+        Puts records back through exactly the path they failed on — a `parse`
+        payload is re-parsed by the same parser sync uses, an `insert` payload is
+        the parsed record itself — so a replay can never write something a normal
+        sync would not have.
+
+        Safe to call repeatedly. A record that succeeds is marked resolved; one
+        that fails again keeps its row with the new error and a bumped attempt
+        count. Pass `id` to retry one record, or omit it to work through the
+        pending backlog.
+
+        A record whose session does not exist yet is reported, not lost — re-run
+        the sync for that file and retry.
+      parameters:
+        - name: id
+          in: query
+          description: Retry a single record. May also be given in the body.
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          description: Maximum records to attempt when replaying the backlog.
+          schema:
+            type: integer
+            default: 100
+            maximum: 500
+      responses:
+        '200':
+          description: What the replay did.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, attempted, recovered, outcomes, pending]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  attempted:
+                    type: integer
+                  recovered:
+                    type: integer
+                  pending:
+                    type: integer
+                    description: Records still unresolved after this run.
+                  outcomes:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, ok]
+                      properties:
+                        id:
+                          type: integer
+                        ok:
+                          type: boolean
+                        error:
+                          type: string
 
   /mcp:
     post:
@@ -351,7 +1137,7 @@ components:
 
     Status:
       type: object
-      required: [status, version, sync, totals, pendingEmbeddings, chroma, latestSession]
+      required: [status, version, sync, totals, pendingEmbeddings, quarantined, chroma, latestSession]
       properties:
         status:
           type: string
@@ -387,6 +1173,11 @@ components:
               description: |
                 Sessions with no `convo-sessions` embedding, or whose content has
                 grown since the embedding was made.
+        quarantined:
+          type: integer
+          description: |
+            Records sync could not process, kept for replay in
+            `/api/quarantine`. Non-zero means data is waiting, not lost.
         chroma:
           type: object
           required: [collections]
@@ -646,3 +1437,491 @@ components:
               type: string
         id:
           type: 'null'
+
+    SearchHit:
+      type: object
+      required: [sessionId, title, project, projectPath, source, date, score, matchedTier, snippet, cursor]
+      properties:
+        sessionId:
+          type: integer
+        title:
+          type: string
+          description: |
+            Session title, which for Claude Code is the opening user message —
+            often a paragraph. Returned whole.
+        project:
+          type: string
+        projectPath:
+          oneOf:
+            - type: 'null'
+            - type: string
+        source:
+          type: string
+        date:
+          oneOf:
+            - type: 'null'
+            - type: string
+              format: date-time
+        score:
+          type: number
+          description: |
+            Fused rank score, plus a boost when the session belongs to a project
+            matching `cwd`. Comparable within one response, not across responses.
+        matchedTier:
+          type: string
+          enum: [session, chunk, message]
+          description: Which index tier produced the hit.
+        snippet:
+          description: |
+            One line of the matched region, with matched terms wrapped in `**`.
+            Null when the region has no usable text.
+          oneOf:
+            - type: 'null'
+            - type: string
+        cursor:
+          description: Where in the session the match landed; null for a whole-session hit.
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [chunkIndex]
+              properties:
+                chunkIndex:
+                  type: integer
+            - type: object
+              required: [messageId]
+              properties:
+                messageId:
+                  type: integer
+
+    Project:
+      type: object
+      required: [id, name, path, source, machine, sessions, messages, lastActivityAt]
+      properties:
+        id:
+          type: integer
+        name:
+          oneOf:
+            - type: 'null'
+            - type: string
+        path:
+          oneOf:
+            - type: 'null'
+            - type: string
+        source:
+          type: string
+        machine:
+          type: string
+          description: Computer that indexed it; `unknown` for projects that predate machine stamping.
+        sessions:
+          type: integer
+        messages:
+          type: integer
+        lastActivityAt:
+          oneOf:
+            - type: 'null'
+            - type: string
+              format: date-time
+
+    SessionListItem:
+      type: object
+      required:
+        [id, title, summary, project, projectId, source, machine, messageCount, chunkCount, isAutomated, startedAt, lastSyncedAt]
+      properties:
+        id:
+          type: integer
+        title:
+          oneOf:
+            - type: 'null'
+            - type: string
+        summary:
+          description: Full generated summary, or null if it has not been summarised yet.
+          oneOf:
+            - type: 'null'
+            - type: string
+        project:
+          oneOf:
+            - type: 'null'
+            - type: string
+        projectId:
+          type: integer
+        source:
+          type: string
+        machine:
+          type: string
+        messageCount:
+          type: integer
+        chunkCount:
+          type: integer
+          description: Chunks in the manifest; 0 means the session has not been chunked yet.
+        isAutomated:
+          type: boolean
+        startedAt:
+          oneOf:
+            - type: 'null'
+            - type: string
+              format: date-time
+        lastSyncedAt:
+          oneOf:
+            - type: 'null'
+            - type: string
+              format: date-time
+
+    Chunk:
+      type: object
+      required: [index, summary, startMessageId, endMessageId, chars]
+      properties:
+        index:
+          type: integer
+        summary:
+          type: string
+          description: Summary of the whole span, not of one message.
+        startMessageId:
+          type: integer
+        endMessageId:
+          type: integer
+        chars:
+          type: integer
+          description: Characters of raw message text the span covers.
+
+    Digest:
+      type: object
+      required:
+        [sessionId, projectId, project, title, summary, excerpt, messageCount, date, tokens, chunks, chunkOffset, totalChunks]
+      properties:
+        sessionId:
+          type: integer
+        projectId:
+          type: integer
+        project:
+          type: string
+        title:
+          oneOf:
+            - type: 'null'
+            - type: string
+        summary:
+          oneOf:
+            - type: 'null'
+            - type: string
+        excerpt:
+          description: |
+            Present only when `summary` is null — a labelled fallback so a digest
+            is never blank. Yields to the real summary once one exists.
+          oneOf:
+            - type: 'null'
+            - type: string
+        messageCount:
+          type: integer
+        date:
+          oneOf:
+            - type: 'null'
+            - type: string
+              format: date-time
+        tokens:
+          type: integer
+          description: Input plus output tokens recorded for the session.
+        chunks:
+          type: array
+          description: The page of the manifest starting at `chunkOffset`.
+          items:
+            $ref: '#/components/schemas/Chunk'
+        chunkOffset:
+          type: integer
+        totalChunks:
+          type: integer
+
+    Message:
+      type: object
+      required: [id, role, text, chars, truncated, toolName, model, timestamp, sequenceNum]
+      properties:
+        id:
+          type: integer
+        role:
+          type: string
+          examples: ['user', 'assistant', 'tool']
+        text:
+          type: string
+          description: |
+            The message body — the whole thing, unless `truncated` is true, in
+            which case this is its leading slice.
+        chars:
+          type: integer
+          description: True length of the message, whether or not `text` holds all of it.
+        truncated:
+          type: boolean
+          description: |
+            True only when this single message exceeded the whole page budget.
+            Fetch it whole from `/api/messages/{id}`.
+        toolName:
+          oneOf:
+            - type: 'null'
+            - type: string
+        model:
+          oneOf:
+            - type: 'null'
+            - type: string
+        timestamp:
+          oneOf:
+            - type: 'null'
+            - type: string
+              format: date-time
+        sequenceNum:
+          oneOf:
+            - type: 'null'
+            - type: integer
+
+    MessagesPage:
+      type: object
+      required:
+        [status, sessionId, messages, fetched, shown, charBudget, budgetExhausted, nextOffset, nextStartMessageId]
+      properties:
+        status:
+          type: string
+          const: ok
+        sessionId:
+          type: integer
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        fetched:
+          type: integer
+          description: Rows read from Postgres before the budget was applied.
+        shown:
+          type: integer
+          description: Messages actually returned.
+        charBudget:
+          type: integer
+        budgetExhausted:
+          type: boolean
+          description: True when the budget, not the end of the range, ended this page.
+        nextOffset:
+          description: Cursor for the next window read, or null when finished.
+          oneOf:
+            - type: 'null'
+            - type: integer
+        nextStartMessageId:
+          description: Cursor for continuing a range read, or null when finished.
+          oneOf:
+            - type: 'null'
+            - type: integer
+
+    MachineActivity:
+      type: object
+      required: [machine, projects, sessions, messages, lastIndexedAt, lastSession]
+      properties:
+        machine:
+          type: string
+        projects:
+          type: integer
+        sessions:
+          type: integer
+        messages:
+          type: integer
+        lastIndexedAt:
+          oneOf:
+            - type: 'null'
+            - type: string
+              format: date-time
+        lastSession:
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [id, title, project, syncedAt]
+              properties:
+                id:
+                  type: integer
+                title:
+                  oneOf:
+                    - type: 'null'
+                    - type: string
+                project:
+                  oneOf:
+                    - type: 'null'
+                    - type: string
+                syncedAt:
+                  oneOf:
+                    - type: 'null'
+                    - type: string
+                      format: date-time
+
+    MachineSession:
+      type: object
+      required: [id, title, project, messageCount, startedAt, syncedAt]
+      properties:
+        id:
+          type: integer
+        title:
+          oneOf:
+            - type: 'null'
+            - type: string
+        project:
+          oneOf:
+            - type: 'null'
+            - type: string
+        messageCount:
+          type: integer
+        startedAt:
+          oneOf:
+            - type: 'null'
+            - type: string
+              format: date-time
+        syncedAt:
+          oneOf:
+            - type: 'null'
+            - type: string
+              format: date-time
+
+    LogEntry:
+      type: object
+      required: [id, machine, service, level, message, loggedAt]
+      properties:
+        id:
+          type: string
+        machine:
+          type: string
+        service:
+          type: string
+        level:
+          type: string
+          enum: [log, warn, error]
+        message:
+          type: string
+          description: The whole line, never cut.
+        loggedAt:
+          type: string
+          format: date-time
+
+    LogWriter:
+      type: object
+      required: [machine, service, entries, lastLoggedAt]
+      properties:
+        machine:
+          type: string
+        service:
+          type: string
+        entries:
+          type: integer
+        lastLoggedAt:
+          oneOf:
+            - type: 'null'
+            - type: string
+              format: date-time
+
+    LogsPage:
+      type: object
+      required: [status, name, version, entries, returned, total, limit, offset]
+      properties:
+        status:
+          type: string
+          const: ok
+        name:
+          type: string
+          const: mindmeld
+        version:
+          type: string
+        thisMachine:
+          type: string
+        lastIndexedMachine:
+          oneOf:
+            - type: 'null'
+            - type: string
+        machines:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineActivity'
+        logWriters:
+          type: array
+          items:
+            $ref: '#/components/schemas/LogWriter'
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/LogEntry'
+        returned:
+          type: integer
+        total:
+          type: integer
+          description: Entries matching the filter, before paging.
+        limit:
+          type: integer
+        offset:
+          type: integer
+        sink:
+          type: object
+          description: State of this process's own log writer.
+
+    ActivityDay:
+      type: object
+      required: [day, sessions, messages]
+      properties:
+        day:
+          type: string
+          format: date
+        sessions:
+          type: integer
+        messages:
+          type: integer
+
+    QuarantinedRecord:
+      type: object
+      required:
+        [id, source, machine, filePath, recordKey, lineNumber, sessionExternalId, sessionId, projectId, stage, error, attempts, firstSeenAt, lastAttemptAt, resolvedAt]
+      properties:
+        id:
+          type: integer
+        source:
+          type: string
+        machine:
+          description: The computer whose sync produced the failure.
+          oneOf:
+            - type: 'null'
+            - type: string
+        filePath:
+          type: string
+        recordKey:
+          type: string
+          description: |
+            Identifies the record within its file — `line:<n>` for a parse
+            failure, `uuid:<id>` for an insert failure. Re-running sync updates
+            the same row rather than piling up duplicates.
+        lineNumber:
+          oneOf:
+            - type: 'null'
+            - type: integer
+        sessionExternalId:
+          oneOf:
+            - type: 'null'
+            - type: string
+        sessionId:
+          description: Null when the record failed before its session existed; replay resolves it then.
+          oneOf:
+            - type: 'null'
+            - type: integer
+        projectId:
+          oneOf:
+            - type: 'null'
+            - type: integer
+        stage:
+          type: string
+          enum: [parse, insert]
+          description: '`parse` — the raw source line. `insert` — the parsed record.'
+        payload:
+          type: string
+          description: The stored record, decoded. Present only when `withPayload` was set.
+        error:
+          type: string
+        attempts:
+          type: integer
+        firstSeenAt:
+          type: string
+          format: date-time
+        lastAttemptAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          description: Set when a replay succeeded. Resolved rows are kept for the record of what fixed it.
+          oneOf:
+            - type: 'null'
+            - type: string
+              format: date-time
+

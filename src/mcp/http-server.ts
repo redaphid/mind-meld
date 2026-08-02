@@ -2,6 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
+import { listProjects, listSessions, getActivity } from './browse.js'
+import { toSearchHit, toDigest, toMessages, toMessage } from './rest.js'
+import { listQuarantine, replayQuarantine, countPending } from '../sync/quarantine.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { hostHeaderValidation } from '@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js'
@@ -216,9 +219,39 @@ const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 300
 captureConsole(startDbLogSink('mcp'))
 installFlushOnExit()
 
+// DNS-rebinding protection. The defaults cover local and in-compose access; a
+// deployment reached through a Cloudflare tunnel arrives with the tunnel's
+// hostname in the Host header, so that name has to be listed explicitly —
+// ALLOWED_HOSTS is a comma-separated addition, never a replacement.
+const ALLOWED_HOSTS = [
+  'localhost',
+  '127.0.0.1',
+  '[::1]',
+  'mcp',
+  ...(process.env.ALLOWED_HOSTS ?? '')
+    .split(',')
+    .map(h => h.trim())
+    .filter(Boolean),
+]
+
 const app = express()
-app.use(hostHeaderValidation(['localhost', '127.0.0.1', 'mcp']))
+app.use(hostHeaderValidation(ALLOWED_HOSTS))
 app.use(express.json({ limit: '10mb' }))
+
+// The browser UI. Served at the root so a phone only has to open the host.
+// The app shell and the service worker are revalidated every load — a stale
+// shell would pin the UI to an old API contract; hashed-free static assets are
+// small enough that no-cache costs little.
+const PUBLIC_DIR = fileURLToPath(new URL('../../public', import.meta.url))
+
+app.use(
+  express.static(PUBLIC_DIR, {
+    setHeaders: (res, path) => {
+      if (path.endsWith('.html') || path.endsWith('sw.js'))
+        res.setHeader('Cache-Control', 'no-cache')
+    },
+  })
+)
 
 const transports: Record<string, StreamableHTTPServerTransport> = {}
 
@@ -315,7 +348,7 @@ app.get('/openapi.yaml', async (req: any, res: any) => {
   }
 })
 
-app.get('/status', async (req: any, res: any) => {
+app.get(['/api/status', '/status'], async (req: any, res: any) => {
   try {
     const syncStatus = await getSyncStatus()
 
@@ -349,6 +382,8 @@ app.get('/status', async (req: any, res: any) => {
         AND s.message_count > 0
         AND (e.id IS NULL OR s.content_chars > COALESCE(e.content_chars_at_embed, 0))
     `)
+
+    const quarantined = await countPending()
 
     const latestSession = await query<{
       started_at: string
@@ -394,6 +429,7 @@ app.get('/status', async (req: any, res: any) => {
         messages: parseInt(pendingMessages.rows[0]?.count ?? '0', 10),
         sessions: parseInt(pendingSessions.rows[0]?.count ?? '0', 10),
       },
+      quarantined,
       chroma: { collections: chromaCollections },
       latestSession: latest
         ? { startedAt: latest.started_at, title: latest.title, project: latest.project }
@@ -571,6 +607,165 @@ app.get(['/api/logs/:machine', '/logs/:machine'], async (req: any, res: any) => 
     })
   }
 })
+
+// Every read route shares one error shape so the UI can render failures without
+// special-casing which endpoint produced them.
+const apiRoute =
+  (label: string, handler: (req: any, res: any) => Promise<void>) =>
+  async (req: any, res: any) => {
+    try {
+      await handler(req, res)
+    } catch (error) {
+      console.error(`[API] ${label} error:`, error)
+      if (!res.headersSent)
+        res.status(500).json({
+          status: 'error',
+          error: error instanceof Error ? error.message : 'Unknown error',
+        })
+    }
+  }
+
+const intParam = (raw: unknown, fallback: number) => {
+  if (raw === undefined || raw === '') return fallback
+  const n = parseInt(String(raw), 10)
+  return Number.isFinite(n) ? n : fallback
+}
+
+const boolParam = (raw: unknown) => raw === 'true' || raw === '1'
+
+// Search over the same index the MCP tool uses — same fusion, same filters —
+// returning the structured results rather than the MCP text rendering.
+app.get('/api/search', apiRoute('Search', async (req, res) => {
+  const q = typeof req.query.q === 'string' ? req.query.q : undefined
+  const mode = req.query.mode as 'semantic' | 'text' | 'hybrid' | undefined
+
+  if (!q?.trim()) {
+    res.status(400).json({ status: 'error', error: 'q is required' })
+    return
+  }
+
+  const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : undefined
+  const results = await search({
+    query: q,
+    negativeQuery: typeof req.query.not === 'string' ? req.query.not : undefined,
+    mode: mode && ['semantic', 'text', 'hybrid'].includes(mode) ? mode : 'hybrid',
+    limit: Math.min(intParam(req.query.limit, 20), 100),
+    source: typeof req.query.source === 'string' ? req.query.source : undefined,
+    since: typeof req.query.since === 'string' ? req.query.since : undefined,
+    cwd,
+    projectOnly: boolParam(req.query.projectOnly),
+    includeAutomated: boolParam(req.query.includeAutomated),
+  })
+
+  const projectIds = cwd ? (await findProjectsByPath(cwd)).map(p => p.id) : []
+
+  res.json({
+    status: 'ok',
+    query: q,
+    mode: mode ?? 'hybrid',
+    count: results.length,
+    projectIds,
+    results: results.map(toSearchHit),
+  })
+}))
+
+app.get('/api/projects', apiRoute('Projects', async (_req, res) => {
+  const projects = await listProjects()
+  res.json({ status: 'ok', count: projects.length, projects })
+}))
+
+app.get('/api/sessions', apiRoute('Sessions', async (req, res) => {
+  const { items, total } = await listSessions({
+    limit: Math.min(intParam(req.query.limit, 30), 200),
+    offset: Math.max(intParam(req.query.offset, 0), 0),
+    projectId: req.query.projectId ? intParam(req.query.projectId, 0) : undefined,
+    source: typeof req.query.source === 'string' ? req.query.source : undefined,
+    machine: typeof req.query.machine === 'string' ? req.query.machine : undefined,
+    q: typeof req.query.q === 'string' && req.query.q ? req.query.q : undefined,
+    includeAutomated: boolParam(req.query.includeAutomated),
+  })
+  res.json({ status: 'ok', total, count: items.length, sessions: items })
+}))
+
+app.get('/api/sessions/:id', apiRoute('Session digest', async (req, res) => {
+  const digest = await getSessionDigest({
+    sessionId: intParam(req.params.id, 0),
+    chunkOffset: intParam(req.query.chunkOffset, 0),
+    chunkLimit: Math.min(intParam(req.query.chunkLimit, 50), 200),
+  })
+  if (!digest) {
+    res.status(404).json({ status: 'error', error: 'Session not found' })
+    return
+  }
+  res.json({ status: 'ok', digest: toDigest(digest) })
+}))
+
+app.get('/api/sessions/:id/messages', apiRoute('Session messages', async (req, res) => {
+  const result = await getMessages({
+    sessionId: intParam(req.params.id, 0),
+    offset: req.query.startMessageId ? undefined : Math.max(intParam(req.query.offset, 0), 0),
+    limit: Math.min(intParam(req.query.limit, 20), 100),
+    startMessageId: req.query.startMessageId ? intParam(req.query.startMessageId, 0) : undefined,
+    endMessageId: req.query.endMessageId ? intParam(req.query.endMessageId, 0) : undefined,
+    maxChars: Math.min(intParam(req.query.maxChars, 60000), 200000),
+  })
+  if (!result) {
+    res.status(404).json({ status: 'error', error: 'No messages found' })
+    return
+  }
+  res.json({ status: 'ok', ...toMessages(result) })
+}))
+
+// The escape hatch for a message that came back TRUNCATED: one message, whole.
+app.get('/api/messages/:id', apiRoute('Message', async (req, res) => {
+  const message = await getMessageById(intParam(req.params.id, 0))
+  if (!message) {
+    res.status(404).json({ status: 'error', error: 'Message not found' })
+    return
+  }
+  res.json({ status: 'ok', message: toMessage(message) })
+}))
+
+app.get('/api/machines', apiRoute('Machines', async (_req, res) => {
+  const [machines, writers] = await Promise.all([getMachineActivity(), getLogWriters()])
+  res.json({
+    status: 'ok',
+    thisMachine: config.machine,
+    lastIndexedMachine: mostRecentlyIndexed(machines),
+    machines,
+    logWriters: writers,
+  })
+}))
+
+app.get('/api/activity', apiRoute('Activity', async (req, res) => {
+  const days = Math.min(Math.max(intParam(req.query.days, 30), 1), 365)
+  res.json({ status: 'ok', days, activity: await getActivity(days) })
+}))
+
+// Records sync could not process, kept whole for replay. A non-zero count means
+// data is waiting, not that data was lost.
+app.get('/api/quarantine', apiRoute('Quarantine', async (req, res) => {
+  const { items, total } = await listQuarantine({
+    limit: Math.min(intParam(req.query.limit, 50), 200),
+    offset: Math.max(intParam(req.query.offset, 0), 0),
+    includeResolved: boolParam(req.query.includeResolved),
+    // Payloads are whole records and can be large, so a listing omits them
+    // unless asked. This is paging, not truncation.
+    withPayload: boolParam(req.query.withPayload),
+  })
+  res.json({ status: 'ok', total, count: items.length, pending: await countPending(), records: items })
+}))
+
+// Retrying is always safe: a record that fails again keeps its row with the new
+// error and a bumped attempt count, and one that succeeds is marked resolved.
+app.post('/api/quarantine/retry', apiRoute('Quarantine retry', async (req, res) => {
+  const id = req.body?.id ?? req.query.id
+  const result = await replayQuarantine({
+    id: id === undefined ? undefined : intParam(id, 0),
+    limit: Math.min(intParam(req.body?.limit ?? req.query.limit, 100), 500),
+  })
+  res.json({ status: 'ok', ...result, pending: await countPending() })
+}))
 
 app.post('/api/ingest', async (req: any, res: any) => {
   try {

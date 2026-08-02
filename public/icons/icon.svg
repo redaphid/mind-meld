@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Mindmeld">
+  <defs>
+    <linearGradient id="m" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4dd4c0" />
+      <stop offset="1" stop-color="#7aa2f7" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="118" fill="#0d141d" />
+  <g stroke="url(#m)" stroke-width="27" stroke-linecap="round" fill="url(#m)">
+    <path d="M159 169 L353 159 L256 363 Z" fill="none" />
+    <circle cx="159" cy="169" r="42" stroke="none" />
+    <circle cx="353" cy="159" r="42" stroke="none" />
+    <circle cx="256" cy="363" r="42" stroke="none" />
+  </g>
+</svg>

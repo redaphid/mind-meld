@@ -1,6 +1,6 @@
 {
   "name": "@redaphid/mindmeld",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "description": "Unified conversation index for Claude Code and Cursor with PostgreSQL + Chroma",
   "type": "module",
   "packageManager": "pnpm@10.11.0",
@@ -30,6 +30,8 @@
     "sync:embeddings": "tsx src/index.ts embeddings",
     "compute:centroids": "tsx scripts/compute-centroids.ts",
     "mark:warmups": "tsx scripts/mark-warmups.ts",
+    "quarantine": "tsx scripts/retry-quarantine.ts",
+    "icons": "node scripts/make-icons.mjs",
     "search": "tsx scripts/search.ts",
     "stats": "tsx scripts/stats.ts",
     "db:migrate": "tsx scripts/migrate.ts",

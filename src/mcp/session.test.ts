@@ -16,6 +16,7 @@ beforeEach(() => {
 const metadataRow = {
   id: 42,
   external_id: 'ext-42',
+  project_id: 7,
   title: 'Debugging the backfill',
   summary: 'We fixed NaN embeddings.',
   project_name: 'mind-meld',
@@ -135,6 +136,7 @@ describe('getSessionDigest', () => {
 describe('formatDigest', () => {
   const baseDigest = {
     session_id: 42,
+    project_id: 7,
     title: 'A session',
     summary: 'a summary',
     excerpt: null,
