@@ -1,6 +1,7 @@
 import assert from 'node:assert'
 import { query } from '../db/postgres.js'
 import { buildExcerpt } from './snippet.js'
+import { resolveTitle, type TitleSource } from './title.js'
 
 export type SessionMetadata = {
   id: number
@@ -30,7 +31,10 @@ export type ChunkManifestEntry = {
 
 export type SessionDigest = {
   session_id: number
+  // Resolved, never fabricated: a source-supplied title, else the opening
+  // sentence of the summary, else null. `title_source` says which (issue #95).
   title: string | null
+  title_source: TitleSource
   project_id: number
   summary: string | null
   // Issue #4: present only when summary is NULL — a labeled raw-text fallback so
@@ -146,7 +150,8 @@ const toDigest = (
   totalChunks: number
 ): SessionDigest => ({
   session_id: s.id,
-  title: s.title,
+  title: resolveTitle(s).title,
+  title_source: resolveTitle(s).titleSource,
   project_id: s.project_id,
   summary: s.summary,
   excerpt: s.summary ? null : excerpt,
@@ -404,7 +409,7 @@ export const formatDigest = (d: SessionDigest): string => {
       ? `## Excerpt (no summary yet)\n\n"${d.excerpt}"`
       : `## Summary\n\nNo summary available for this session.`
 
-  const header = `# ${d.title ?? 'Untitled Session'}
+  const header = `# ${d.title ?? `Session ${d.session_id} (no title — not summarized yet)`}
 
 **Session ID:** ${d.session_id}
 **Project:** ${d.project}

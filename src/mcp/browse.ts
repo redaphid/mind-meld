@@ -4,6 +4,7 @@
 
 import { query } from '../db/postgres.js'
 import { UNKNOWN_MACHINE } from './machines.js'
+import { resolveTitle, type TitleSource } from './title.js'
 
 export type ProjectSummary = {
   id: number
@@ -58,7 +59,10 @@ export const listProjects = async (): Promise<ProjectSummary[]> => {
 
 export type SessionListItem = {
   id: number
+  // Resolved from the summary when the source supplied no title; null rather
+  // than a fabricated one when neither exists (issue #95).
   title: string | null
+  titleSource: TitleSource
   summary: string | null
   project: string | null
   projectId: number
@@ -79,6 +83,9 @@ export type SessionListFilter = {
   machine?: string
   q?: string
   includeAutomated?: boolean
+  // Sessions are not listed until they are properly summarized and indexed;
+  // pass true to see the backlog deliberately (issue #95).
+  includeUnsummarized?: boolean
 }
 
 type SessionListRow = {
@@ -119,6 +126,8 @@ export const listSessions = async (
     clauses.push(`(s.title ILIKE ${p} OR p.name ILIKE ${p})`)
   }
   if (!filter.includeAutomated) clauses.push('s.is_automated = false')
+  // Not surfaced until it is properly summarized and indexed (issue #95).
+  if (!filter.includeUnsummarized) clauses.push('s.summary IS NOT NULL')
 
   params.push(filter.limit, filter.offset)
   const limitParam = `$${params.length - 1}`
@@ -143,7 +152,7 @@ export const listSessions = async (
     total: result.rows[0] ? Number(result.rows[0].total) : 0,
     items: result.rows.map(r => ({
       id: r.id,
-      title: r.title,
+      ...resolveTitle(r),
       summary: r.summary,
       project: r.project,
       projectId: r.project_id,

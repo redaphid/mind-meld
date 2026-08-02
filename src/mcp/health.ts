@@ -1,6 +1,7 @@
 import assert from 'node:assert'
 import { config } from '../config.js'
 import { query } from '../db/postgres.js'
+import { notWarmup } from './title.js'
 
 // Bad-summary signal SQL is kept in lockstep with scripts/audit-summaries.sh and
 // scripts/reset-bad-summaries.ts. If you change a signal there, change it here too.
@@ -35,7 +36,7 @@ const BAD_SUMMARY_SIGNALS = `
     FROM sessions s
     WHERE s.summary IS NOT NULL
       AND s.deleted_at IS NULL
-      AND s.title != 'Warmup'
+      AND ${notWarmup('s')}
   )
 `
 
@@ -76,10 +77,10 @@ const gatherCoverage = async () => {
     `SELECT
        COUNT(*) AS total,
        COUNT(*) FILTER (
-         WHERE summary IS NOT NULL AND deleted_at IS NULL AND is_automated = false AND title != 'Warmup'
+         WHERE summary IS NOT NULL AND deleted_at IS NULL AND is_automated = false AND ${notWarmup()}
        ) AS summarized,
        COUNT(*) FILTER (
-         WHERE summary IS NULL AND deleted_at IS NULL AND is_automated = false AND title != 'Warmup' AND message_count > 0
+         WHERE summary IS NULL AND deleted_at IS NULL AND is_automated = false AND ${notWarmup()} AND message_count > 0
        ) AS null_backlog
      FROM sessions`
   )

@@ -42,7 +42,9 @@ export const Pill = ({ kind, children, title }) =>
 // result list and a browse list feels identical.
 export const SessionRow = ({ session, snippet, tier, score, onClick }) => html`
   <button class="row" onClick=${onClick ?? (() => navigate(`session/${session.id ?? session.sessionId}`))}>
-    <div class="t">${session.title ?? 'Untitled session'}</div>
+    <div class="t ${session.title ? '' : 'faint'}">
+      ${session.title ?? `Session ${session.id ?? session.sessionId} — no title yet`}
+    </div>
     <div class="m">
       <span>${session.project ?? 'unknown project'}</span>
       <${Pill}>${sourceLabel(session.source)}<//>

@@ -268,11 +268,14 @@ describe('every advertised tool executes', () => {
 
     query.mockResolvedValueOnce({
       rows: [
-        { id: 1, title: 'T', project_name: 'proj', started_at: new Date(), message_count: 3 },
-        // An untitled session must still render a line, not a blank.
-        { id: 2, title: null, project_name: 'proj', started_at: new Date(), message_count: 1 },
+        { id: 1, title: 'T', summary: null, project_name: 'proj', started_at: new Date(), message_count: 3 },
+        // A session with no stored title takes one from its summary (#95).
+        { id: 2, title: null, summary: 'Wired the parity fix. Then went home.', project_name: 'proj', started_at: new Date(), message_count: 1 },
+        // With neither, it must still render a line, not a blank -- but an
+        // honest placeholder rather than a fabricated topic.
+        { id: 3, title: null, summary: null, project_name: 'proj', started_at: new Date(), message_count: 1 },
       ],
-      rowCount: 2,
+      rowCount: 3,
     } as never)
     const prompt = await client.getPrompt({
       name: 'context',
@@ -281,7 +284,10 @@ describe('every advertised tool executes', () => {
     const body = (prompt.messages[0].content as { text: string }).text
     expect(body).toContain('Previous Conversations')
     expect(body).toContain('wiring up the parity fix')
-    expect(body).toContain('Untitled')
+    expect(body).toContain('Wired the parity fix.')
+    expect(body).not.toContain('Then went home.')
+    expect(body).toContain('Session 3 (no title — not summarized yet)')
+    expect(body).not.toContain('Untitled')
     await client.close()
   })
 })

@@ -138,6 +138,7 @@ describe('formatDigest', () => {
     session_id: 42,
     project_id: 7,
     title: 'A session',
+    title_source: 'source' as const,
     summary: 'a summary',
     excerpt: null,
     project: 'mind-meld',
@@ -316,5 +317,35 @@ describe('getMessageById', () => {
   it('returns null when the message does not exist', async () => {
     query.mockResolvedValueOnce(rows())
     expect(await getMessageById(999)).toBeNull()
+  })
+})
+
+// Issue #95: getSession is the tool an agent calls after triaging a search hit.
+// It returned the stale title column even when a summary existed.
+describe('getSessionDigest title resolution (#95)', () => {
+  it('derives the title from the summary when the source supplied none', async () => {
+    query
+      .mockResolvedValueOnce(
+        rows({ ...metadataRow, title: null, summary: 'Repaired the parent-session linkage.\nDetails.' })
+      )
+      .mockResolvedValueOnce(rows())
+      .mockResolvedValueOnce(rows({ total: '0' }))
+      .mockResolvedValue(rows())
+
+    const digest = await getSessionDigest({ sessionId: 42 })
+    expect(digest!.title).toBe('Repaired the parent-session linkage.')
+    expect(digest!.title_source).toBe('summary')
+  })
+
+  it('reports no title rather than inventing one when there is no summary yet', async () => {
+    query
+      .mockResolvedValueOnce(rows({ ...metadataRow, title: null, summary: null }))
+      .mockResolvedValueOnce(rows())
+      .mockResolvedValueOnce(rows({ total: '0' }))
+      .mockResolvedValue(rows())
+
+    const digest = await getSessionDigest({ sessionId: 42 })
+    expect(digest!.title).toBeNull()
+    expect(digest!.title_source).toBe('none')
   })
 })

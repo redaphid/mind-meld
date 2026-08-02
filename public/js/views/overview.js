@@ -98,7 +98,9 @@ export const OverviewView = () => {
       ${s?.latestSession &&
       html`<div class="m" style="margin-top:10px">
         <span class="faint">newest:</span>
-        <span>${s.latestSession.title}</span>
+        <span class=${s.latestSession.title ? '' : 'faint'}
+          >${s.latestSession.title ?? 'no title yet — not summarized'}</span
+        >
         <span class="right faint nowrap">${timeAgo(s.latestSession.startedAt)}</span>
       </div>`}
     <//>

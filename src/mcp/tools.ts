@@ -15,6 +15,7 @@ import {
   formatChunk,
 } from './session.js'
 import { getHealth, formatHealth } from './health.js'
+import { resolveTitle } from './title.js'
 
 // THE tool surface. Both transports — stdio (server.ts) and Streamable HTTP
 // (http-server.ts) — register from here and declare nothing of their own.
@@ -83,6 +84,7 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
       likeProject: z.array(z.string()).optional().describe('Boost results matching these project IDs'),
       unlikeProject: z.array(z.string()).optional().describe('Suppress results matching these project IDs'),
       includeAutomated: z.boolean().optional().describe('Include automated, non-interactive sessions (Slack monitoring, curiosity curation, MCP health checks, huddle transcripts). Excluded by default.'),
+      includeUnsummarized: z.boolean().optional().describe('Include sessions that have not been summarized yet. Excluded by default: an unsummarized session has no title and no session-level vector, so it can only arrive as an untriageable result. Pass true to reach the indexing backlog deliberately.'),
       dataClass: z.array(z.string()).optional().describe('Data classes to search (default ["coding"]). Sources are classified as coding, personal, meetings, etc. Pass ["*"] to search everything, or e.g. ["coding","personal"] to widen. An explicit source param bypasses this default.'),
     },
     async (params) => {
@@ -343,12 +345,13 @@ Call this proactively whenever you get useless results back from search.`,
 
       const recentResult = await query<{
         id: number
-        title: string
+        title: string | null
+        summary: string | null
         project_name: string
         started_at: Date
         message_count: number
       }>(
-        `SELECT s.id, s.title, p.name as project_name, s.started_at, s.message_count
+        `SELECT s.id, s.title, s.summary, p.name as project_name, s.started_at, s.message_count
          FROM sessions s
          JOIN projects p ON s.project_id = p.id
          WHERE p.id = ANY($1::int[]) AND s.deleted_at IS NULL
@@ -364,7 +367,7 @@ Call this proactively whenever you get useless results back from search.`,
 
       for (const session of recentResult.rows) {
         assert(session.started_at, `Missing started_at for session ${session.id}`)
-        contextText += `- **${session.title ?? 'Untitled'}** (${session.started_at.toISOString().split('T')[0]}) - ${session.message_count} messages [ID: ${session.id}]\n`
+        contextText += `- **${resolveTitle(session).title ?? `Session ${session.id} (no title — not summarized yet)`}** (${session.started_at.toISOString().split('T')[0]}) - ${session.message_count} messages [ID: ${session.id}]\n`
       }
 
       contextText += `\n---\n\nUse the \`search\` tool with your current task description to find more specific relevant conversations.`

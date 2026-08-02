@@ -467,3 +467,26 @@ describe('syncClaudeCode cwd correction', () => {
     )
   })
 })
+
+// Issue #95: the title was `session.messages[0].contentText.slice(0, 200)`, so a
+// conversation opening with a persona prompt or a task brief was titled with that
+// brief, permanently — 72% of claude_code sessions, and 344 of them cut mid-word
+// at exactly 200 characters. Claude Code has no title field; the honest value is
+// none, and the read path derives a title from the summary instead.
+describe('session titles (#95)', () => {
+  it('does not fabricate a title from the first message', async () => {
+    const brief = `You are an implementation agent. ${'Follow the plan exactly. '.repeat(20)}`
+    await syncSession(1, 3, session({ messages: [{ ...msg('u1', 0), contentText: brief }] }) as never)
+
+    const { title } = upsertSession.mock.calls[0][0]
+    expect(title).toBeUndefined()
+  })
+
+  it('never passes a truncated message body as a title', async () => {
+    await syncSession(1, 3, session() as never)
+
+    const { title } = upsertSession.mock.calls[0][0]
+    expect(title).not.toBe('content of u1')
+    expect(title ?? '').not.toContain('content of')
+  })
+})
