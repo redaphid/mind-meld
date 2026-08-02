@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { createServer, request as httpRequest, type Server, type IncomingMessage } from 'node:http'
+import { createServer as createTcpServer, type Server as TcpServer } from 'node:net'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -122,6 +123,69 @@ describe('createUiApp', () => {
     const res = await rawGet(uiPort, '/', { host: 'evil.example.com' })
     expect(res.status).toBeGreaterThanOrEqual(400)
     expect(res.status).toBeLessThan(500)
+  })
+
+  it('answers 504 when the upstream accepts the connection but never responds', async () => {
+    // A stalled upstream, not a dead one: the TCP server accepts and then
+    // says nothing, which no ECONNREFUSED handler would ever catch.
+    const sockets: import('node:net').Socket[] = []
+    const stalled: TcpServer = createTcpServer(socket => sockets.push(socket))
+    await new Promise<void>(resolve => stalled.listen(0, '127.0.0.1', resolve))
+    const stalledPort = (stalled.address() as AddressInfo).port
+
+    const app = createUiApp({
+      upstream: `http://127.0.0.1:${stalledPort}`,
+      publicDir: await mkdtemp(join(tmpdir(), 'mindmeld-ui-test-')),
+      version: 'test',
+      headerTimeoutMs: 300,
+    })
+    const server = await new Promise<Server>(resolve => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s))
+    })
+    const port = (server.address() as AddressInfo).port
+
+    const started = Date.now()
+    const res = await fetch(`http://127.0.0.1:${port}/status`)
+    expect(res.status).toBe(504)
+    const body = (await res.json()) as { status: string; error: string }
+    expect(body.status).toBe('error')
+    expect(body.error).toContain('no response within 300ms')
+    // It answered because the deadline fired, not because something crashed.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(290)
+
+    server.close()
+    for (const s of sockets) s.destroy()
+    await new Promise<void>(resolve => stalled.close(() => resolve()))
+  })
+
+  it('does not cut off a response that streams past the header deadline', async () => {
+    // Headers arrive immediately, then the body drips out slower than the
+    // header deadline — the MCP SSE shape. The stream must survive.
+    const slow = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.write('first')
+      setTimeout(() => res.end('-last'), 250)
+    })
+    await new Promise<void>(resolve => slow.listen(0, '127.0.0.1', resolve))
+    const slowPort = (slow.address() as AddressInfo).port
+
+    const app = createUiApp({
+      upstream: `http://127.0.0.1:${slowPort}`,
+      publicDir: await mkdtemp(join(tmpdir(), 'mindmeld-ui-test-')),
+      version: 'test',
+      headerTimeoutMs: 100,
+    })
+    const server = await new Promise<Server>(resolve => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s))
+    })
+    const port = (server.address() as AddressInfo).port
+
+    const res = await fetch(`http://127.0.0.1:${port}/status`)
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('first-last')
+
+    server.close()
+    await new Promise<void>(resolve => slow.close(() => resolve()))
   })
 
   it('answers 502 with the shared error envelope when the API is down', async () => {

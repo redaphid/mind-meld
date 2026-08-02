@@ -46,9 +46,22 @@ export type UiAppOptions = {
   allowedHosts?: string[]
   // Reported by /healthz
   version?: string
+  // How long the upstream gets to accept a TCP connection (default 5s)
+  connectTimeoutMs?: number
+  // How long the upstream gets to start responding after that (default 30s).
+  // Only until response *headers* arrive — once a response is streaming
+  // (MCP SSE, large message pages) there is deliberately no limit.
+  headerTimeoutMs?: number
 }
 
-export const createUiApp = ({ upstream, publicDir, allowedHosts = [], version = 'dev' }: UiAppOptions): Express => {
+export const createUiApp = ({
+  upstream,
+  publicDir,
+  allowedHosts = [],
+  version = 'dev',
+  connectTimeoutMs = 5_000,
+  headerTimeoutMs = 30_000,
+}: UiAppOptions): Express => {
   const upstreamUrl = new URL(upstream)
   const staticDir = publicDir ?? fileURLToPath(new URL('../../public', import.meta.url))
 
@@ -69,6 +82,22 @@ export const createUiApp = ({ upstream, publicDir, allowedHosts = [], version = 
     headers['x-forwarded-host'] = req.headers.host ?? ''
     headers['x-forwarded-for'] = req.socket?.remoteAddress ?? ''
 
+    // A prompt socket error (ECONNREFUSED) is not the only failure mode: a
+    // port that accepts and then never answers would otherwise hang the
+    // client forever. Two deadlines cover it — one to connect, one to start
+    // responding — and both stop mattering the moment headers arrive, so a
+    // long-lived stream (MCP SSE) is never cut off mid-flight.
+    let settled = false
+    const fail = (status: number, message: string) => {
+      if (settled) return
+      settled = true
+      clearTimeout(headerTimer)
+      upReq.destroy()
+      console.error(`[UI] ${message} for ${req.method} ${req.originalUrl}`)
+      if (!res.headersSent) res.status(status).json({ status: 'error', error: message })
+      else res.end()
+    }
+
     const upReq = httpRequest(
       {
         hostname: upstreamUrl.hostname,
@@ -78,6 +107,8 @@ export const createUiApp = ({ upstream, publicDir, allowedHosts = [], version = 
         headers,
       },
       upRes => {
+        settled = true
+        clearTimeout(headerTimer)
         const resHeaders = { ...upRes.headers }
         for (const h of HOP_BY_HOP) delete resHeaders[h]
         res.writeHead(upRes.statusCode ?? 502, resHeaders)
@@ -85,7 +116,25 @@ export const createUiApp = ({ upstream, publicDir, allowedHosts = [], version = 
       }
     )
 
+    const headerTimer = setTimeout(
+      () => fail(504, `API upstream sent no response within ${headerTimeoutMs}ms`),
+      headerTimeoutMs
+    )
+
+    upReq.on('socket', socket => {
+      if (!socket.connecting) return
+      const connectTimer = setTimeout(
+        () => fail(504, `API upstream connect timed out after ${connectTimeoutMs}ms`),
+        connectTimeoutMs
+      )
+      socket.once('connect', () => clearTimeout(connectTimer))
+      socket.once('close', () => clearTimeout(connectTimer))
+    })
+
     upReq.on('error', (error: Error) => {
+      if (settled) return // a deadline already answered; destroy() echoes here
+      settled = true
+      clearTimeout(headerTimer)
       console.error(`[UI] Upstream error for ${req.method} ${req.originalUrl}:`, error.message)
       if (!res.headersSent)
         res.status(502).json({ status: 'error', error: `API upstream unreachable: ${error.message}` })
@@ -93,7 +142,10 @@ export const createUiApp = ({ upstream, publicDir, allowedHosts = [], version = 
     })
 
     // If the client goes away mid-stream, stop the upstream request too.
-    res.on('close', () => upReq.destroy())
+    res.on('close', () => {
+      clearTimeout(headerTimer)
+      upReq.destroy()
+    })
 
     req.pipe(upReq)
   }

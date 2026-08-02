@@ -15,7 +15,20 @@ const allowedHosts = (process.env.ALLOWED_HOSTS ?? '')
   .map(h => h.trim())
   .filter(Boolean)
 
-const app = createUiApp({ upstream: UPSTREAM_URL, allowedHosts, version })
+const intEnv = (name: string) => {
+  const raw = process.env[name]
+  if (!raw) return undefined
+  const n = parseInt(raw, 10)
+  return Number.isFinite(n) && n > 0 ? n : undefined
+}
+
+const app = createUiApp({
+  upstream: UPSTREAM_URL,
+  allowedHosts,
+  version,
+  connectTimeoutMs: intEnv('UPSTREAM_CONNECT_TIMEOUT_MS'),
+  headerTimeoutMs: intEnv('UPSTREAM_HEADER_TIMEOUT_MS'),
+})
 
 app.listen(UI_PORT, () => {
   console.log(`[UI] Mindmeld UI listening on http://localhost:${UI_PORT}, proxying API to ${UPSTREAM_URL}`)
