@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
+import { mkdtemp, mkdir, writeFile, rm } from 'fs/promises'
+import { tmpdir } from 'os'
+import { join } from 'path'
 
 const { upsertSession, insertMessage, updateSessionStats, updateSessionContentChars, quarantineMock } =
   vi.hoisted(() => ({
@@ -15,7 +18,7 @@ vi.mock('../db/postgres.js', () => ({
 vi.mock('./quarantine.js', () => ({ quarantine: quarantineMock }))
 vi.mock('../config.js', () => ({ config: { machine: 'test-box', sources: { claudeCode: { path: '/nope' } } } }))
 
-const { syncSession } = await import('./claude-code.js')
+const { syncSession, discoverSessionFiles } = await import('./claude-code.js')
 
 beforeEach(() => {
   upsertSession.mockReset().mockResolvedValue(77)
@@ -135,5 +138,49 @@ describe('syncSession', () => {
     expect(quarantineMock).toHaveBeenCalledWith(
       expect.objectContaining({ recordKey: 'line:9', sessionId: 77, stage: 'parse', payload: '{"broken' })
     )
+  })
+})
+
+const dirs: string[] = []
+
+afterAll(async () => {
+  await Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true })))
+})
+
+describe('discoverSessionFiles', () => {
+  // Newer Claude Code stores subagent transcripts in nested directories
+  // (`<sessionId>/subagents/agent-*.jsonl`, deeper when agents spawn agents).
+  // A top-level-only walk silently missed all of them — on one machine, 161
+  // of 193 session files. Discovery has to be recursive.
+  it('finds session files at every depth, not just the project root', async () => {
+    const project = await mkdtemp(join(tmpdir(), 'mindmeld-project-'))
+    dirs.push(project)
+
+    await writeFile(join(project, 'top-level.jsonl'), '{}\n')
+    await mkdir(join(project, 'sess-1', 'subagents'), { recursive: true })
+    await writeFile(join(project, 'sess-1', 'subagents', 'agent-abc.jsonl'), '{}\n')
+    await mkdir(join(project, 'sess-1', 'subagents', 'agent-abc', 'subagents'), {
+      recursive: true,
+    })
+    await writeFile(
+      join(project, 'sess-1', 'subagents', 'agent-abc', 'subagents', 'agent-def.jsonl'),
+      '{}\n'
+    )
+    await writeFile(join(project, 'not-a-session.txt'), 'ignore me\n')
+
+    const files = await discoverSessionFiles(project)
+
+    expect(files.sort()).toEqual(
+      [
+        join(project, 'top-level.jsonl'),
+        join(project, 'sess-1', 'subagents', 'agent-abc.jsonl'),
+        join(project, 'sess-1', 'subagents', 'agent-abc', 'subagents', 'agent-def.jsonl'),
+      ].sort()
+    )
+  })
+
+  it('returns an empty list for an unreadable directory instead of throwing', async () => {
+    const files = await discoverSessionFiles('/does/not/exist')
+    expect(files).toEqual([])
   })
 })

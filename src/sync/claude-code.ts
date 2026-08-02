@@ -43,17 +43,30 @@ export async function discoverProjects(basePath: string): Promise<string[]> {
   return projects;
 }
 
-// Discover session files in a project directory
+// Discover session files in a project directory. Recursive, because newer
+// Claude Code versions store subagent transcripts under
+// `<project>/<sessionId>/subagents/agent-*.jsonl` (nested further when agents
+// spawn agents) — a top-level-only walk silently missed every one of them.
+// On one machine that was 161 of 193 session files invisible to sync (#29).
 export async function discoverSessionFiles(projectPath: string): Promise<string[]> {
   const files: string[] = [];
 
-  try {
-    const entries = await readdir(projectPath);
+  const walk = async (dir: string): Promise<void> => {
+    const entries = await readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
-      if (entry.endsWith('.jsonl')) {
-        files.push(join(projectPath, entry));
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+        files.push(fullPath);
       }
+      // Symlinks are skipped: following them risks cycles, and Claude Code
+      // does not create them under projects/.
     }
+  };
+
+  try {
+    await walk(projectPath);
   } catch (e) {
     console.error(`Failed to discover sessions in ${projectPath}:`, e);
   }

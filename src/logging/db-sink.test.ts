@@ -6,7 +6,7 @@ vi.mock('../config.js', () => ({
   config: { machine: 'test-machine', logs: { retentionDays: 14 } },
 }))
 
-const { enqueue, flushLogs, sinkStats, startDbLogSink, __resetForTests } = await import(
+const { enqueue, flushLogs, exitFlush, sinkStats, startDbLogSink, __resetForTests } = await import(
   './db-sink.js'
 )
 
@@ -53,6 +53,25 @@ describe('enqueue', () => {
     const [, params] = query.mock.calls[0]
     expect(params[3]).toEqual(['saw wsl\\u0000--list\\u0000 in a path'])
     expect((params[3] as string[])[0]).not.toContain(NUL)
+  })
+
+  // A failing flush at shutdown used to re-fire beforeExit forever: the
+  // process printed its summary and then never exited. The exit path gets a
+  // bounded number of attempts, then reports and abandons the queue.
+  it('exitFlush gives up after bounded attempts instead of spinning forever', async () => {
+    query.mockRejectedValue(new Error('invalid byte sequence for encoding "UTF8": 0x00'))
+    enqueue(entry({ message: 'poisoned batch' }))
+
+    await exitFlush()
+    await exitFlush()
+    await exitFlush()
+    expect(sinkStats().pending).toBe(1) // still queued: three real attempts
+
+    await exitFlush() // fourth: gives up, clears the queue
+    expect(sinkStats().pending).toBe(0)
+
+    await exitFlush() // nothing left — must be a no-op, not another query
+    expect(query).toHaveBeenCalledTimes(3)
   })
 
   it('drops the oldest entries once the queue cap is exceeded', () => {

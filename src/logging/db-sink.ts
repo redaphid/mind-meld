@@ -147,6 +147,27 @@ export const startDbLogSink = (serviceName: string) => {
 }
 
 let handlersInstalled = false
+let exitFlushAttempts = 0
+const MAX_EXIT_FLUSH_ATTEMPTS = 3
+
+// One beforeExit cycle: flush if there is anything left and we have not given
+// up. Exported for tests; the subtlety it guards is an infinite shutdown loop —
+// a failing flush schedules async work, the loop drains, beforeExit fires
+// again, forever. Seen live with a NUL-poisoned queue: the process printed its
+// summary and then never exited. Bounded attempts turn that into a bounded
+// delay and a visible report.
+export const exitFlush = (): Promise<void> => {
+  if (queue.length === 0) return Promise.resolve()
+  if (exitFlushAttempts >= MAX_EXIT_FLUSH_ATTEMPTS) {
+    reportProblem(
+      `giving up on exit flush after ${MAX_EXIT_FLUSH_ATTEMPTS} attempts; ${queue.length} line(s) not persisted`
+    )
+    queue = []
+    return Promise.resolve()
+  }
+  exitFlushAttempts++
+  return flushLogs()
+}
 
 // beforeExit still allows async work, so a short-lived process (the sync CLI)
 // gets its final lines persisted instead of losing them on exit.
@@ -155,7 +176,7 @@ export const installFlushOnExit = () => {
   handlersInstalled = true
 
   process.on('beforeExit', () => {
-    void flushLogs()
+    void exitFlush()
   })
 
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
@@ -173,6 +194,7 @@ export const __resetForTests = () => {
   failures = 0
   flushing = false
   lastPruneAt = 0
+  exitFlushAttempts = 0
   service = 'unknown'
   if (timer) {
     clearInterval(timer)
