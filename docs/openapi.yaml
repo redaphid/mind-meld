@@ -442,7 +442,7 @@ components:
           type: integer
         title:
           type: string
-          description: Session title, clipped to 100 characters for this listing.
+          description: Full session title.
         project:
           type: string
         lastSyncedAt:

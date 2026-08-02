@@ -315,7 +315,7 @@ app.get('/status', async (req: any, res: any) => {
       last_synced_at: string
       message_count: number
     }>(`
-      SELECT s.id, LEFT(s.title, 100) as title, p.name as project,
+      SELECT s.id, s.title, p.name as project,
              s.last_synced_at, s.message_count
       FROM sessions s
       JOIN projects p ON s.project_id = p.id

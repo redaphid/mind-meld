@@ -2,11 +2,10 @@
 # Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 
 services:
-  sync:
-    build:
-      context: .
-      dockerfile: Dockerfile.sync
-    image: mindmeld-sync:dev
+  # No `sync` override: docker-compose.yml has no sync service (it runs on the
+  # host — see docs/DOCKER.md). An override for a service the base file lacks
+  # does not no-op; compose creates it from this block alone, with no
+  # environment and no volumes, so it starts and immediately fails.
 
   centroid-compute:
     build:
