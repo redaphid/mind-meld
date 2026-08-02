@@ -12,7 +12,8 @@ vi.mock('../embeddings/ollama.js', () => ({
   }),
 }))
 
-const { search, resolveDataClasses } = await import('./search.js')
+const { search, resolveDataClasses, formatSearchResults, findProjectsByPath } =
+  await import('./search.js')
 
 type Row = Record<string, unknown>
 const rows = (...r: Row[]) => ({ rows: r })
@@ -190,5 +191,193 @@ describe('search default data-class filter (full-text arm)', () => {
     expect(sql).toContain(`COALESCE(p.data_class, src.data_class) = ANY(`)
     expect(values).toContain('android')
     expect(values).toContainEqual(['personal'])
+  })
+
+  it('adds the excludeTerms condition after the class predicate', async () => {
+    query.mockResolvedValue(rows())
+
+    await search({ query: 'deploy', mode: 'text', excludeTerms: 'kubernetes' })
+    const [sql, values] = ftsCall()!
+    expect(sql).toContain('NOT to_tsvector')
+    expect(values).toContain('kubernetes')
+    expect(values).toContainEqual(['coding'])
+  })
+
+  it('surfaces an FTS row as a message-tier hit with its headline', async () => {
+    query.mockImplementation(async (sql: string) => {
+      if (typeof sql === 'string' && sql.includes('ranked_messages'))
+        return rows({
+          session_id: 2,
+          message_id: 900,
+          title: 'Fixing the build',
+          project_name: 'proj',
+          project_path: '/p/proj',
+          source_name: 'claude_code',
+          data_class: 'coding',
+          started_at: new Date('2026-01-01T00:00:00Z'),
+          message_count: 10,
+          rank: 0.9,
+          project_id: 7,
+          headline: 'we **fixed** the build',
+        })
+      return rows()
+    })
+
+    const results = await search({ query: 'fixed', mode: 'text' })
+    expect(results).toHaveLength(1)
+    expect(results[0].matched_tier).toBe('message')
+    expect(results[0].cursor).toEqual({ message_id: 900 })
+    expect(results[0].data_class).toBe('coding')
+    expect(results[0].snippet).toContain('**fixed**')
+  })
+})
+
+describe('search parameter arms', () => {
+  it('requires a query or a centroid parameter', async () => {
+    await expect(search({})).rejects.toThrow(/query or centroid/)
+  })
+
+  it('surfaces chunk and message tier hits with cursors', async () => {
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (typeof sql === 'string' && sql.includes('session_chunks'))
+        return rows({ ...fixtures[2], chunk_index: 3, chunk_summary: 'the fix section' })
+      if (typeof sql === 'string' && sql.includes('WHERE m.id = $1'))
+        return rows({ ...fixtures[2], id: 9, message_id: 900, content_text: 'we fixed it here' })
+      if (typeof sql === 'string' && sql.includes('s.id = $1')) {
+        const row = fixtures[params?.[0] as number]
+        return row ? rows(row) : rows()
+      }
+      return rows()
+    })
+    querySimilar.mockImplementation(async (collection: string) => {
+      if (collection === 'convo-chunks') return { ids: [['chunk-10']], distances: [[0.1]] }
+      if (collection === 'convo-messages') return { ids: [['msg-900']], distances: [[0.2]] }
+      return { ids: [[]], distances: [[]] }
+    })
+
+    const results = await search({ query: 'fix', mode: 'semantic' })
+    const chunkHit = results.find((r) => r.matched_tier === 'chunk')
+    expect(chunkHit?.cursor).toEqual({ chunk_index: 3 })
+    expect(chunkHit?.snippet).toBe('the fix section')
+    // Session 9 was first claimed by the message arm.
+    const messageHit = results.find((r) => r.matched_tier === 'message')
+    expect(messageHit?.cursor).toEqual({ message_id: 900 })
+  })
+
+  it('boosts sessions from the cwd project and honours projectOnly', async () => {
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (typeof sql === 'string' && sql.includes('FROM projects p') && sql.includes('LIKE'))
+        return rows({ id: 7, path: '/p/proj', name: 'proj', source_name: 'claude_code' })
+      if (typeof sql === 'string' && sql.includes('s.id = $1')) {
+        const row = fixtures[params?.[0] as number]
+        return row ? rows(row) : rows()
+      }
+      return rows()
+    })
+    mockChromaSessionsOnly()
+
+    // Both fixtures live in project 7; projectOnly keeps them, and the boost
+    // lifts the score above the bare fusion contribution.
+    const results = await search({
+      query: 'x',
+      mode: 'semantic',
+      cwd: '/p/proj/sub',
+      projectOnly: true,
+      dataClass: ['*'],
+    })
+    expect(results.map((r) => r.session_id).sort()).toEqual([1, 2])
+    for (const r of results) expect(r.score).toBeGreaterThan(0.5)
+  })
+
+  it('drops sessions older than since', async () => {
+    mockDbForSemantic()
+    mockChromaSessionsOnly()
+
+    const results = await search({
+      query: 'x',
+      mode: 'semantic',
+      dataClass: ['*'],
+      since: '2026-02-01',
+    })
+    expect(results).toEqual([])
+  })
+
+  it('steers by weighted centroids without a query', async () => {
+    const centroid = JSON.stringify(new Array(1024).fill(0.5))
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (typeof sql === 'string' && sql.includes('centroid_vector FROM sessions'))
+        return rows({ centroid_vector: centroid })
+      if (typeof sql === 'string' && sql.includes('centroid_vector FROM projects'))
+        return rows({ centroid_vector: centroid })
+      if (typeof sql === 'string' && sql.includes('s.id = $1')) {
+        const row = fixtures[params?.[0] as number]
+        return row ? rows(row) : rows()
+      }
+      return rows()
+    })
+    mockChromaSessionsOnly()
+
+    const results = await search({
+      likeSession: ['5:1.5', 'not-a-number'],
+      unlikeSession: ['6'],
+      likeProject: ['7:0.5'],
+      unlikeProject: ['8'],
+      negativeQuery: 'briefings',
+      query: 'storefronts',
+      mode: 'semantic',
+    })
+    expect(results.map((r) => r.session_id)).toEqual([2])
+  })
+})
+
+describe('findProjectsByPath', () => {
+  it('returns projects whose path prefixes (or is prefixed by) the cwd', async () => {
+    query.mockResolvedValue(
+      rows({ id: 7, path: '/p/proj', name: 'proj', source_name: 'claude_code' })
+    )
+    const projects = await findProjectsByPath('/p/proj/sub')
+    expect(projects).toEqual([{ id: 7, path: '/p/proj', name: 'proj', source_name: 'claude_code' }])
+    expect(query.mock.calls[0][1]).toEqual(['/p/proj/sub'])
+  })
+})
+
+describe('formatSearchResults', () => {
+  const result = (over: Record<string, unknown> = {}) => ({
+    session_id: 2,
+    project_name: 'proj',
+    project_path: '/p/proj',
+    source: 'claude_code',
+    data_class: 'coding',
+    title: 'Fixing the build',
+    date: new Date('2026-01-01T00:00:00Z'),
+    score: 0.7,
+    matched_tier: 'session' as const,
+    snippet: 'we fixed it',
+    ...over,
+  })
+
+  it('says so when nothing matched', () => {
+    expect(formatSearchResults([])).toBe('No matching conversations found.')
+  })
+
+  it('renders source and data class together', () => {
+    const text = formatSearchResults([result()])
+    expect(text).toContain('(claude_code, coding)')
+    expect(text).toContain('Session ID: 2')
+    expect(text).toContain('we fixed it')
+  })
+
+  it('marks current-project hits and renders cursors', () => {
+    const text = formatSearchResults(
+      [
+        result({ session_id: 2, cursor: { chunk_index: 3 } }),
+        result({ session_id: 3, matched_tier: 'message' as const, cursor: { message_id: 900 }, snippet: null }),
+      ],
+      [2]
+    )
+    expect(text).toContain('[CURRENT PROJECT]')
+    expect(text).toContain('Cursor: chunk 3')
+    expect(text).toContain('Cursor: message 900')
+    expect(text).toContain('(no snippet)')
   })
 })
