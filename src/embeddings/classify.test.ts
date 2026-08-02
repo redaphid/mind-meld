@@ -1,5 +1,46 @@
 import { describe, it, expect } from 'vitest'
-import { classifyAutomated, isAutomated } from './classify.js'
+import { classifyAutomated, isAutomated, classifyNoise } from './classify.js'
+
+// The parser strips scaffolding on the way in, but ~800 messages were stored
+// before it did. Until the backfill runs, those rows still hold raw wrappers —
+// so the classifier is the second line of defence that keeps them out of the
+// index (issue #37).
+describe('classifyNoise: harness scaffolding (issue #37)', () => {
+  it('rejects a wrapper-only message that clears the length floor', () => {
+    // 70 chars of pure markup — long enough that the too-short rule misses it,
+    // which is precisely how these got embedded in the first place.
+    const raw = '<command-message>vj</command-message>\n<command-name>/vj</command-name>'
+    expect(raw.length).toBeGreaterThan(50)
+    expect(classifyNoise(raw)).toBe('scaffolding-only')
+  })
+
+  it('rejects a message that is only a system-reminder', () => {
+    expect(
+      classifyNoise(
+        '<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>'
+      )
+    ).toBe('scaffolding-only')
+  })
+
+  it('keeps a command that carried real user content', () => {
+    const raw =
+      '<command-name>/vibej</command-name>\n<command-args>' +
+      'float sdSphere( vec3 p, float s ) { return length(p)-s; }</command-args>'
+    expect(classifyNoise(raw)).toBeNull()
+  })
+
+  it('still judges length on the real content, not the markup', () => {
+    // Stripped this is 'hi' — genuinely too short. The wrapper must not be
+    // allowed to pad it over the threshold.
+    const raw = '<command-name>/ask</command-name>\n<command-args>hi</command-args>'
+    expect(raw.length).toBeGreaterThan(50)
+    expect(classifyNoise(raw)).toMatch(/^too-short:/)
+  })
+
+  it('leaves ordinary long conversation alone', () => {
+    expect(classifyNoise('Can you explain how the embedding backlog drains? '.repeat(3))).toBeNull()
+  })
+})
 
 describe('classifyAutomated', () => {
   it('flags Slack monitoring assistant sessions', () => {
