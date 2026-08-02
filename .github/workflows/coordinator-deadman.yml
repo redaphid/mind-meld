@@ -1,0 +1,68 @@
+name: Coordinator deadman
+
+# The operator should never be the mechanism that notices a dead coordinator.
+# This runs on GitHub's infrastructure, so it keeps working precisely in the
+# case that matters: the coordinator is wedged, out of context, or gone.
+
+on:
+  schedule:
+    - cron: "20 * * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+env:
+  # A coordinator cycles hourly; two missed cycles is not a blip.
+  STALE_MINUTES: "150"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check coordinator liveness
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          channel=$(gh issue list --label coordinator-active --state open --json number -q '.[0].number')
+
+          if [ -z "$channel" ]; then
+            echo "::warning::No issue carries coordinator-active — coordination is unowned."
+            exit 0
+          fi
+
+          hb=$(gh api "repos/$GH_REPO/issues/$channel/comments" --paginate \
+                --jq '[.[] | select(.body | contains("<!-- coord-heartbeat -->"))] | last | .updated_at // empty')
+
+          if [ -z "$hb" ]; then
+            echo "Channel #$channel has never recorded a heartbeat; nothing to compare yet."
+            exit 0
+          fi
+
+          age=$(( ( $(date -u +%s) - $(date -u -d "$hb" +%s) ) / 60 ))
+          echo "Heartbeat on #$channel is ${age}m old (threshold ${STALE_MINUTES}m)."
+          [ "$age" -lt "$STALE_MINUTES" ] && exit 0
+
+          # The label is the idempotency guard: say it once, not every hour.
+          if gh issue view "$channel" --json labels -q '.labels[].name' | grep -qx coordinator-stale; then
+            echo "Already flagged stale; staying quiet."
+            exit 0
+          fi
+
+          gh label create coordinator-stale --color B60205 \
+            --description "Active coordinator has missed its heartbeat" 2>/dev/null || true
+          gh issue edit "$channel" --add-label coordinator-stale
+          gh issue comment "$channel" --body "⏱️ **Deadman:** no coordinator heartbeat for ${age} minutes (threshold ${STALE_MINUTES}m). The active coordinator is unresponsive, wedged, or gone.
+
+Recover without a design conversation — state is derived from GitHub, not from the stalled session:
+
+\`\`\`
+scripts/coord/state.sh                                   # what is actually going on
+scripts/coord/handoff.sh --to vNEXT --reason \"predecessor unresponsive\" --force
+\`\`\`
+
+This comment posts once per stall; the label clears on the next heartbeat."
