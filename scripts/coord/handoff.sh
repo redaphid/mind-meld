@@ -47,7 +47,7 @@ This channel was opened by \`scripts/coord/handoff.sh\`, and the state below was
 
 $STATE
 EOF
-)" -q)"
+)")"
 
 NEWNUM="${NEW##*/}"
 [ -n "$OLD" ] && gh issue edit "$OLD" --repo "$GH_REPO" --remove-label coordinator-active
