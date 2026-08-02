@@ -104,13 +104,17 @@ export const queries = {
     return result.rows[0] ?? null;
   },
 
-  getOrCreateSource: async (name: string, displayName?: string) => {
-    const result = await query<{ id: number; name: string }>(
-      `INSERT INTO sources (name, display_name)
-       VALUES ($1, $2)
-       ON CONFLICT (name) DO UPDATE SET name = $1
-       RETURNING id, name`,
-      [name, displayName ?? name]
+  // A brand-new source lands as 'personal' unless the caller classifies it —
+  // fail closed: unclassified data stays invisible to the default search. An
+  // explicit dataClass also reclassifies an existing source; omitted, the
+  // existing classification is preserved.
+  getOrCreateSource: async (name: string, displayName?: string, dataClass?: string) => {
+    const result = await query<{ id: number; name: string; data_class: string }>(
+      `INSERT INTO sources (name, display_name, data_class)
+       VALUES ($1, $2, COALESCE($3, 'personal'))
+       ON CONFLICT (name) DO UPDATE SET data_class = COALESCE($3, sources.data_class)
+       RETURNING id, name, data_class`,
+      [name, displayName ?? name, dataClass ?? null]
     );
     return result.rows[0];
   },

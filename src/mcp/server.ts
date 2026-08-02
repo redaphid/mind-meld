@@ -76,6 +76,7 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
     likeProject: z.array(z.string()).optional().describe('Boost results matching these project IDs'),
     unlikeProject: z.array(z.string()).optional().describe('Suppress results matching these project IDs'),
     includeAutomated: z.boolean().optional().describe('Include automated, non-interactive sessions (Slack monitoring, curiosity curation, MCP health checks, huddle transcripts). Excluded by default.'),
+    dataClass: z.array(z.string()).optional().describe('Data classes to search (default ["coding"]). Sources are classified as coding, personal, meetings, etc. Pass ["*"] to search everything, or e.g. ["coding","personal"] to widen. An explicit source param bypasses this default.'),
   },
   async (params) => {
     const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
@@ -263,11 +264,13 @@ server.tool(
   async () => {
     const stats = await query<{
       source_name: string
+      data_class: string
       project_count: number
       session_count: number
       message_count: number
     }>(
       `SELECT src.name as source_name,
+              src.data_class,
               COUNT(DISTINCT p.id) as project_count,
               COUNT(DISTINCT s.id) as session_count,
               COUNT(m.id) as message_count
@@ -275,7 +278,7 @@ server.tool(
        LEFT JOIN projects p ON p.source_id = src.id
        LEFT JOIN sessions s ON s.project_id = p.id
        LEFT JOIN messages m ON m.session_id = s.id
-       GROUP BY src.name`
+       GROUP BY src.name, src.data_class`
     )
 
     const topProjects = await query<{
@@ -294,7 +297,15 @@ server.tool(
 
     let output = `# Mindmeld Statistics\n\n## By Source\n\n`
     for (const row of stats.rows)
-      output += `**${row.source_name}:** ${row.project_count} projects, ${row.session_count} sessions, ${row.message_count} messages\n`
+      output += `**${row.source_name}** (${row.data_class}): ${row.project_count} projects, ${row.session_count} sessions, ${row.message_count} messages\n`
+
+    const byClass = new Map<string, number>()
+    for (const row of stats.rows)
+      byClass.set(row.data_class, (byClass.get(row.data_class) ?? 0) + Number(row.session_count))
+
+    output += `\n## By Data Class\n\n`
+    for (const [dataClass, count] of byClass)
+      output += `**${dataClass}:** ${count} sessions\n`
 
     output += `\n## Top Projects\n\n`
     for (const row of topProjects.rows)

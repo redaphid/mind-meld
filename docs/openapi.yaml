@@ -259,6 +259,9 @@ paths:
 
         Snippets mark matched terms with `**` (markdown bold), the same rendering
         the MCP tool produces.
+
+        By default only `coding`-class data is searched (see `dataClass`);
+        naming a `source` explicitly bypasses that default.
       parameters:
         - name: q
           in: query
@@ -283,10 +286,29 @@ paths:
             maximum: 100
         - name: source
           in: query
-          description: Restrict to one source.
+          description: |
+            Restrict to one source. Naming a source bypasses the default
+            `dataClass` filter — `source=android` returns android hits even
+            though `personal` data is excluded by default.
           schema:
             type: string
             examples: ['claude_code', 'android']
+        - name: dataClass
+          in: query
+          description: |
+            Data classes to search, repeatable or comma-separated
+            (`dataClass=coding,personal`). Every source carries a class
+            (`coding`, `personal`, `meetings`, …; a project can override its
+            source's class). Defaults to `coding` only, so SMS threads and
+            meeting transcripts stay out of a coding agent's results. `*`
+            disables the filter.
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+          example: [coding, personal]
         - name: since
           in: query
           description: |
@@ -1293,6 +1315,16 @@ components:
         sourceDisplayName:
           type: string
           description: Human-readable label, used only when the source is first created.
+        dataClass:
+          type: string
+          maxLength: 32
+          description: |
+            Classification for the source (`coding`, `personal`, `meetings`, …;
+            open vocabulary, lowercase). Omitted, a new source defaults to
+            `personal` — fail closed, invisible to the default search until
+            classified — and an existing source keeps its current class. When
+            given, it reclassifies the source.
+          examples: [meetings]
         project:
           type: object
           required: [externalId, name]
@@ -1452,7 +1484,7 @@ components:
 
     SearchHit:
       type: object
-      required: [sessionId, title, project, projectPath, source, date, score, matchedTier, snippet, cursor]
+      required: [sessionId, title, project, projectPath, source, dataClass, date, score, matchedTier, snippet, cursor]
       properties:
         sessionId:
           type: integer
@@ -1469,6 +1501,12 @@ components:
             - type: string
         source:
           type: string
+        dataClass:
+          type: string
+          description: |
+            The hit's effective data class — the project's override when set,
+            otherwise its source's class (`coding`, `personal`, `meetings`, …).
+          examples: [coding, personal, meetings]
         date:
           oneOf:
             - type: 'null'

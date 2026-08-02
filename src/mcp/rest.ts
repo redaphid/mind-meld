@@ -13,6 +13,7 @@ export type SearchHitDto = {
   project: string
   projectPath: string | null
   source: string
+  dataClass: string
   date: string | null
   score: number
   matchedTier: 'session' | 'chunk' | 'message'
@@ -35,6 +36,7 @@ export const toSearchHit = (r: SearchResult): SearchHitDto => ({
   project: r.project_name,
   projectPath: r.project_path ?? null,
   source: r.source,
+  dataClass: r.data_class,
   date: iso(r.date),
   score: r.score,
   matchedTier: r.matched_tier,
