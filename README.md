@@ -230,6 +230,7 @@ Details in [CLAUDE.md](CLAUDE.md#deployment).
 | Doc | What's in it |
 | --- | --- |
 | [USAGE.md](docs/USAGE.md) | MCP tool reference, search recipes, retrieval flow |
+| [OPERATIONS.md](docs/OPERATIONS.md) | Running it day to day: `scripts/mm`, why something isn't indexed, reading logs safely |
 | [openapi.yaml](docs/openapi.yaml) | HTTP API specification |
 | [DOCKER.md](docs/DOCKER.md) | Compose setup, services, configuration, troubleshooting |
 | [MULTI-MACHINE.md](docs/MULTI-MACHINE.md) | One shared brain; connecting laptops over SSH |

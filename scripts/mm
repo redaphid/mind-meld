@@ -1,0 +1,407 @@
+#!/usr/bin/env bash
+#
+# mm — one entry point for running mindmeld day to day.
+#
+# Portable bash: works in Git Bash on Windows, WSL, Linux, and macOS. The older
+# scripts in here are macOS-only (osascript, zsh) and silently do nothing
+# elsewhere, which is part of why failures went unnoticed for so long.
+#
+#   mm status        what is running, how far behind, is anything broken
+#   mm watch         the same, refreshing, as a dashboard
+#   mm sync          run a sync now instead of waiting for the timer
+#   mm logs          follow real log lines (not indexed conversation text)
+#   mm doctor        find data problems
+#   mm repair        fix the problems doctor finds, non-destructively
+#   mm migrate       apply pending SQL migrations
+#   mm psql          open a database shell
+#
+# Run `mm help` for the full list.
+
+set -uo pipefail
+
+PG_CONTAINER="${MM_PG_CONTAINER:-mindmeld-postgres}"
+SYNC_CONTAINER="${MM_SYNC_CONTAINER:-mindmeld-sync}"
+PG_USER="${MM_PG_USER:-mindmeld}"
+PG_DB="${MM_PG_DB:-conversations}"
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Git Bash rewrites container-absolute paths like /app/mindmeld into Windows
+# paths. Every docker exec here goes through this.
+dex() { MSYS_NO_PATHCONV=1 docker exec "$@"; }
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GRN=$'\033[32m'
+  YLW=$'\033[33m'; CYN=$'\033[36m'; RST=$'\033[0m'
+else
+  BOLD=""; DIM=""; RED=""; GRN=""; YLW=""; CYN=""; RST=""
+fi
+
+ok()   { printf "  %s✓%s %s\n" "$GRN" "$RST" "$1"; }
+warn() { printf "  %s!%s %s\n" "$YLW" "$RST" "$1"; }
+bad()  { printf "  %s✗%s %s\n" "$RED" "$RST" "$1"; }
+head_() { printf "\n%s%s%s\n" "$BOLD" "$1" "$RST"; }
+
+# Single-value query. Returns empty string if postgres is unreachable, so
+# callers can distinguish "zero" from "cannot tell".
+db() { dex "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "$1" 2>/dev/null | tr -d '\r'; }
+
+running() { docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$1"; }
+
+require_docker() {
+  if ! docker info >/dev/null 2>&1; then
+    bad "Docker is not running or not reachable."
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------- status
+
+cmd_status() {
+  require_docker
+
+  head_ "Containers"
+  local any=0
+  for c in "$PG_CONTAINER" mindmeld-chroma "$SYNC_CONTAINER" mindmeld-sync-wsl mindmeld-mcp mindmeld-warmups mindmeld-centroids; do
+    if running "$c"; then
+      local st; st=$(docker inspect "$c" --format '{{.State.Status}}{{if .State.Health}} ({{.State.Health.Status}}){{end}}' 2>/dev/null)
+      ok "$(printf '%-22s %s' "$c" "$st")"
+      any=1
+    else
+      # Only complain about containers that should exist on this host.
+      docker inspect "$c" >/dev/null 2>&1 && bad "$(printf '%-22s stopped' "$c")"
+    fi
+  done
+  [ "$any" = 1 ] || bad "No mindmeld containers are running. Try: docker compose up -d"
+
+  if ! db "select 1" >/dev/null 2>&1 || [ -z "$(db 'select 1')" ]; then
+    head_ "Database"
+    bad "Cannot reach postgres in $PG_CONTAINER — skipping data checks."
+    return 1
+  fi
+
+  head_ "Indexed"
+  local sessions messages projects
+  sessions=$(db "select count(*) from sessions")
+  messages=$(db "select count(*) from messages")
+  projects=$(db "select count(*) from projects")
+  printf "  %s sessions, %s messages, %s projects\n" "${sessions:-?}" "${messages:-?}" "${projects:-?}"
+  db "select '    ' || s.name || ': ' || count(distinct se.id)
+      from sources s
+      left join projects p on p.source_id = s.id
+      left join sessions se on se.project_id = p.id
+      group by s.name having count(distinct se.id) > 0 order by 2 desc" 2>/dev/null
+
+  head_ "Embedding queue"
+  local pending
+  pending=$(db "
+    select count(*) from messages m
+    left join embeddings e on e.message_id = m.id and e.chroma_collection = 'convo-messages'
+    left join embeddings skip on skip.message_id = m.id and skip.chroma_collection = 'UNEMBEDDABLE'
+    where m.content_text is not null and length(m.content_text) > 10 and m.role != 'tool'
+      and e.id is null and skip.id is null")
+  if [ -z "$pending" ]; then
+    warn "could not read queue depth"
+  elif [ "$pending" -eq 0 ]; then
+    ok "nothing pending"
+  else
+    printf "  %s messages awaiting embedding\n" "$pending"
+  fi
+
+  head_ "Last sync"
+  local last
+  last=$(db "select to_char(max(last_synced_at), 'YYYY-MM-DD HH24:MI:SS') from sessions")
+  if [ -n "$last" ]; then
+    printf "  %s UTC\n" "$last"
+  else
+    warn "never"
+  fi
+  if running "$SYNC_CONTAINER"; then
+    local phase
+    phase=$(docker logs --tail 40 "$SYNC_CONTAINER" 2>&1 | grep -E '^(=== |--- )' | tail -1)
+    [ -n "$phase" ] && printf "  %s%s%s\n" "$DIM" "$phase" "$RST"
+  fi
+
+  head_ "Health"
+  local stuck mismatch
+  stuck=$(db "select count(*) from sessions s
+              where s.message_count <> (select count(*) from messages m where m.session_id = s.id)")
+  mismatch="${stuck:-}"
+  if [ -z "$mismatch" ]; then
+    warn "integrity check unavailable"
+  elif [ "$mismatch" -eq 0 ]; then
+    ok "no session/message count mismatches"
+  else
+    bad "$mismatch sessions have inconsistent message counts — run: mm doctor"
+  fi
+
+  local recent_err
+  recent_err=$(docker logs --since 1h "$SYNC_CONTAINER" 2>&1 | grep -cE '^Failed to sync session' || true)
+  if [ "${recent_err:-0}" -gt 0 ]; then
+    bad "$recent_err session failures in the last hour — run: mm logs"
+  else
+    ok "no sync failures in the last hour"
+  fi
+  printf "\n"
+}
+
+# ---------------------------------------------------------------- watch
+
+cmd_watch() {
+  local interval="${1:-10}"
+  # Leaving the alternate screen on exit restores the user's scrollback.
+  trap 'printf "\033[?1049l"; exit 0' INT TERM
+  printf '\033[?1049h'
+  while true; do
+    printf '\033[H\033[2J'
+    printf "%smindmeld%s  %s  %srefresh %ss — ctrl-c to quit%s\n" \
+      "$BOLD" "$RST" "$(date '+%Y-%m-%d %H:%M:%S')" "$DIM" "$interval" "$RST"
+    cmd_status
+    sleep "$interval"
+  done
+}
+
+# ---------------------------------------------------------------- sync
+
+cmd_sync() {
+  require_docker
+  running "$SYNC_CONTAINER" || { bad "$SYNC_CONTAINER is not running."; exit 1; }
+  printf "%sRunning sync in %s. Ctrl-c stops watching; the sync keeps going.%s\n\n" \
+    "$DIM" "$SYNC_CONTAINER" "$RST"
+  dex "$SYNC_CONTAINER" /app/mindmeld sync "$@"
+}
+
+# ---------------------------------------------------------------- logs
+
+# The sync prints indexed conversation *content* to stdout alongside its own
+# status lines, so an unanchored `grep -i error` matches transcript text and
+# produces false alarms. Everything here is anchored to line start.
+cmd_logs() {
+  require_docker
+  local svc="$SYNC_CONTAINER" follow=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -f|--follow) follow="-f" ;;
+      -a|--all)    follow="${follow}" ; RAW=1 ;;
+      *)           svc="$1" ;;
+    esac
+    shift
+  done
+
+  if [ "${RAW:-0}" = 1 ]; then
+    docker logs $follow --tail 200 "$svc" 2>&1
+    return
+  fi
+
+  docker logs $follow --tail 400 "$svc" 2>&1 \
+    | grep -E --line-buffered '^(=== |--- |Claude Code sync complete|Failed to sync session|Embedded [0-9]+|Batch failed|Error: |Traceback)' \
+    || printf "%s(no status lines yet — use 'mm logs -a' for raw output)%s\n" "$DIM" "$RST"
+}
+
+# ---------------------------------------------------------------- doctor
+
+cmd_doctor() {
+  require_docker
+  local problems=0
+
+  head_ "Schema"
+  local applied missing=""
+  for f in "$REPO_ROOT"/init-db/*.sql; do
+    [ -e "$f" ] || continue
+    local name; name=$(basename "$f")
+    # Cheap proxy for "has this migration run": look for the column or table it
+    # introduces. Only the ones with a known marker are checked.
+    case "$name" in
+      *machine*)
+        applied=$(db "select count(*) from information_schema.columns where table_name='sessions' and column_name='machine'")
+        [ "${applied:-0}" = "0" ] && missing="$missing $name" ;;
+      *session-chunks*)
+        applied=$(db "select count(*) from information_schema.tables where table_name='session_chunks'")
+        [ "${applied:-0}" = "0" ] && missing="$missing $name" ;;
+    esac
+  done
+  if [ -n "$missing" ]; then
+    bad "migrations look unapplied:$missing"
+    printf "      fix: mm migrate\n"
+    problems=$((problems + 1))
+  else
+    ok "known migrations are applied"
+  fi
+
+  head_ "Session integrity"
+  local rows
+  rows=$(db "select s.id || '|' || s.message_count || '|' ||
+               (select count(*) from messages m where m.session_id = s.id) || '|' ||
+               coalesce(p.external_id,'?')
+             from sessions s join projects p on s.project_id = p.id
+             where s.message_count <> (select count(*) from messages m where m.session_id = s.id)
+             order by s.id")
+  if [ -z "$rows" ]; then
+    ok "every session's message_count matches its rows"
+  else
+    bad "sessions with inconsistent counts:"
+    printf "      %-8s %-8s %-8s %s\n" "id" "stored" "actual" "project"
+    while IFS='|' read -r id stored actual proj; do
+      [ -n "$id" ] || continue
+      printf "      %-8s %-8s %-8s %s\n" "$id" "$stored" "$actual" "$proj"
+    done <<< "$rows"
+    printf "      fix: mm repair\n"
+    problems=$((problems + 1))
+  fi
+
+  head_ "Sessions that will never retry"
+  # A session whose insert failed keeps its file_modified_at stamp, so
+  # incremental sync skips it forever. See issue #21.
+  local stuck
+  stuck=$(db "select count(*) from sessions s
+              where s.file_modified_at is not null
+                and s.message_count <> (select count(*) from messages m where m.session_id = s.id)")
+  if [ "${stuck:-0}" = "0" ]; then
+    ok "none"
+  else
+    bad "$stuck sessions are stamped as synced but incomplete"
+    printf "      fix: mm repair\n"
+    problems=$((problems + 1))
+  fi
+
+  head_ "Project paths"
+  local raw
+  raw=$(db "select count(*) from projects where path like '%--%' or path like '%//%'")
+  if [ "${raw:-0}" = "0" ]; then
+    ok "no undecoded or malformed paths"
+  else
+    warn "$raw projects have raw or malformed paths (issues #22, #33)"
+    printf "      %sinformational — these still work, they are just wrong text%s\n" "$DIM" "$RST"
+  fi
+
+  printf "\n"
+  if [ "$problems" -eq 0 ]; then
+    printf "  %sNothing to fix.%s\n\n" "$GRN" "$RST"
+  else
+    printf "  %s%s problem group(s) found. Run: mm repair%s\n\n" "$YLW" "$problems" "$RST"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------- repair
+
+# Everything here is non-destructive: it clears sync bookkeeping so work is
+# retried, or recomputes cached counters. No message or session is deleted.
+cmd_repair() {
+  require_docker
+  local dry=0
+  [ "${1:-}" = "--dry-run" ] && dry=1
+
+  head_ "Repair plan"
+
+  local retryable unrepairable
+  retryable=$(db "select count(*) from sessions s
+                  where s.file_modified_at is not null
+                    and s.message_count <> (select count(*) from messages m where m.session_id = s.id)")
+  unrepairable=$(db "select count(*) from sessions s
+                     where s.file_modified_at is null
+                       and s.message_count <> (select count(*) from messages m where m.session_id = s.id)")
+
+  printf "  %s sessions: clear the sync stamp so the next sync re-reads them\n" "${retryable:-0}"
+  printf "  %s sessions: refresh cached counts (source file may be gone)\n" "${unrepairable:-0}"
+
+  if [ "$dry" = 1 ]; then
+    printf "\n  %sdry run — nothing changed%s\n\n" "$DIM" "$RST"
+    return 0
+  fi
+
+  if [ "${retryable:-0}" != "0" ]; then
+    db "update sessions s set file_modified_at = null
+        where s.file_modified_at is not null
+          and s.message_count <> (select count(*) from messages m where m.session_id = s.id)" >/dev/null
+    ok "cleared $retryable sync stamps — run 'mm sync' to re-read them"
+  fi
+
+  # Recompute counters for sessions whose source is gone, so their content
+  # stops looking like an empty session.
+  if [ "${unrepairable:-0}" != "0" ]; then
+    db "select update_session_stats(s.id) from sessions s
+        where s.file_modified_at is null
+          and s.message_count <> (select count(*) from messages m where m.session_id = s.id)" >/dev/null
+    ok "refreshed $unrepairable cached counts"
+  fi
+
+  if [ "${retryable:-0}" = "0" ] && [ "${unrepairable:-0}" = "0" ]; then
+    ok "nothing needed repair"
+  fi
+  printf "\n"
+}
+
+# ---------------------------------------------------------------- migrate
+
+# scripts/migrate.ts shells out to the psql binary, which is not installed on
+# Windows. This pipes the SQL through the postgres container instead, so it
+# works anywhere Docker does. See issue #23.
+cmd_migrate() {
+  require_docker
+  local applied=0
+  for f in "$REPO_ROOT"/init-db/*.sql; do
+    [ -e "$f" ] || continue
+    local name; name=$(basename "$f")
+    printf "  %-34s " "$name"
+    if dex -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -q < "$f" >/dev/null 2>&1; then
+      printf "%sok%s\n" "$GRN" "$RST"
+      applied=$((applied + 1))
+    else
+      printf "%sfailed%s\n" "$RED" "$RST"
+      printf "      re-run manually to see why:\n"
+      printf "      docker exec -i %s psql -U %s -d %s -v ON_ERROR_STOP=1 < init-db/%s\n" \
+        "$PG_CONTAINER" "$PG_USER" "$PG_DB" "$name"
+    fi
+  done
+  printf "\n  %s migration file(s) applied. They are written to be idempotent,\n" "$applied"
+  printf "  so re-running is safe.\n\n"
+}
+
+# ---------------------------------------------------------------- misc
+
+cmd_psql() { require_docker; dex -it "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" "$@"; }
+
+cmd_help() {
+  cat <<EOF
+${BOLD}mm${RST} — run mindmeld day to day
+
+${BOLD}Seeing what is happening${RST}
+  mm status              containers, counts, queue depth, health
+  mm watch [seconds]     status as a live dashboard (default 10s)
+  mm logs [container]    follow real status lines, not indexed content
+  mm logs -a             raw log output
+
+${BOLD}Making it do things${RST}
+  mm sync                sync now instead of waiting for the timer
+  mm sync --full         re-read everything, ignoring incremental skips
+  mm migrate             apply SQL migrations (works without psql installed)
+  mm psql                database shell
+
+${BOLD}When something is wrong${RST}
+  mm doctor              look for data problems and say how to fix them
+  mm repair              apply those fixes (non-destructive)
+  mm repair --dry-run    show what repair would do
+
+${BOLD}Environment${RST}
+  MM_PG_CONTAINER=$PG_CONTAINER
+  MM_SYNC_CONTAINER=$SYNC_CONTAINER
+  MM_PG_USER=$PG_USER   MM_PG_DB=$PG_DB
+
+Jobs run on sleep-loop timers inside their containers, not cron — the schedule
+floats relative to when each container started, and restarting one resets it.
+EOF
+}
+
+case "${1:-status}" in
+  status)  shift; cmd_status "$@" ;;
+  watch)   shift; cmd_watch "$@" ;;
+  sync)    shift; cmd_sync "$@" ;;
+  logs)    shift; cmd_logs "$@" ;;
+  doctor)  shift; cmd_doctor "$@" ;;
+  repair)  shift; cmd_repair "$@" ;;
+  migrate) shift; cmd_migrate "$@" ;;
+  psql)    shift; cmd_psql "$@" ;;
+  help|-h|--help) cmd_help ;;
+  *) printf "unknown command: %s\n\n" "$1"; cmd_help; exit 1 ;;
+esac
