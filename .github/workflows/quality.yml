@@ -19,6 +19,26 @@ on:
     branches: [main]
 
 jobs:
+  # A workflow that does not parse never runs, and GitHub reports that almost
+  # invisibly — it names the workflow after its own file path and produces
+  # zero-second "failures" with no retrievable log. The coordinator deadman
+  # reached `main` that way, red on every push, never executed once. This job
+  # is the guard: an unparseable or malformed workflow now fails the PR.
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint GitHub workflows
+        env:
+          ACTIONLINT_VERSION: "1.7.7"
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz actionlint
+          ./actionlint -color
+
   quality:
     runs-on: ubuntu-latest
     steps:
