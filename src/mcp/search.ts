@@ -30,6 +30,58 @@ export type SearchParams = {
   likeProject?: string[]
   unlikeProject?: string[]
   includeAutomated?: boolean
+  dataClass?: string[]
+}
+
+// Which effective data classes this search may see. null means unfiltered.
+// - An explicit dataClass wins; '*' anywhere in it disables the filter.
+// - An explicit source already names exactly what the caller wants, so it
+//   bypasses the fail-closed default (an explicit dataClass still ANDs with it).
+// - Otherwise the default: coding data only.
+// Values are trimmed and lowercased — the vocabulary is lowercase, and a
+// miscased value should match rather than silently return nothing.
+export const resolveDataClasses = (
+  params: Pick<SearchParams, 'dataClass' | 'source'>
+): string[] | null => {
+  const cleaned = (params.dataClass ?? [])
+    .map((c) => c.trim().toLowerCase())
+    .filter((c) => c.length > 0)
+  if (cleaned.length > 0) return cleaned.includes('*') ? null : cleaned
+  if (params.source) return null
+  return ['coding']
+}
+
+// A dataClass value nobody has ever classified anything under would silently
+// return zero results; name the valid vocabulary instead.
+export class UnknownDataClassError extends Error {
+  constructor(unknown: string[], known: string[]) {
+    super(
+      `Unknown dataClass value(s): ${unknown.join(', ')}. Valid values: ${known.join(', ')}, or "*" for everything.`
+    )
+    this.name = 'UnknownDataClassError'
+  }
+}
+
+// Every class in use: source classifications plus project overrides.
+const listKnownDataClasses = async (): Promise<string[]> => {
+  const result = await query<{ data_class: string }>(
+    `SELECT DISTINCT data_class FROM (
+       SELECT data_class FROM sources
+       UNION
+       SELECT data_class FROM projects WHERE data_class IS NOT NULL
+     ) classes
+     ORDER BY data_class`
+  )
+  return result.rows.map((r) => r.data_class)
+}
+
+const assertKnownDataClasses = async (dataClasses: string[]) => {
+  const known = await listKnownDataClasses()
+  // An empty vocabulary means the migration hasn't classified anything yet;
+  // rejecting the default ["coding"] then would make search unusable.
+  if (known.length === 0) return
+  const unknown = dataClasses.filter((c) => !known.includes(c))
+  if (unknown.length > 0) throw new UnknownDataClassError(unknown, known)
 }
 
 export type MatchedTier = 'session' | 'chunk' | 'message'
@@ -41,6 +93,7 @@ export type SearchResult = {
   project_name: string
   project_path: string
   source: string
+  data_class: string
   title: string
   date: Date
   score: number
@@ -121,6 +174,7 @@ type SessionRow = {
   project_name: string
   project_path: string
   source_name: string
+  data_class: string
   started_at: Date
   message_count: number
   project_id: number
@@ -131,7 +185,8 @@ const AUTOMATED_FILTER = `($2::boolean OR s.is_automated = false)`
 
 const SESSION_QUERY = `
   SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
-         src.name as source_name, s.started_at, s.message_count, p.id as project_id
+         src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
+         s.started_at, s.message_count, p.id as project_id
   FROM sessions s
   JOIN projects p ON s.project_id = p.id
   JOIN sources src ON p.source_id = src.id
@@ -150,7 +205,8 @@ type MessageAnchoredRow = SessionRow & { message_id: number; content_text: strin
 const getSessionByMessageId = async (messageId: number, includeAutomated: boolean) => {
   const result = await query<MessageAnchoredRow>(
     `SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
-            src.name as source_name, s.started_at, s.message_count, p.id as project_id,
+            src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
+            s.started_at, s.message_count, p.id as project_id,
             m.id as message_id, m.content_text
      FROM messages m
      JOIN sessions s ON m.session_id = s.id
@@ -167,7 +223,8 @@ type ChunkAnchoredRow = SessionRow & { chunk_index: number; chunk_summary: strin
 const getSessionByChunkId = async (chunkId: number, includeAutomated: boolean) => {
   const result = await query<ChunkAnchoredRow>(
     `SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
-            src.name as source_name, s.started_at, s.message_count, p.id as project_id,
+            src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
+            s.started_at, s.message_count, p.id as project_id,
             c.chunk_index, c.summary as chunk_summary
      FROM session_chunks c
      JOIN sessions s ON c.session_id = s.id
@@ -203,6 +260,7 @@ const baseResult = (s: SessionRow, score: number, tier: MatchedTier): SearchResu
   project_name: s.project_name,
   project_path: s.project_path,
   source: s.source_name,
+  data_class: s.data_class,
   title: s.title ?? 'Untitled',
   date: s.started_at,
   score,
@@ -214,8 +272,10 @@ const passesFilters = (
   session: SessionRow,
   params: { source?: string; projectOnly?: boolean },
   sinceDate: Date | null,
-  projectIds: number[]
+  projectIds: number[],
+  dataClasses: string[] | null
 ) => {
+  if (dataClasses && !dataClasses.includes(session.data_class)) return false
   if (params.source && session.source_name !== params.source) return false
   if (sinceDate && session.started_at < sinceDate) return false
   if (params.projectOnly && !projectIds.includes(session.project_id)) return false
@@ -239,6 +299,12 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
   const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
   const projectIds = matchingProjects.map((p) => p.id)
   const sinceDate = parseSinceDate(params.since)
+  const dataClasses = resolveDataClasses(params)
+  if (dataClasses) await assertKnownDataClasses(dataClasses)
+  // Chroma knows nothing about data classes, so an active class filter can
+  // starve the semantic arms (~70% of sessions may be filtered out after the
+  // fetch). Over-fetch harder when a filter is on to compensate.
+  const overFetch = dataClasses ? 5 : null
 
   const [likeSessionCentroids, unlikeSessionCentroids, likeProjectCentroids, unlikeProjectCentroids] =
     await Promise.all([
@@ -276,7 +342,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         unlikeProjectCentroids
       )
 
-      const sessionHits = await querySimilar(config.chroma.collections.sessions, embedding, limit * 2)
+      const sessionHits = await querySimilar(config.chroma.collections.sessions, embedding, limit * (overFetch ?? 2))
       if (sessionHits.ids[0]) {
         const sessionRanked: RankedList = []
         for (let i = 0; i < sessionHits.ids[0].length; i++) {
@@ -284,14 +350,14 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
           const score = 1 - (sessionHits.distances?.[0]?.[i] ?? 1)
           const session = await getSessionById(sessionId, includeAutomated)
           if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds)) continue
+          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses)) continue
           record(baseResult(session, score, 'session'), session.project_id, session.summary, null)
           sessionRanked.push(session.id)
         }
         rankedLists.push(sessionRanked)
       }
 
-      const chunkHits = await querySimilar(config.chroma.collections.chunks, embedding, limit * 3)
+      const chunkHits = await querySimilar(config.chroma.collections.chunks, embedding, limit * (overFetch ?? 3))
       if (chunkHits.ids[0]) {
         const chunkRanked: RankedList = []
         const seen = new Set<number>()
@@ -300,7 +366,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
           const score = 1 - (chunkHits.distances?.[0]?.[i] ?? 1)
           const session = await getSessionByChunkId(chunkId, includeAutomated)
           if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds)) continue
+          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses)) continue
           if (seen.has(session.id)) continue
           seen.add(session.id)
           const result = baseResult(session, score, 'chunk')
@@ -311,7 +377,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         rankedLists.push(chunkRanked)
       }
 
-      const messageHits = await querySimilar(config.chroma.collections.messages, embedding, limit * 3)
+      const messageHits = await querySimilar(config.chroma.collections.messages, embedding, limit * (overFetch ?? 3))
       if (messageHits.ids[0]) {
         // Chroma returns messages in distance order; first appearance of a
         // session is its best-ranked message, so dedup preserves rank order.
@@ -322,7 +388,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
           const score = 1 - (messageHits.distances?.[0]?.[i] ?? 1)
           const session = await getSessionByMessageId(messageId, includeAutomated)
           if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds)) continue
+          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses)) continue
           if (seen.has(session.id)) continue
           seen.add(session.id)
           const result = baseResult(session, score, 'message')
@@ -353,6 +419,11 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       values.push(projectIds)
     }
 
+    if (dataClasses) {
+      conditions.push(`COALESCE(p.data_class, src.data_class) = ANY($${nextParam++}::text[])`)
+      values.push(dataClasses)
+    }
+
     if (params.excludeTerms) {
       conditions.push(
         `NOT to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $${nextParam++})`
@@ -370,6 +441,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       project_name: string
       project_path: string
       source_name: string
+      data_class: string
       started_at: Date
       message_count: number
       rank: number
@@ -390,7 +462,8 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         ORDER BY m.session_id, rank DESC
       )
       SELECT rm.session_id, rm.message_id, s.title, p.name as project_name, p.path as project_path,
-             src.name as source_name, s.started_at, s.message_count, rm.rank,
+             src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
+             s.started_at, s.message_count, rm.rank,
              p.id as project_id,
              ts_headline('english', rm.content_text, websearch_to_tsquery('english', $1), '${ts_headline_options}') as headline
       FROM ranked_messages rm
@@ -410,6 +483,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         project_name: row.project_name,
         project_path: row.project_path,
         source: row.source_name,
+        data_class: row.data_class,
         title: row.title ?? 'Untitled',
         date: row.started_at,
         score: row.rank,
@@ -451,7 +525,7 @@ export const formatSearchResults = (results: SearchResult[], projectIds: number[
           : ''
       return `${i + 1}. **${r.title}**${projectLabel}
    Session ID: ${r.session_id}
-   Project: ${r.project_name} (${r.source})
+   Project: ${r.project_name} (${r.source}, ${r.data_class})
    Date: ${r.date.toISOString().split('T')[0]}
    Score: ${r.score.toFixed(3)} | Matched: ${r.matched_tier}${cursor}
    ${r.snippet ?? '(no snippet)'}`

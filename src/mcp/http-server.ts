@@ -12,7 +12,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool, queries } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
-import { search, formatSearchResults, findProjectsByPath } from './search.js'
+import { search, formatSearchResults, findProjectsByPath, UnknownDataClassError } from './search.js'
 import { sinceSchema } from './since.js'
 import {
   getSessionDigest,
@@ -50,6 +50,15 @@ const IngestMessageSchema = z.object({
 const IngestPayloadSchema = z.object({
   source: z.string(),
   sourceDisplayName: z.string().optional(),
+  // Classification for the source ('coding' | 'personal' | 'meetings' | ...,
+  // open vocabulary). Omitted, a new source defaults to 'personal' — fail
+  // closed — and an existing source keeps its current class. Normalized like
+  // the search side: a source stamped "Coding " would be unreachable.
+  dataClass: z
+    .string()
+    .max(32)
+    .optional()
+    .transform(s => s?.trim().toLowerCase() || undefined),
   // The sending computer. Omitted means "unknown" — we record nothing rather
   // than mislabelling it as the machine running this server.
   machine: z.string().max(64).optional(),
@@ -90,6 +99,9 @@ const getServer = () => {
       unlikeSession: z.array(z.string()).optional(),
       likeProject: z.array(z.string()).optional(),
       unlikeProject: z.array(z.string()).optional(),
+      dataClass: z.array(z.string()).optional().describe(
+        'Data classes to search (default ["coding"]). Sources are classified as coding, personal, meetings, etc. Pass ["*"] to search everything, or e.g. ["coding","personal"] to widen. An explicit source param bypasses this default.'
+      ),
     },
     async (params) => {
       const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
@@ -168,18 +180,27 @@ const getServer = () => {
     async () => {
       const stats = await query<{
         source_name: string
+        data_class: string
         session_count: number
       }>(
-        `SELECT src.name as source_name, COUNT(DISTINCT s.id) as session_count
+        `SELECT src.name as source_name, src.data_class, COUNT(DISTINCT s.id) as session_count
          FROM sources src
          LEFT JOIN projects p ON p.source_id = src.id
          LEFT JOIN sessions s ON s.project_id = p.id
-         GROUP BY src.name`
+         GROUP BY src.name, src.data_class`
       )
 
-      let output = `# Mindmeld Statistics\n\n`
+      const byClass = new Map<string, number>()
       for (const row of stats.rows)
-        output += `**${row.source_name}:** ${row.session_count} sessions\n`
+        byClass.set(row.data_class, (byClass.get(row.data_class) ?? 0) + Number(row.session_count))
+
+      let output = `# Mindmeld Statistics\n\n## By Source\n\n`
+      for (const row of stats.rows)
+        output += `**${row.source_name}** (${row.data_class}): ${row.session_count} sessions\n`
+
+      output += `\n## By Data Class\n\n`
+      for (const [dataClass, count] of byClass)
+        output += `**${dataClass}:** ${count} sessions\n`
 
       return { content: [{ type: 'text', text: output }] }
     }
@@ -649,17 +670,40 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
   }
 
   const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : undefined
-  const results = await search({
-    query: q,
-    negativeQuery: typeof req.query.not === 'string' ? req.query.not : undefined,
-    mode: mode && ['semantic', 'text', 'hybrid'].includes(mode) ? mode : 'hybrid',
-    limit: Math.min(intParam(req.query.limit, 20), 100),
-    source: typeof req.query.source === 'string' ? req.query.source : undefined,
-    since: typeof req.query.since === 'string' ? req.query.since : undefined,
-    cwd,
-    projectOnly: boolParam(req.query.projectOnly),
-    includeAutomated: boolParam(req.query.includeAutomated),
-  })
+
+  // ?dataClass=coding&dataClass=personal or ?dataClass=coding,personal both
+  // work; absent means the search-layer default (coding only).
+  const rawDataClass = req.query.dataClass
+  const dataClass =
+    rawDataClass === undefined
+      ? undefined
+      : (Array.isArray(rawDataClass) ? rawDataClass.map(String) : String(rawDataClass).split(','))
+          .map(s => s.trim())
+          .filter(Boolean)
+
+  let results
+  try {
+    results = await search({
+      query: q,
+      negativeQuery: typeof req.query.not === 'string' ? req.query.not : undefined,
+      mode: mode && ['semantic', 'text', 'hybrid'].includes(mode) ? mode : 'hybrid',
+      limit: Math.min(intParam(req.query.limit, 20), 100),
+      source: typeof req.query.source === 'string' ? req.query.source : undefined,
+      since: typeof req.query.since === 'string' ? req.query.since : undefined,
+      cwd,
+      projectOnly: boolParam(req.query.projectOnly),
+      includeAutomated: boolParam(req.query.includeAutomated),
+      dataClass: dataClass?.length ? dataClass : undefined,
+    })
+  } catch (error) {
+    // A typo'd class is a caller mistake, not a server fault — 400, with the
+    // valid vocabulary in the message.
+    if (error instanceof UnknownDataClassError) {
+      res.status(400).json({ status: 'error', error: error.message })
+      return
+    }
+    throw error
+  }
 
   const projectIds = cwd ? (await findProjectsByPath(cwd)).map(p => p.id) : []
 
@@ -775,7 +819,7 @@ app.post('/api/ingest', async (req: any, res: any) => {
   try {
     const payload = IngestPayloadSchema.parse(req.body)
 
-    const source = await queries.getOrCreateSource(payload.source, payload.sourceDisplayName)
+    const source = await queries.getOrCreateSource(payload.source, payload.sourceDisplayName, payload.dataClass)
 
     const projectId = await queries.upsertProject(
       source.id,

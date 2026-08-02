@@ -8,7 +8,6 @@
     "exports:src/db/chroma.ts:hasId",
     "exports:src/db/postgres.ts:getClient",
     "exports:src/db/postgres.ts:getPool",
-    "exports:src/db/postgres.ts:transaction",
     "exports:src/embeddings/batch.ts:markUnembeddable",
     "exports:src/embeddings/classify.ts:NOISE_PATTERNS",
     "exports:src/embeddings/ollama.ts:checkEmbeddingModel",

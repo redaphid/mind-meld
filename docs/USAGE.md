@@ -54,15 +54,18 @@ by centroid.
 | `cwd` | string | — | Working directory. Matching projects get a `+0.5` score boost |
 | `projectOnly` | boolean | `false` | Restrict to the `cwd` project instead of just boosting it |
 | `since` | string | — | Time floor. See [formats](#since-formats) |
-| `source` | string | — | `claude_code`, `android`, or any ingested source key |
+| `source` | string | — | `claude_code`, `android`, or any ingested source key. Naming a source bypasses the default `dataClass` filter |
+| `dataClass` | string[] | `["coding"]` | Data classes to search. Every source carries a class (`coding`, `personal`, `meetings`, …; projects can override). `["*"]` searches everything; `["coding","personal"]` widens. Case-insensitive; an unknown value is rejected with the valid vocabulary |
 | `likeSession` / `unlikeSession` | string[] | — | Weighted session centroids |
 | `likeProject` / `unlikeProject` | string[] | — | Weighted project centroids |
 | `includeAutomated` | boolean | `false` | Include non-interactive sessions (monitoring jobs, health checks, huddles). *stdio server only* |
 
 Soft-deleted sessions are always excluded; so are automated ones unless you opt
-in.
+in. By default only `coding`-class data is searched — SMS threads, notes, and
+meeting transcripts stay out of a coding agent's results unless it widens
+`dataClass` or names their `source` explicitly.
 
-Each result carries `session_id`, `title`, `project`, `source`, `date`, `score`,
+Each result carries `session_id`, `title`, `project`, `source`, `data_class`, `date`, `score`,
 `matched_tier` (`session` \| `chunk` \| `message`), a snippet, and — for chunk
 and message matches — a `cursor`.
 
@@ -220,8 +223,9 @@ can never arrive by accident.
 
 ### `stats`
 
-Session and message counts per source; the stdio server also returns the top 10
-projects. No parameters.
+Session and message counts per source (with each source's `data_class`) and
+aggregated per data class; the stdio server also returns the top 10 projects.
+No parameters.
 
 ### `health` *(stdio server only)*
 
