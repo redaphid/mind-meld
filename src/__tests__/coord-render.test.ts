@@ -5,7 +5,7 @@
 //
 // So: every list passes an explicit limit, and hitting the limit is LOUD.
 import { describe, it, expect } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
@@ -17,6 +17,12 @@ function run(args: string[], stdin: unknown): string {
     input: JSON.stringify(stdin),
     encoding: 'utf8',
   });
+}
+
+/** Run with raw stdin, capturing output even when the exit code is nonzero. */
+function runRaw(args: string[], stdin: string): { out: string; code: number } {
+  const r = spawnSync(process.execPath, [SCRIPT, ...args], { input: stdin, encoding: 'utf8' });
+  return { out: `${r.stdout}${r.stderr}`, code: r.status ?? -1 };
 }
 
 const pr = (number: number, extra: Record<string, unknown> = {}) => ({
@@ -74,6 +80,31 @@ describe('truncation', () => {
   it('stays quiet when the result is comfortably under the limit', () => {
     const out = run(['unlabeled', '--limit', '500'], [issue(9)]);
     expect(out).not.toContain('TRUNCATED');
+  });
+
+  // The coordinator's question: is the banner keyed on the raw count in EVERY
+  // path? It was not. A fetch that produced nothing rendered as "- none" — an
+  // empty list and a failed fetch were the same output. That is the identical
+  // failure class as S4 itself: absence of data presented as knowledge.
+  it('does not render a failed fetch as an empty list', () => {
+    const { out, code } = runRaw(['unlabeled', '--limit', '500'], '');
+    expect(out).toContain('NO DATA');
+    expect(out).not.toContain('- none');
+    expect(code).not.toBe(0);
+  });
+
+  it('says so legibly when the input is not JSON, rather than dumping a stack trace', () => {
+    const { out, code } = runRaw(['numbers', '--limit', '500'], 'not json');
+    expect(out).toContain('NO DATA');
+    expect(out).not.toContain('SyntaxError');
+    expect(code).not.toBe(0);
+  });
+
+  it('still distinguishes a genuinely empty list from no data at all', () => {
+    const { out, code } = runRaw(['unlabeled', '--limit', '500'], '[]');
+    expect(out).toContain('none');
+    expect(out).not.toContain('NO DATA');
+    expect(code).toBe(0);
   });
 
   it('warns on the RAW count, not the filtered count', () => {

@@ -9,7 +9,7 @@
 // So the rules are pinned here, spawning the real script the way the shell
 // scripts do, with no import coupling to src/.
 import { describe, it, expect } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
@@ -160,6 +160,26 @@ describe('unanswered', () => {
     );
     expect(out).not.toContain('early ask');
     expect(out).toContain('late ask');
+  });
+
+  it('refuses to report "no unanswered messages" when the fetch produced nothing', () => {
+    // The worst possible lie this tool can tell. An empty inbox and a failed
+    // API call rendered identically — silence read as "you are all caught up".
+    const r = spawnSync(process.execPath, [SCRIPT, 'unanswered', '--owner', OWNER, '--generation', 'v2'], {
+      input: '',
+      encoding: 'utf8',
+    });
+    expect(`${r.stdout}${r.stderr}`).toContain('NO DATA');
+    expect(r.status).not.toBe(0);
+  });
+
+  it('accepts a genuinely empty thread without complaining', () => {
+    const r = spawnSync(process.execPath, [SCRIPT, 'unanswered', '--owner', OWNER, '--generation', 'v2'], {
+      input: '[]',
+      encoding: 'utf8',
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe('');
   });
 
   it('shows only the first line of a multi-line ask, never a byte slice', () => {

@@ -99,6 +99,22 @@ function firstLine(body) {
   return String(body ?? '').split('\n')[0];
 }
 
+/** A real JSON array, or a loud refusal. See the note at the `unanswered` CLI. */
+function parseOrDie(raw) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = undefined;
+  }
+  if (Array.isArray(parsed)) return parsed;
+  process.stdout.write(
+    '- 🚨 **NO DATA — THIS IS NOT AN EMPTY INBOX.** The comment query returned nothing parseable, so whether the operator is waiting on a reply is UNKNOWN. Do not read this as "nothing is waiting".\n'
+  );
+  process.exitCode = 1;
+  return null;
+}
+
 function readStdin() {
   return new Promise((resolve) => {
     let s = '';
@@ -155,7 +171,13 @@ async function main() {
 
   if (command === 'unanswered') {
     const owner = flag(argv, 'owner');
-    const rows = unanswered(flattenPages(JSON.parse(input || '[]')), { owner, generation });
+    // Absence of data is not an empty inbox. Parsing "" as `[]` here would
+    // print nothing, and nothing is read as "the operator is not waiting on
+    // you" — the most consequential lie this toolchain can tell, and the same
+    // failure it was written to fix. Refuse, loudly and nonzero, instead.
+    const parsed = parseOrDie(input);
+    if (parsed === null) return;
+    const rows = unanswered(flattenPages(parsed), { owner, generation });
     for (const c of rows) {
       process.stdout.write(`- [${c.created_at}] ${c.html_url}\n  ${firstLine(c.body)}\n`);
     }

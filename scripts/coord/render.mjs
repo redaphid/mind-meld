@@ -34,6 +34,31 @@ function readStdin() {
  * Warn on the RAW fetched count, never the filtered one: a filter applied after
  * a capped fetch cannot tell you what the cap hid.
  */
+/**
+ * Absence of data is not an empty list.
+ *
+ * Every consumer of these renderers reads them as fact. If a fetch fails —
+ * auth expired, network gone, a malformed response — parsing "" as `[]` prints
+ * "- none", which is a confident claim that there is nothing there. That is the
+ * same failure as the silent truncation this file exists to prevent, only
+ * total: absence presented as knowledge. So a caller must hand us a real JSON
+ * array or we refuse, loudly and nonzero.
+ */
+export function parseRowsOrDie(raw, what) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = undefined;
+  }
+  if (Array.isArray(parsed)) return parsed;
+  process.stdout.write(
+    `- 🚨 **NO DATA — THIS IS NOT AN EMPTY LIST.** The ${what} query returned nothing parseable, so its result is UNKNOWN. Do not read this section as "there is nothing here".\n`
+  );
+  process.exitCode = 1;
+  return null;
+}
+
 export function truncationWarning(rawCount, limit, what) {
   if (rawCount < limit) return null;
   return `- 🚨 **TRUNCATED — THIS LIST IS INCOMPLETE.** ${what} hit the ${limit}-row cap; there are more. Re-run with a higher \`COORD_LIST_LIMIT\`. Do not treat what follows as authoritative.`;
@@ -60,7 +85,6 @@ export function renderUnlabeled(rows) {
 async function main() {
   const [mode, ...argv] = process.argv.slice(2);
   const limit = Number(flag(argv, 'limit', '500'));
-  const rows = JSON.parse((await readStdin()) || '[]');
 
   const renderers = { prs: renderPrs, numbers: renderNumbers, unlabeled: renderUnlabeled };
   const render = renderers[mode];
@@ -69,6 +93,9 @@ async function main() {
     process.exitCode = 2;
     return;
   }
+
+  const rows = parseRowsOrDie(await readStdin(), mode);
+  if (rows === null) return;
 
   const warning = truncationWarning(rows.length, limit, mode);
   const lines = render(rows);

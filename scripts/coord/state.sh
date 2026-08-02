@@ -11,6 +11,13 @@ set -euo pipefail
 . "$(dirname "$0")/lib.sh"
 cd "$(git rev-parse --show-toplevel)"   # package.json lives at the repo root
 
+# Said instead of a section's contents when its fetch did not succeed. Every
+# section below is read as fact, so "I could not find out" must never be
+# rendered the same way as "there is nothing here".
+fetch_failed() {
+  echo "- 🚨 **FETCH FAILED — $1 is UNKNOWN, not empty.** The GitHub query did not succeed. Do not treat this section as authoritative."
+}
+
 CHANNELS="$(active_channels || true)"
 CHANNEL_COUNT="$(printf '%s' "$CHANNELS" | grep -c . || true)"
 CHANNEL="$(printf '%s' "$CHANNELS" | head -1)"
@@ -37,7 +44,11 @@ echo
 
 if [ -n "$CHANNEL" ]; then
   echo "### Operator messages awaiting a reply"
-  inbox="$(unanswered_operator_comments "$CHANNEL" || true)"
+  # `|| true` here used to turn a failed fetch into "- none", i.e. into "the
+  # operator is not waiting on you". Of everything this script prints, that is
+  # the one line whose false negative costs the most.
+  inbox="$(unanswered_operator_comments "$CHANNEL")" \
+    || inbox="$(fetch_failed "the operator inbox")"
   echo "${inbox:-- none}"
   echo
 fi
@@ -56,17 +67,27 @@ echo
 # Every list below passes an explicit --limit and is rendered by render.mjs,
 # which SHOUTS if the result reached the cap. gh's silent default of 30 is what
 # made this whole section quietly wrong.
+#
+# Each one is also captured into a variable BEFORE being printed. A pipeline
+# inside `echo "$(...)"` cannot fail the script: command substitution's exit
+# status is discarded by the enclosing echo, so `set -e` never fires and a
+# failed fetch printed as an empty bucket. Assigning first makes the failure
+# the assignment's own exit status, which `|| ` can then catch and report.
 echo "### Open PRs"
-gh pr list --repo "$GH_REPO" --state open --limit "$COORD_LIST_LIMIT" \
+prs="$(gh pr list --repo "$GH_REPO" --state open --limit "$COORD_LIST_LIMIT" \
   --json number,title,isDraft,headRefName,updatedAt \
-  | node "$COORD_DIR/render.mjs" prs --limit "$COORD_LIST_LIMIT"
+  | node "$COORD_DIR/render.mjs" prs --limit "$COORD_LIST_LIMIT")" \
+  || prs="$(fetch_failed "the open PR list")"
+echo "$prs"
 echo
 
 echo "### Board"
 for label in in-progress in-review waiting-on-user needs-human agent-ready; do
-  echo "- **$label**: $(gh issue list --repo "$GH_REPO" --label "$label" --state open \
+  nums="$(gh issue list --repo "$GH_REPO" --label "$label" --state open \
     --limit "$COORD_LIST_LIMIT" --json number \
-    | node "$COORD_DIR/render.mjs" numbers --limit "$COORD_LIST_LIMIT")"
+    | node "$COORD_DIR/render.mjs" numbers --limit "$COORD_LIST_LIMIT")" \
+    || nums="🚨 FETCH FAILED — unknown, not empty"
+  echo "- **$label**: $nums"
 done
 echo
 
@@ -74,6 +95,8 @@ echo
 # own issues at creation. So this list is the operator's authoritative asks —
 # which is exactly why truncating it silently was the worst of the three.
 echo "### Unlabeled — operator-authored, authoritative"
-gh issue list --repo "$GH_REPO" --state open --limit "$COORD_LIST_LIMIT" \
+unlabeled="$(gh issue list --repo "$GH_REPO" --state open --limit "$COORD_LIST_LIMIT" \
   --json number,title,labels \
-  | node "$COORD_DIR/render.mjs" unlabeled --limit "$COORD_LIST_LIMIT"
+  | node "$COORD_DIR/render.mjs" unlabeled --limit "$COORD_LIST_LIMIT")" \
+  || unlabeled="$(fetch_failed "the operator's unlabeled issues")"
+echo "$unlabeled"
