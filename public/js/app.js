@@ -8,6 +8,7 @@ import { SearchView } from './views/search.js'
 import { BrowseView } from './views/browse.js'
 import { SessionView } from './views/session.js'
 import { LogsView } from './views/logs.js'
+import { QuarantineView } from './views/quarantine.js'
 
 const icon = d =>
   html`<svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`
@@ -42,6 +43,7 @@ const TITLES = {
   browse: 'Browse',
   logs: 'Logs',
   session: 'Session',
+  quarantine: 'Quarantine',
 }
 
 const App = () => {
@@ -72,7 +74,9 @@ const App = () => {
           ? html`<${BrowseView} />`
           : view === 'logs'
             ? html`<${LogsView} />`
-            : html`<${OverviewView} />`
+            : view === 'quarantine'
+              ? html`<${QuarantineView} />`
+              : html`<${OverviewView} />`
 
   return html`
     <div class="shell">

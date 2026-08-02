@@ -2,6 +2,7 @@ import { readdir, stat } from 'fs/promises';
 import { join } from 'path';
 import { config } from '../config.js';
 import { queries } from '../db/postgres.js';
+import { quarantine } from './quarantine.js';
 import {
   parseClaudeSessionFile,
   decodeProjectPath,
@@ -15,6 +16,9 @@ export interface SyncStats {
   sessionsProcessed: number;
   messagesInserted: number;
   skipped: number;
+  // Records kept for replay instead of being dropped. Non-zero means data is
+  // waiting in sync_quarantine, not that data was lost.
+  quarantined: number;
   errors: string[];
 }
 
@@ -62,7 +66,7 @@ async function syncSession(
   sourceId: number,
   projectId: number,
   session: ParsedSession
-): Promise<{ messagesInserted: number }> {
+): Promise<{ messagesInserted: number; quarantined: number }> {
   // Upsert session
   const sessionId = await queries.upsertSession({
     projectId,
@@ -81,36 +85,78 @@ async function syncSession(
   });
 
   let messagesInserted = 0;
+  let quarantined = 0;
 
-  // Insert messages
-  for (const message of session.messages) {
-    const msgId = await queries.insertMessage({
+  // Lines the parser could not read at all. Kept before anything else touches
+  // them, so a file that is partly unreadable still yields everything else.
+  for (const bad of session.badLines) {
+    await quarantine({
+      source: 'claude_code',
+      filePath: session.filePath,
+      recordKey: `line:${bad.lineNumber}`,
+      lineNumber: bad.lineNumber,
+      sessionExternalId: session.sessionId,
       sessionId,
-      externalId: message.uuid,
-      role: message.role,
-      contentText: message.contentText,
-      contentJson: message.contentJson,
-      toolName: message.toolName,
-      toolInput: message.toolInput,
-      thinkingText: message.thinkingText,
-      model: message.model,
-      inputTokens: message.inputTokens,
-      outputTokens: message.outputTokens,
-      cacheCreationTokens: message.cacheCreationTokens,
-      cacheReadTokens: message.cacheReadTokens,
-      timestamp: message.timestamp,
-      sequenceNum: message.sequenceNum,
-      isSidechain: message.isSidechain,
+      projectId,
+      stage: 'parse',
+      payload: bad.raw,
+      error: bad.error,
     });
-
-    if (msgId) messagesInserted++;
+    quarantined++;
   }
+
+  // Insert messages. One record that Postgres rejects — a NUL byte, a column
+  // that does not exist — must not cost the rest of the conversation, so each
+  // failure is quarantined and the loop continues.
+  for (const message of session.messages) {
+    try {
+      const msgId = await queries.insertMessage({
+        sessionId,
+        externalId: message.uuid,
+        role: message.role,
+        contentText: message.contentText,
+        contentJson: message.contentJson,
+        toolName: message.toolName,
+        toolInput: message.toolInput,
+        thinkingText: message.thinkingText,
+        model: message.model,
+        inputTokens: message.inputTokens,
+        outputTokens: message.outputTokens,
+        cacheCreationTokens: message.cacheCreationTokens,
+        cacheReadTokens: message.cacheReadTokens,
+        timestamp: message.timestamp,
+        sequenceNum: message.sequenceNum,
+        isSidechain: message.isSidechain,
+      });
+
+      if (msgId) messagesInserted++;
+    } catch (e) {
+      await quarantine({
+        source: 'claude_code',
+        filePath: session.filePath,
+        recordKey: `uuid:${message.uuid}`,
+        lineNumber: session.lineNumbers.get(message.uuid),
+        sessionExternalId: session.sessionId,
+        sessionId,
+        projectId,
+        stage: 'insert',
+        payload: JSON.stringify(message),
+        error: e,
+      });
+      quarantined++;
+    }
+  }
+
+  if (quarantined > 0)
+    console.warn(
+      `Quarantined ${quarantined} record(s) from ${session.filePath} — the rest of the session was indexed`
+    );
 
   // Update session stats and content_chars
   await queries.updateSessionStats(sessionId);
   await queries.updateSessionContentChars(sessionId);
 
-  return { messagesInserted };
+  return { messagesInserted, quarantined };
 }
 
 // Main sync function for Claude Code
@@ -123,6 +169,7 @@ export async function syncClaudeCode(options?: {
     sessionsProcessed: 0,
     messagesInserted: 0,
     skipped: 0,
+    quarantined: 0,
     errors: [],
   };
 
@@ -192,7 +239,30 @@ export async function syncClaudeCode(options?: {
 
           // Parse session
           const session = await parseClaudeSessionFile(sessionFile);
-          if (!session || session.messages.length === 0) {
+          if (!session) {
+            stats.skipped++;
+            continue;
+          }
+
+          // A file with nothing readable still has its unreadable lines
+          // quarantined — skipping here is what used to lose them. There is no
+          // session row to attach them to, so they carry the project and the
+          // session's external id and resolve it on replay.
+          if (session.messages.length === 0) {
+            for (const bad of session.badLines) {
+              await quarantine({
+                source: 'claude_code',
+                filePath: session.filePath,
+                recordKey: `line:${bad.lineNumber}`,
+                lineNumber: bad.lineNumber,
+                sessionExternalId: session.sessionId,
+                projectId,
+                stage: 'parse',
+                payload: bad.raw,
+                error: bad.error,
+              });
+              stats.quarantined++;
+            }
             stats.skipped++;
             continue;
           }
@@ -215,6 +285,7 @@ export async function syncClaudeCode(options?: {
           const result = await syncSession(source.id, projectId, session);
           stats.sessionsProcessed++;
           stats.messagesInserted += result.messagesInserted;
+          stats.quarantined += result.quarantined;
 
           if (stats.sessionsProcessed % 50 === 0) {
             console.log(`Processed ${stats.sessionsProcessed} sessions...`);

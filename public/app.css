@@ -367,6 +367,7 @@ input:focus, select:focus, button:focus-visible {
 label.check {
   display: inline-flex;
   align-items: center;
+  white-space: nowrap;
   gap: 7px;
   font-size: 13px;
   color: var(--muted);

@@ -5,7 +5,7 @@
 // drops off the tunnel still shows the last state it saw instead of an error
 // page. Nothing that mutates — /mcp, /api/ingest — is ever cached.
 
-const VERSION = 'v3'
+const VERSION = 'v4'
 const SHELL_CACHE = `mindmeld-shell-${VERSION}`
 const DATA_CACHE = `mindmeld-data-${VERSION}`
 
@@ -25,6 +25,7 @@ const SHELL = [
   '/js/views/browse.js',
   '/js/views/session.js',
   '/js/views/logs.js',
+  '/js/views/quarantine.js',
   '/icons/icon.svg',
   '/icons/icon-192.png',
   '/icons/icon-512.png',

@@ -82,6 +82,15 @@ export const OverviewView = () => {
       </div>
     <//>
 
+    ${(s?.quarantined ?? 0) > 0 &&
+    html`<button class="row" style="border-color:var(--amber)" onClick=${() => navigate('quarantine')}>
+      <div class="t">${fmtNum(s.quarantined)} record${s.quarantined === 1 ? '' : 's'} quarantined</div>
+      <div class="m">
+        <span>Kept whole and replayable — nothing was dropped.</span>
+        <span class="right faint nowrap">review →</span>
+      </div>
+    </button>`}
+
     <${Card} title="Last 30 days">
       ${activity.loading && html`<${Spinner} />`}
       ${activity.error && html`<div class="faint">activity unavailable</div>`}

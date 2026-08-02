@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import express from 'express'
 import { listProjects, listSessions, getActivity } from './browse.js'
 import { toSearchHit, toDigest, toMessages, toMessage } from './rest.js'
+import { listQuarantine, replayQuarantine, countPending } from '../sync/quarantine.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { hostHeaderValidation } from '@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js'
@@ -382,6 +383,8 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
         AND (e.id IS NULL OR s.content_chars > COALESCE(e.content_chars_at_embed, 0))
     `)
 
+    const quarantined = await countPending()
+
     const latestSession = await query<{
       started_at: string
       title: string
@@ -426,6 +429,7 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
         messages: parseInt(pendingMessages.rows[0]?.count ?? '0', 10),
         sessions: parseInt(pendingSessions.rows[0]?.count ?? '0', 10),
       },
+      quarantined,
       chroma: { collections: chromaCollections },
       latestSession: latest
         ? { startedAt: latest.started_at, title: latest.title, project: latest.project }
@@ -736,6 +740,31 @@ app.get('/api/machines', apiRoute('Machines', async (_req, res) => {
 app.get('/api/activity', apiRoute('Activity', async (req, res) => {
   const days = Math.min(Math.max(intParam(req.query.days, 30), 1), 365)
   res.json({ status: 'ok', days, activity: await getActivity(days) })
+}))
+
+// Records sync could not process, kept whole for replay. A non-zero count means
+// data is waiting, not that data was lost.
+app.get('/api/quarantine', apiRoute('Quarantine', async (req, res) => {
+  const { items, total } = await listQuarantine({
+    limit: Math.min(intParam(req.query.limit, 50), 200),
+    offset: Math.max(intParam(req.query.offset, 0), 0),
+    includeResolved: boolParam(req.query.includeResolved),
+    // Payloads are whole records and can be large, so a listing omits them
+    // unless asked. This is paging, not truncation.
+    withPayload: boolParam(req.query.withPayload),
+  })
+  res.json({ status: 'ok', total, count: items.length, pending: await countPending(), records: items })
+}))
+
+// Retrying is always safe: a record that fails again keeps its row with the new
+// error and a bumped attempt count, and one that succeeds is marked resolved.
+app.post('/api/quarantine/retry', apiRoute('Quarantine retry', async (req, res) => {
+  const id = req.body?.id ?? req.query.id
+  const result = await replayQuarantine({
+    id: id === undefined ? undefined : intParam(id, 0),
+    limit: Math.min(intParam(req.body?.limit ?? req.query.limit, 100), 500),
+  })
+  res.json({ status: 'ok', ...result, pending: await countPending() })
 }))
 
 app.post('/api/ingest', async (req: any, res: any) => {

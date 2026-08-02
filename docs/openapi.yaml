@@ -841,6 +841,134 @@ paths:
                     items:
                       type: string
 
+  /api/quarantine:
+    get:
+      tags: [Monitoring]
+      operationId: listQuarantine
+      summary: Records sync could not process
+      description: |
+        Sync's dead-letter store. Anything that could not be parsed or inserted
+        is kept here whole — the raw bytes, base64 at rest so that nothing in a
+        record can break the write that preserves it — with the file, line,
+        session and error that produced it.
+
+        A non-zero `pending` means data is *waiting*, not that data was lost. It
+        is the number to alert on.
+
+        Payloads are omitted from a listing unless `withPayload` is set; that is
+        paging, not truncation, and a payload is always returned whole.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: includeResolved
+          in: query
+          description: Include records a replay has already recovered. Resolved rows are kept, not deleted.
+          schema:
+            type: boolean
+            default: false
+        - name: withPayload
+          in: query
+          description: Decode and include each record's stored payload.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Quarantined records, most recently attempted first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, total, count, pending, records]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  total:
+                    type: integer
+                    description: Records matching the filter, before paging.
+                  count:
+                    type: integer
+                  pending:
+                    type: integer
+                    description: Unresolved records, regardless of this page's filter.
+                  records:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/QuarantinedRecord'
+
+  /api/quarantine/retry:
+    post:
+      tags: [Monitoring]
+      operationId: retryQuarantine
+      summary: Replay quarantined records
+      description: |
+        Puts records back through exactly the path they failed on — a `parse`
+        payload is re-parsed by the same parser sync uses, an `insert` payload is
+        the parsed record itself — so a replay can never write something a normal
+        sync would not have.
+
+        Safe to call repeatedly. A record that succeeds is marked resolved; one
+        that fails again keeps its row with the new error and a bumped attempt
+        count. Pass `id` to retry one record, or omit it to work through the
+        pending backlog.
+
+        A record whose session does not exist yet is reported, not lost — re-run
+        the sync for that file and retry.
+      parameters:
+        - name: id
+          in: query
+          description: Retry a single record. May also be given in the body.
+          schema:
+            type: integer
+        - name: limit
+          in: query
+          description: Maximum records to attempt when replaying the backlog.
+          schema:
+            type: integer
+            default: 100
+            maximum: 500
+      responses:
+        '200':
+          description: What the replay did.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, attempted, recovered, outcomes, pending]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  attempted:
+                    type: integer
+                  recovered:
+                    type: integer
+                  pending:
+                    type: integer
+                    description: Records still unresolved after this run.
+                  outcomes:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, ok]
+                      properties:
+                        id:
+                          type: integer
+                        ok:
+                          type: boolean
+                        error:
+                          type: string
+
   /mcp:
     post:
       tags: [MCP]
@@ -1009,7 +1137,7 @@ components:
 
     Status:
       type: object
-      required: [status, version, sync, totals, pendingEmbeddings, chroma, latestSession]
+      required: [status, version, sync, totals, pendingEmbeddings, quarantined, chroma, latestSession]
       properties:
         status:
           type: string
@@ -1045,6 +1173,11 @@ components:
               description: |
                 Sessions with no `convo-sessions` embedding, or whose content has
                 grown since the embedding was made.
+        quarantined:
+          type: integer
+          description: |
+            Records sync could not process, kept for replay in
+            `/api/quarantine`. Non-zero means data is waiting, not lost.
         chroma:
           type: object
           required: [collections]
@@ -1728,4 +1861,67 @@ components:
           type: integer
         messages:
           type: integer
+
+    QuarantinedRecord:
+      type: object
+      required:
+        [id, source, machine, filePath, recordKey, lineNumber, sessionExternalId, sessionId, projectId, stage, error, attempts, firstSeenAt, lastAttemptAt, resolvedAt]
+      properties:
+        id:
+          type: integer
+        source:
+          type: string
+        machine:
+          description: The computer whose sync produced the failure.
+          oneOf:
+            - type: 'null'
+            - type: string
+        filePath:
+          type: string
+        recordKey:
+          type: string
+          description: |
+            Identifies the record within its file — `line:<n>` for a parse
+            failure, `uuid:<id>` for an insert failure. Re-running sync updates
+            the same row rather than piling up duplicates.
+        lineNumber:
+          oneOf:
+            - type: 'null'
+            - type: integer
+        sessionExternalId:
+          oneOf:
+            - type: 'null'
+            - type: string
+        sessionId:
+          description: Null when the record failed before its session existed; replay resolves it then.
+          oneOf:
+            - type: 'null'
+            - type: integer
+        projectId:
+          oneOf:
+            - type: 'null'
+            - type: integer
+        stage:
+          type: string
+          enum: [parse, insert]
+          description: '`parse` — the raw source line. `insert` — the parsed record.'
+        payload:
+          type: string
+          description: The stored record, decoded. Present only when `withPayload` was set.
+        error:
+          type: string
+        attempts:
+          type: integer
+        firstSeenAt:
+          type: string
+          format: date-time
+        lastAttemptAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          description: Set when a replay succeeded. Resolved rows are kept for the record of what fixed it.
+          oneOf:
+            - type: 'null'
+            - type: string
+              format: date-time
 

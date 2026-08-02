@@ -30,6 +30,8 @@
     "sync:embeddings": "tsx src/index.ts embeddings",
     "compute:centroids": "tsx scripts/compute-centroids.ts",
     "mark:warmups": "tsx scripts/mark-warmups.ts",
+    "quarantine": "tsx scripts/retry-quarantine.ts",
+    "icons": "node scripts/make-icons.mjs",
     "search": "tsx scripts/search.ts",
     "stats": "tsx scripts/stats.ts",
     "db:migrate": "tsx scripts/migrate.ts",

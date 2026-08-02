@@ -84,6 +84,11 @@ export interface ParsedSession {
   modelUsed?: string;
   totalInputTokens: number;
   totalOutputTokens: number;
+  // Lines this parser could not read. Never empty-by-omission: the caller is
+  // expected to quarantine them.
+  badLines: BadLine[];
+  // uuid → source line number, for pinning a failed insert to the file.
+  lineNumbers: Map<string, number>;
 }
 
 export interface ParsedMessage {
@@ -172,6 +177,78 @@ function extractToolUsage(message: ClaudeMessage): { name: string; input: object
   return undefined;
 }
 
+// Metadata a line contributes to its session. Collected as the file is walked;
+// the first non-empty value of each wins.
+export interface LineMetadata {
+  sessionId?: string;
+  cwd?: string;
+  gitBranch?: string;
+  claudeVersion?: string;
+  modelUsed?: string;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export type ParsedLine =
+  | { kind: 'message'; message: ParsedMessage; metadata: LineMetadata }
+  // A line that carries no message — session metadata, a file snapshot, an
+  // unusable timestamp. Skipping is correct and is not a failure.
+  | { kind: 'skip'; reason: string };
+
+// A line that could not be read at all. The raw text is kept so the record can
+// be quarantined and replayed rather than dropped.
+export interface BadLine {
+  lineNumber: number;
+  raw: string;
+  error: string;
+}
+
+// One JSONL line → one message, in isolation. Pulled out of the file walk so
+// that the exact same code can replay a single quarantined record later; a
+// record that failed once must not take a second, different path back in.
+export function parseClaudeLine(line: string, sequenceNum: number): ParsedLine {
+  const parsed = JSON.parse(line) as ClaudeMessage;
+
+  if (!['user', 'assistant'].includes(parsed.type))
+    return { kind: 'skip', reason: `not a message (type: ${parsed.type})` };
+
+  const timestamp = parseTimestamp(parsed.timestamp);
+  if (!timestamp) return { kind: 'skip', reason: `invalid timestamp: ${parsed.timestamp}` };
+
+  const toolUsage = extractToolUsage(parsed);
+
+  return {
+    kind: 'message',
+    metadata: {
+      sessionId: parsed.sessionId,
+      cwd: parsed.cwd,
+      gitBranch: parsed.gitBranch,
+      claudeVersion: parsed.version,
+      modelUsed: parsed.type === 'assistant' ? parsed.message?.model : undefined,
+      inputTokens: parsed.message?.usage?.input_tokens ?? 0,
+      outputTokens: parsed.message?.usage?.output_tokens ?? 0,
+    },
+    message: {
+      uuid: parsed.uuid,
+      parentUuid: parsed.parentUuid,
+      role: parsed.type === 'user' ? 'user' : toolUsage ? 'tool' : 'assistant',
+      contentText: extractTextContent(parsed),
+      contentJson: parsed.message,
+      toolName: toolUsage?.name,
+      toolInput: toolUsage?.input,
+      thinkingText: extractThinkingContent(parsed),
+      model: parsed.message?.model,
+      inputTokens: parsed.message?.usage?.input_tokens,
+      outputTokens: parsed.message?.usage?.output_tokens,
+      cacheCreationTokens: parsed.message?.usage?.cache_creation_input_tokens,
+      cacheReadTokens: parsed.message?.usage?.cache_read_input_tokens,
+      timestamp,
+      sequenceNum,
+      isSidechain: parsed.isSidechain ?? false,
+    },
+  };
+}
+
 // Parse a single JSONL file
 export async function parseClaudeSessionFile(filePath: string): Promise<ParsedSession | null> {
   const fileStats = await stat(filePath);
@@ -183,6 +260,10 @@ export async function parseClaudeSessionFile(filePath: string): Promise<ParsedSe
   const sessionId = isAgent ? fileName : fileName;
 
   const messages: ParsedMessage[] = [];
+  const badLines: BadLine[] = [];
+  // uuid → the line it came from, so a message that fails to insert can point at
+  // its exact place in the source file.
+  const lineNumbers = new Map<string, number>();
   let sequenceNum = 0;
   let sessionIdFromContent: string | undefined;
   let cwd: string | undefined;
@@ -198,71 +279,49 @@ export async function parseClaudeSessionFile(filePath: string): Promise<ParsedSe
     crlfDelay: Infinity,
   });
 
+  let lineNumber = 0;
+
   for await (const line of rl) {
+    lineNumber++;
     if (!line.trim()) continue;
 
     try {
-      const parsed = JSON.parse(line) as ClaudeMessage;
-
-      // Skip non-message entries (metadata types)
-      const messageTypes = ['user', 'assistant'];
-      if (!messageTypes.includes(parsed.type)) continue;
-
-      // Extract session metadata from first message
-      if (!sessionIdFromContent && parsed.sessionId) {
-        sessionIdFromContent = parsed.sessionId;
-      }
-      if (!cwd && parsed.cwd) cwd = parsed.cwd;
-      if (!gitBranch && parsed.gitBranch) gitBranch = parsed.gitBranch;
-      if (!claudeVersion && parsed.version) claudeVersion = parsed.version;
-
-      // Extract model from assistant messages
-      if (parsed.type === 'assistant' && parsed.message?.model && !modelUsed) {
-        modelUsed = parsed.message.model;
-      }
-
-      // Extract tokens
-      if (parsed.message?.usage) {
-        totalInputTokens += parsed.message.usage.input_tokens ?? 0;
-        totalOutputTokens += parsed.message.usage.output_tokens ?? 0;
-      }
-
-      const toolUsage = extractToolUsage(parsed);
-
-      // Validate timestamp - skip messages with invalid timestamps
-      const timestamp = parseTimestamp(parsed.timestamp);
-      if (!timestamp) {
-        console.warn(`Skipping message with invalid timestamp in ${filePath}: ${parsed.timestamp}`);
+      const result = parseClaudeLine(line, sequenceNum);
+      if (result.kind === 'skip') {
+        // Only an unusable timestamp is worth reporting; metadata lines are
+        // skipped by the thousand and are entirely normal.
+        if (result.reason.startsWith('invalid timestamp'))
+          console.warn(`Skipping message in ${filePath}: ${result.reason}`);
         continue;
       }
 
-      const parsedMessage: ParsedMessage = {
-        uuid: parsed.uuid,
-        parentUuid: parsed.parentUuid,
-        role: parsed.type === 'user' ? 'user' : toolUsage ? 'tool' : 'assistant',
-        contentText: extractTextContent(parsed),
-        contentJson: parsed.message,
-        toolName: toolUsage?.name,
-        toolInput: toolUsage?.input,
-        thinkingText: extractThinkingContent(parsed),
-        model: parsed.message?.model,
-        inputTokens: parsed.message?.usage?.input_tokens,
-        outputTokens: parsed.message?.usage?.output_tokens,
-        cacheCreationTokens: parsed.message?.usage?.cache_creation_input_tokens,
-        cacheReadTokens: parsed.message?.usage?.cache_read_input_tokens,
-        timestamp,
-        sequenceNum: sequenceNum++,
-        isSidechain: parsed.isSidechain ?? false,
-      };
+      const { message, metadata } = result;
+      sessionIdFromContent ??= metadata.sessionId;
+      cwd ??= metadata.cwd;
+      gitBranch ??= metadata.gitBranch;
+      claudeVersion ??= metadata.claudeVersion;
+      modelUsed ??= metadata.modelUsed;
+      totalInputTokens += metadata.inputTokens;
+      totalOutputTokens += metadata.outputTokens;
 
-      messages.push(parsedMessage);
+      sequenceNum++;
+      messages.push(message);
+      lineNumbers.set(message.uuid, lineNumber);
     } catch (e) {
-      // Skip malformed lines
-      console.warn(`Failed to parse line in ${filePath}:`, e);
+      // Kept, not dropped: the raw line goes to the caller, which quarantines it
+      // so a line this parser cannot read is still recoverable later.
+      badLines.push({
+        lineNumber,
+        raw: line,
+        error: e instanceof Error ? e.message : String(e),
+      });
+      console.warn(`Failed to parse line ${lineNumber} in ${filePath}:`, e);
     }
   }
 
-  if (messages.length === 0) return null;
+  // A file whose every line failed still has to report those failures, so the
+  // caller can quarantine them — returning null would lose them silently.
+  if (messages.length === 0 && badLines.length === 0) return null;
 
   // Sort by timestamp
   messages.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
@@ -291,6 +350,8 @@ export async function parseClaudeSessionFile(filePath: string): Promise<ParsedSe
     modelUsed,
     totalInputTokens,
     totalOutputTokens,
+    badLines,
+    lineNumbers,
   };
 }
 
