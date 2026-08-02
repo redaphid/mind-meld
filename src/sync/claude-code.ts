@@ -95,6 +95,34 @@ export async function discoverSessionFiles(projectPath: string): Promise<Discove
   return { files, errors };
 }
 
+// Recover a subagent's parent external id from its stored file path.
+//
+// Live sync does NOT use this — it uses the `sessionId` recorded inside the
+// agent file, which is authoritative. This exists for rows written before
+// linkage shipped: incremental sync skips them forever (unchanged mtime), so
+// raw_file_path is the only place their parent survives. The two agree on 203
+// of the 204 subagent transcripts checked on disk; the one exception carries
+// no sessionId on any line and yields no link either way.
+//
+// A doubly-nested transcript (an agent spawned by an agent) returns null
+// rather than a guess. Live sync resolves the in-file `sessionId`, and there
+// is no evidence about whether that names the spawning agent or the root
+// conversation — the two derivations would disagree and only one can be right.
+// Zero such transcripts exist across the 210 checked on this host, so there is
+// nothing to validate a guess against, and a wrong parent is worse than none:
+// a reader traverses it.
+export function parentExternalIdFromRawPath(rawFilePath: string | null | undefined): string | null {
+  if (!rawFilePath) return null;
+  const segments = rawFilePath.replace(/\\/g, '/').split('/');
+  const markers = segments.reduce<number[]>(
+    (found, segment, index) => (segment === 'subagents' ? [...found, index] : found),
+    []
+  );
+  if (markers.length !== 1) return null;
+  if (markers[0] < 1) return null;
+  return segments[markers[0] - 1] || null;
+}
+
 export type SessionSyncResult = {
   messagesInserted: number;
   // Records preserved in sync_quarantine — confirmed written, not just attempted.
@@ -146,6 +174,29 @@ export async function syncSession(
   // quarantined against the session's external id and replays once the
   // session row exists — file_modified_at is never advanced on this path, so
   // the next sync retries the file.
+  // Link a subagent transcript to the conversation that spawned it (#48).
+  // The parser already carries the parent's *external* id — the `sessionId`
+  // recorded inside an agent file, which is the spawning session, never the
+  // agent's own filename-derived id — so this only has to resolve it to a row.
+  //
+  // Scoped to the same project because external ids are only unique per
+  // project, and a subagent always lives under its parent's project directory.
+  //
+  // An unresolved parent is a missing link, never a failed session: discovery
+  // can still reach a subagent whose parent has not been indexed on this host
+  // at all. It stays NULL, and a later run that can resolve it overwrites the
+  // NULL — COALESCE($5, existing) takes the new value whenever it is non-NULL.
+  //
+  // getLiveSessionByExternalId, not getSessionByExternalId: a soft-deleted
+  // parent must not be linked. Tombstones are excluded from search, so the
+  // link would be a pointer into data no reader can open. The backfill script
+  // applies the same rule, so both halves agree about the same row.
+  let parentSessionId: number | undefined;
+  if (session.parentSessionId) {
+    const parent = await queries.getLiveSessionByExternalId(projectId, session.parentSessionId);
+    parentSessionId = parent?.id;
+  }
+
   let sessionId: number;
   try {
     sessionId = await queries.upsertSession({
@@ -158,6 +209,7 @@ export async function syncSession(
       // derives a title from the summary instead, and shows none until then.
       title: undefined,
       isAgent: session.isAgent,
+      parentSessionId,
       agentId: session.agentId,
       claudeVersion: session.claudeVersion,
       modelUsed: session.modelUsed,
@@ -332,7 +384,26 @@ export async function syncClaudeCode(options?: {
         stats.errors.push(walkError);
       }
 
-      for (const sessionFile of discovered.files) {
+      // Parents before children, so the parent row exists when a subagent
+      // resolves its link (#48). The walk is depth-first and `<sessionId>/`
+      // sorts before `<sessionId>.jsonl`, so raw discovery order reaches
+      // subagents *first* and every link would resolve to nothing on a fresh
+      // index.
+      //
+      // Depth rather than a plain is-agent flag only because depth is the
+      // thing that actually orders parents before children; it is not a claim
+      // that deeper nesting is handled end-to-end. It is not: a doubly-nested
+      // transcript's parent is not derivable today (see
+      // parentExternalIdFromRawPath) and none exist on this host. Ordering is
+      // simply correct for the case that does exist and harmless for the rest
+      // — the sort is per-project and stable, so nothing else about sync moves.
+      const nestingDepth = (filePath: string) =>
+        filePath.replace(/\\/g, '/').split('/subagents/').length - 1;
+      const sessionFiles = [...discovered.files].sort(
+        (a, b) => nestingDepth(a) - nestingDepth(b)
+      );
+
+      for (const sessionFile of sessionFiles) {
         try {
           const fileStat = await stat(sessionFile);
 
