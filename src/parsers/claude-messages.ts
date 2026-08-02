@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 import { stat } from 'fs/promises';
 import { basename, dirname, join } from 'path';
 import { normalizeDeep } from '../utils/text-encoding.js';
+import { stripScaffolding } from '../utils/strip-scaffolding.js';
 
 // Types matching Claude Code JSONL format
 export interface ClaudeMessage {
@@ -111,18 +112,19 @@ export interface ParsedMessage {
   isSidechain: boolean;
 }
 
-// Extract text content from message
-const HOOK_INJECTION_PATTERN =
-  /<system-reminder>[\s\S]*?(?:UserPromptSubmit hook additional context|SessionStart hook additional context|ACCESSIBILITY ACCOMMODATION|task-notification)[\s\S]*?<\/system-reminder>/g;
-
-const stripHookInjections = (text: string): string =>
-  text.replace(HOOK_INJECTION_PATTERN, '').trim();
-
+// Extract text content from message.
+//
+// Scaffolding is removed here, at the parse boundary, so that the stored
+// content_text is what a human actually typed — nothing downstream has to know
+// that slash-command XML or hook-injected reminders ever existed (issue #37).
+//
+// This supersedes an earlier pattern that matched only four *named* hook
+// varieties of <system-reminder>; generic ones were left in and embedded.
 function extractTextContent(message: ClaudeMessage): string {
   if (!message.message) return '';
 
   const content = message.message.content;
-  if (typeof content === 'string') return stripHookInjections(content);
+  if (typeof content === 'string') return stripScaffolding(content);
 
   if (Array.isArray(content)) {
     const parts: string[] = [];
@@ -142,7 +144,7 @@ function extractTextContent(message: ClaudeMessage): string {
         }
       }
     }
-    return stripHookInjections(parts.join('\n'));
+    return stripScaffolding(parts.join('\n'));
   }
 
   return '';
