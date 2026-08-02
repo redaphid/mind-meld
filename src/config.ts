@@ -90,10 +90,6 @@ export const config = {
       path: expandPath(getEnv("CLAUDE_CODE_PATH", "~/.claude")),
       name: "claude_code",
     },
-    cursor: {
-      path: expandPath(getEnv("CURSOR_PATH", "~/.cursor/chats")),
-      name: "cursor",
-    },
   },
 
   // Sync

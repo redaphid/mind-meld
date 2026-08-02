@@ -47,9 +47,6 @@ Pulls the published GHCR images and starts:
 | `mindmeld-warmups` | `mindmeld-warmups` | — | Flags warmup/automated sessions every 6h |
 | `mindmeld-cloudflared` | `cloudflare/cloudflared` | — | Optional; `--profile tunnel` only |
 
-**Linux:** set your Cursor path in `.env` before starting —
-`CURSOR_GLOBALSTATE_PATH=~/.config/Cursor/User/globalStorage`.
-
 ### Verify
 
 ```bash
@@ -92,7 +89,6 @@ logs (`journalctl --user -u mindmeld-sync`, or launchd's log file) instead.
 | Source | macOS | Linux |
 | --- | --- | --- |
 | Claude Code | `~/.claude` | `~/.claude` |
-| Cursor | `~/Library/Application Support/Cursor/User/globalStorage` | `~/.config/Cursor/User/globalStorage` |
 
 Only what is **currently on disk**. Claude Code rotates old transcripts away, so
 a fresh machine usually holds only a handful of sessions; the index is the
@@ -234,15 +230,6 @@ just `127.0.0.1`.
 ### Permission denied reading conversations
 
 Docker Desktop on macOS: Settings → Resources → File Sharing → add `~/.claude`.
-
-### Cursor conversations not syncing
-
-Wrong path. The CLI reads `CURSOR_PATH`; `docker-compose.local.yml`'s bind mount
-reads `CURSOR_GLOBALSTATE_PATH`. On Linux:
-
-```bash
-echo "CURSOR_GLOBALSTATE_PATH=~/.config/Cursor/User/globalStorage" >> .env
-```
 
 ### Port already in use
 

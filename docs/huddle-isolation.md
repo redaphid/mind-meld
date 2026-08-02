@@ -6,7 +6,7 @@ Run a separate huddle-only mindmeld instance to keep sensitive transcripts isola
 
 ```
 PUBLIC (Cloudflare tunnel) - EXISTING
-├── Claude Code + Cursor data
+├── Claude Code data
 ├── mindmeld on port 3847
 └── Tunneled for coworker access
 

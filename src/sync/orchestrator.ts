@@ -1,5 +1,4 @@
 import { syncClaudeCode, syncClaudeHistory } from './claude-code.js';
-import { syncCursor } from './cursor.js';
 import { generatePendingEmbeddings, updateAggregateEmbeddings, AGGREGATE_BATCH_SIZE } from '../embeddings/batch.js';
 import { ensureEmbeddingModel } from '../embeddings/ollama.js';
 import { ensureSummarizeModel } from '../embeddings/summarize.js';
@@ -16,10 +15,6 @@ export interface FullSyncResult {
     sessionsProcessed: number;
     messagesInserted: number;
   };
-  cursor: {
-    conversationsProcessed: number;
-    messagesInserted: number;
-  };
   embeddings: {
     messagesEmbedded: number;
     sessionsUpdated: number;
@@ -30,7 +25,7 @@ export interface FullSyncResult {
 export async function runFullSync(options?: {
   incremental?: boolean;
   skipEmbeddings?: boolean;
-  sources?: ('claude_code' | 'cursor')[];
+  sources?: 'claude_code'[];
 }): Promise<FullSyncResult> {
   const startTime = new Date();
   const errors: string[] = [];
@@ -52,12 +47,11 @@ export async function runFullSync(options?: {
     endTime: new Date(),
     durationMs: 0,
     claudeCode: { projectsProcessed: 0, sessionsProcessed: 0, messagesInserted: 0 },
-    cursor: { conversationsProcessed: 0, messagesInserted: 0 },
     embeddings: { messagesEmbedded: 0, sessionsUpdated: 0 },
     errors: [],
   };
 
-  const sourcesToSync = options?.sources ?? ['claude_code', 'cursor'];
+  const sourcesToSync = options?.sources ?? ['claude_code'];
 
   // Sync Claude Code
   if (sourcesToSync.includes('claude_code')) {
@@ -72,23 +66,6 @@ export async function runFullSync(options?: {
       errors.push(...claudeStats.errors);
     } catch (e) {
       const error = `Claude Code sync failed: ${e}`;
-      console.error(error);
-      errors.push(error);
-    }
-  }
-
-  // Sync Cursor
-  if (sourcesToSync.includes('cursor')) {
-    try {
-      console.log('\n--- Syncing Cursor ---');
-      const cursorStats = await syncCursor({ incremental: options?.incremental });
-      result.cursor = {
-        conversationsProcessed: cursorStats.conversationsProcessed,
-        messagesInserted: cursorStats.messagesInserted,
-      };
-      errors.push(...cursorStats.errors);
-    } catch (e) {
-      const error = `Cursor sync failed: ${e}`;
       console.error(error);
       errors.push(error);
     }
@@ -130,7 +107,6 @@ export async function runFullSync(options?: {
   console.log('Sync Summary:');
   console.log(`  Duration: ${(result.durationMs / 1000).toFixed(1)}s`);
   console.log(`  Claude Code: ${result.claudeCode.sessionsProcessed} sessions, ${result.claudeCode.messagesInserted} messages`);
-  console.log(`  Cursor: ${result.cursor.conversationsProcessed} conversations, ${result.cursor.messagesInserted} messages`);
   console.log(`  Embeddings: ${result.embeddings.messagesEmbedded} embedded`);
   if (errors.length > 0) {
     console.log(`  Errors: ${errors.length}`);
