@@ -181,6 +181,12 @@ export const queries = {
       ON CONFLICT (project_id, external_id)
       DO UPDATE SET
         title = COALESCE($3, sessions.title),
+        -- Every subagent transcript already had a row before linkage existed
+        -- (#48), so the link only ever arrives on this path. COALESCE, not a
+        -- bare assignment: a run that reaches a subagent before its parent is
+        -- indexed passes NULL, and that must not clear a link an earlier run
+        -- established.
+        parent_session_id = COALESCE($5, sessions.parent_session_id),
         model_used = COALESCE($8, sessions.model_used),
         file_modified_at = $12,
         started_at = COALESCE($13, sessions.started_at),

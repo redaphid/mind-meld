@@ -145,6 +145,24 @@ export async function syncSession(
   // quarantined against the session's external id and replays once the
   // session row exists — file_modified_at is never advanced on this path, so
   // the next sync retries the file.
+  // Link a subagent transcript to the conversation that spawned it (#48).
+  // The parser already carries the parent's *external* id — the `sessionId`
+  // recorded inside an agent file, which is the spawning session, never the
+  // agent's own filename-derived id — so this only has to resolve it to a row.
+  //
+  // Scoped to the same project because external ids are only unique per
+  // project, and a subagent always lives under its parent's project directory.
+  //
+  // An unresolved parent is a missing link, never a failed session: discovery
+  // can still reach a subagent whose parent has not been indexed on this host
+  // at all. It stays NULL and a later run picks it up, because the upsert
+  // COALESCEs the value rather than overwriting it.
+  let parentSessionId: number | undefined;
+  if (session.parentSessionId) {
+    const parent = await queries.getSessionByExternalId(projectId, session.parentSessionId);
+    parentSessionId = parent?.id;
+  }
+
   let sessionId: number;
   try {
     sessionId = await queries.upsertSession({
@@ -152,6 +170,7 @@ export async function syncSession(
       externalId: session.sessionId,
       title: session.messages[0]?.contentText?.slice(0, 200),
       isAgent: session.isAgent,
+      parentSessionId,
       agentId: session.agentId,
       claudeVersion: session.claudeVersion,
       modelUsed: session.modelUsed,
@@ -316,7 +335,20 @@ export async function syncClaudeCode(options?: {
         stats.errors.push(walkError);
       }
 
-      for (const sessionFile of discovered.files) {
+      // Parents before children, so the parent row exists when a subagent
+      // resolves its link (#48). The walk is depth-first and `<sessionId>/`
+      // sorts before `<sessionId>.jsonl`, so raw discovery order reaches
+      // subagents *first* and every link would resolve to nothing on a fresh
+      // index. Nesting depth is the ordering key rather than "is it an agent",
+      // because agents spawn agents: a transcript under two `subagents/`
+      // segments has an agent for a parent and must follow it.
+      const nestingDepth = (filePath: string) =>
+        filePath.replace(/\\/g, '/').split('/subagents/').length - 1;
+      const sessionFiles = [...discovered.files].sort(
+        (a, b) => nestingDepth(a) - nestingDepth(b)
+      );
+
+      for (const sessionFile of sessionFiles) {
         try {
           const fileStat = await stat(sessionFile);
 
