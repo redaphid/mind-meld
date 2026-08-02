@@ -178,7 +178,7 @@ describe('every advertised tool executes', () => {
           { source_name: 'claude_code', data_class: 'coding', project_count: 4, session_count: 10, message_count: 900 },
           { source_name: 'slack', data_class: 'coding', project_count: 1, session_count: 5, message_count: 80 },
         ],
-        rowCount: 3,
+        rowCount: 2,
       } as never)
       .mockResolvedValueOnce({
         rows: [{ name: 'mind-meld', session_count: 7, message_count: 500 }],
