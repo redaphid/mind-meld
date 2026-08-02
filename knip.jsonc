@@ -11,6 +11,11 @@
     // tsx/node entry point, so scan them all as entries.
     "scripts/*.ts",
     "scripts/*.mjs",
+    // The coordinator/authorship toolchain. Each file is a standalone entry
+    // point invoked by a shell script, an agent-runtime hook, or a person —
+    // never imported by src — so knip cannot discover it on its own.
+    "scripts/coord/*.mjs",
+    "scripts/coord/hooks/*.mjs",
     // Ratchet checkers, run by CI and pnpm quality:*.
     "scripts/quality/*.ts",
     // Comms-protocol enforcement (issue #75). These are provider-agnostic

@@ -62,6 +62,34 @@ describe('marker.mjs CLI', () => {
     expect(r.stdout).toContain('is this done?');
   });
 
+  it('accepts JSONL, because `gh api --paginate --jq .[]` streams one object per line', () => {
+    // `gh api --paginate` concatenates one JSON array per page; piping through
+    // `--jq '.[]'` flattens that to JSONL, which is what lib.sh sends us.
+    const jsonl = [
+      {
+        id: 1,
+        user: { login: 'owner' },
+        author_association: 'OWNER',
+        created_at: '2026-08-01T01:00:00Z',
+        html_url: 'https://example.invalid/1',
+        body: 'still waiting on this',
+      },
+      {
+        id: 2,
+        user: { login: 'owner' },
+        author_association: 'OWNER',
+        created_at: '2026-08-01T02:00:00Z',
+        html_url: 'https://example.invalid/2',
+        body: `${ROBOT} **Agent (Mira):** pushed`,
+      },
+    ]
+      .map((o) => JSON.stringify(o))
+      .join('\n');
+    const r = run(MARKER, ['unanswered', '--owner', 'owner'], jsonl);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('still waiting on this');
+  });
+
   it('survives garbage on stdin without failing the caller', () => {
     const r = run(MARKER, ['unanswered', '--owner', 'owner'], 'not json');
     expect(r.status).toBe(0);

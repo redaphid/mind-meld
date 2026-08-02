@@ -30,6 +30,7 @@
     "verify": "tsx src/index.ts verify",
     "compute:centroids": "tsx scripts/compute-centroids.ts",
     "mark:warmups": "tsx scripts/mark-warmups.ts",
+    "marker:reconcile": "node scripts/coord/marker-reconcile.mjs",
     "quarantine": "tsx scripts/retry-quarantine.ts",
     "reconcile:labels": "node scripts/comms/reconcile-labels.mjs",
     "icons": "node scripts/make-icons.mjs",

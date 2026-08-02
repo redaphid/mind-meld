@@ -220,6 +220,35 @@ function readStdin() {
   }
 }
 
+/**
+ * Comments from stdin, as either a JSON array or JSONL.
+ *
+ * `gh api --paginate` emits one array PER PAGE, so callers flatten it with
+ * `--jq '.[]'` and hand us a stream of objects. Accepting both means a thread
+ * with more than 30 comments does not silently parse as nothing — which would
+ * report an empty inbox and look exactly like "nobody is waiting on us".
+ */
+function parseComments(raw) {
+  const text = (raw ?? '').trim();
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    /* fall through to JSONL */
+  }
+  const out = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch {
+      process.stderr.write('marker: skipping an unparseable comment record\n');
+    }
+  }
+  return out;
+}
+
 function argValue(argv, flag) {
   const i = argv.indexOf(flag);
   return i === -1 ? undefined : argv[i + 1];
@@ -253,13 +282,7 @@ function main(argv) {
     }
     case 'unanswered': {
       const owner = argValue(rest, '--owner');
-      let comments = [];
-      try {
-        comments = JSON.parse(readStdin() || '[]');
-      } catch {
-        process.stderr.write('marker: could not parse comment JSON on stdin\n');
-        return 0; // never wedge a caller on our own parse failure
-      }
+      const comments = parseComments(readStdin());
       for (const c of unansweredOperatorComments(comments, owner)) {
         const first = String(c.body ?? '').split('\n')[0];
         process.stdout.write(`- [${c.created_at}] ${c.html_url}\n  ${first}\n`);
@@ -268,14 +291,10 @@ function main(argv) {
     }
     case 'annotate': {
       // Adds `{marker: {...}}` to each comment on stdin, for inbox-style tools.
-      let items = [];
-      try {
-        items = JSON.parse(readStdin() || '[]');
-      } catch {
-        process.stderr.write('marker: could not parse JSON on stdin\n');
-        return 0;
-      }
-      const out = items.map((c) => ({ ...c, marker: classifyComment(c?.body) }));
+      const out = parseComments(readStdin()).map((c) => ({
+        ...c,
+        marker: classifyComment(c?.body),
+      }));
       process.stdout.write(`${JSON.stringify(out)}\n`);
       return 0;
     }

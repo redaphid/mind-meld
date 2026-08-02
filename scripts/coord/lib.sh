@@ -44,14 +44,17 @@ owner_login() {
 
 # Operator comments on an issue that arrived after the coordinator's last
 # reply — i.e. the unanswered inbox. Mechanical: no judgement, no memory.
+#
+# Authorship is decided by marker.mjs, the one definition every tool shares.
+# This used to be a jq filter treating ANY body starting with 🤖 as the
+# coordinator having replied, which let a subagent's progress comment BURY a
+# question the operator was still waiting on — and it could not see past the
+# `<!-- coord-heartbeat -->` that opens every heartbeat, so the coordinator's
+# own heartbeat came back as an unanswered operator message. Only a
+# `🤖 **Coordinator vN:**` marker closes the loop now.
 unanswered_operator_comments() {
   local issue="$1" owner
   owner="$(owner_login)"
-  gh api "repos/$REPO/issues/$issue/comments" --paginate --jq "
-    [ .[] | select(.user.login == \"$owner\" and .author_association == \"OWNER\") ]
-    | (map(select(.body | startswith(\"🤖\"))) | last | .created_at) as \$lastReply
-    | map(select((.body | startswith(\"🤖\") | not)
-                 and (\$lastReply == null or .created_at > \$lastReply)))
-    | .[] | \"- [\\(.created_at)] \\(.html_url)\\n  \\(.body | split(\"\n\")[0])\"
-  "
+  gh api "repos/$REPO/issues/$issue/comments" --paginate --jq '.[]' \
+    | node "$(dirname "${BASH_SOURCE[0]}")/marker.mjs" unanswered --owner "$owner"
 }
