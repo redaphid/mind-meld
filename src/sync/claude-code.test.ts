@@ -1,27 +1,66 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
+import { mkdtemp, mkdir, writeFile, rm } from 'fs/promises'
+import { tmpdir } from 'os'
+import { join } from 'path'
 
-const { upsertSession, insertMessage, updateSessionStats, updateSessionContentChars, quarantineMock } =
-  vi.hoisted(() => ({
-    upsertSession: vi.fn(),
-    insertMessage: vi.fn(),
-    updateSessionStats: vi.fn(),
-    updateSessionContentChars: vi.fn(),
-    quarantineMock: vi.fn(),
-  }))
+const {
+  getSourceByName,
+  upsertProject,
+  getSessionByExternalId,
+  upsertSession,
+  insertMessage,
+  updateSessionStats,
+  updateSessionContentChars,
+  updateSyncState,
+  quarantineMock,
+} = vi.hoisted(() => ({
+  getSourceByName: vi.fn(),
+  upsertProject: vi.fn(),
+  getSessionByExternalId: vi.fn(),
+  upsertSession: vi.fn(),
+  insertMessage: vi.fn(),
+  updateSessionStats: vi.fn(),
+  updateSessionContentChars: vi.fn(),
+  updateSyncState: vi.fn(),
+  quarantineMock: vi.fn(),
+}))
 
 vi.mock('../db/postgres.js', () => ({
-  queries: { upsertSession, insertMessage, updateSessionStats, updateSessionContentChars },
+  query: vi.fn(),
+  queries: {
+    getSourceByName,
+    upsertProject,
+    getSessionByExternalId,
+    upsertSession,
+    insertMessage,
+    updateSessionStats,
+    updateSessionContentChars,
+    updateSyncState,
+  },
 }))
 vi.mock('./quarantine.js', () => ({ quarantine: quarantineMock }))
-vi.mock('../config.js', () => ({ config: { machine: 'test-box', sources: { claudeCode: { path: '/nope' } } } }))
+vi.mock('../config.js', () => ({
+  config: { machine: 'test-box', sources: { claudeCode: { path: '/nope' } } },
+}))
 
-const { syncSession } = await import('./claude-code.js')
+const { syncSession, discoverSessionFiles, syncClaudeCode } = await import('./claude-code.js')
+const { config } = await import('../config.js')
+
+const dirs: string[] = []
+
+afterAll(async () => {
+  await Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true })))
+})
 
 beforeEach(() => {
+  getSourceByName.mockReset().mockResolvedValue({ id: 1 })
+  upsertProject.mockReset().mockResolvedValue(10)
+  getSessionByExternalId.mockReset().mockResolvedValue(null)
   upsertSession.mockReset().mockResolvedValue(77)
   insertMessage.mockReset().mockResolvedValue(1)
   updateSessionStats.mockReset().mockResolvedValue(undefined)
   updateSessionContentChars.mockReset().mockResolvedValue(undefined)
+  updateSyncState.mockReset().mockResolvedValue(undefined)
   quarantineMock.mockReset().mockResolvedValue(1)
 })
 
@@ -134,6 +173,114 @@ describe('syncSession', () => {
     expect(result.quarantined).toBe(1)
     expect(quarantineMock).toHaveBeenCalledWith(
       expect.objectContaining({ recordKey: 'line:9', sessionId: 77, stage: 'parse', payload: '{"broken' })
+    )
+  })
+})
+
+describe('discoverSessionFiles', () => {
+  // Newer Claude Code stores subagent transcripts in nested directories
+  // (`<sessionId>/subagents/agent-*.jsonl`, deeper when agents spawn agents).
+  // A top-level-only walk silently missed all of them — on one machine, 161
+  // of 193 session files. Discovery has to be recursive.
+  it('finds session files at every depth, not just the project root', async () => {
+    const project = await mkdtemp(join(tmpdir(), 'mindmeld-project-'))
+    dirs.push(project)
+
+    await writeFile(join(project, 'top-level.jsonl'), '{}\n')
+    await mkdir(join(project, 'sess-1', 'subagents'), { recursive: true })
+    await writeFile(join(project, 'sess-1', 'subagents', 'agent-abc.jsonl'), '{}\n')
+    await mkdir(join(project, 'sess-1', 'subagents', 'agent-abc', 'subagents'), {
+      recursive: true,
+    })
+    await writeFile(
+      join(project, 'sess-1', 'subagents', 'agent-abc', 'subagents', 'agent-def.jsonl'),
+      '{}\n'
+    )
+    await writeFile(join(project, 'not-a-session.txt'), 'ignore me\n')
+
+    const discovered = await discoverSessionFiles(project)
+
+    expect(discovered.errors).toEqual([])
+    expect(discovered.files.sort()).toEqual(
+      [
+        join(project, 'top-level.jsonl'),
+        join(project, 'sess-1', 'subagents', 'agent-abc.jsonl'),
+        join(project, 'sess-1', 'subagents', 'agent-abc', 'subagents', 'agent-def.jsonl'),
+      ].sort()
+    )
+  })
+
+  // A walk failure must be an error the caller can count toward the exit
+  // code, not a console line and a silently shorter file list.
+  it('reports an unreadable directory as an error instead of throwing', async () => {
+    const discovered = await discoverSessionFiles('/does/not/exist')
+    expect(discovered.files).toEqual([])
+    expect(discovered.errors).toHaveLength(1)
+    expect(discovered.errors[0]).toContain('/does/not/exist')
+  })
+})
+
+// A line a real transcript would carry.
+const transcriptLine = (over: Record<string, unknown> = {}) =>
+  JSON.stringify({
+    type: 'user',
+    uuid: `u-${Math.random().toString(36).slice(2)}`,
+    parentUuid: null,
+    sessionId: 'sess-1',
+    timestamp: '2026-07-01T00:00:00Z',
+    message: { role: 'user', content: 'hello' },
+    ...over,
+  })
+
+// Build a fake ~/.claude with one encoded project directory.
+async function claudeBase(encodedProject: string): Promise<{ base: string; project: string }> {
+  const base = await mkdtemp(join(tmpdir(), 'mindmeld-claude-'))
+  dirs.push(base)
+  const project = join(base, 'projects', encodedProject)
+  await mkdir(project, { recursive: true })
+  return { base, project }
+}
+
+describe('syncClaudeCode cwd correction', () => {
+  // Subagent transcripts carry their isolated worktree as cwd
+  // (.claude/worktrees/agent-*). On an incremental run the freshest file is
+  // often the only one parsed, so if agent sessions could drive the cwd
+  // correction, a project row would flip its path and name to agent-xxx.
+  it('never lets a subagent transcript rewrite the project path', async () => {
+    const { base, project } = await claudeBase('-home-u-proj')
+    await mkdir(join(project, 'sess-1', 'subagents'), { recursive: true })
+    await writeFile(
+      join(project, 'sess-1', 'subagents', 'agent-abc.jsonl'),
+      transcriptLine({ cwd: '/home/u/proj/.claude/worktrees/agent-abc' }) + '\n'
+    )
+    ;(config.sources.claudeCode as { path: string }).path = base
+
+    await syncClaudeCode()
+
+    // Only the initial upsert from the decoded directory name — the agent's
+    // worktree cwd must never reach upsertProject.
+    expect(upsertProject).toHaveBeenCalledTimes(1)
+    expect(upsertProject).toHaveBeenCalledWith(1, '-home-u-proj', '/home/u/proj', 'proj')
+  })
+
+  it('still corrects the project path from a main session cwd', async () => {
+    const { base, project } = await claudeBase('-home-u-my-proj')
+    await writeFile(
+      join(project, 'sess-1.jsonl'),
+      transcriptLine({ cwd: '/home/u/my-proj' }) + '\n'
+    )
+    ;(config.sources.claudeCode as { path: string }).path = base
+
+    await syncClaudeCode()
+
+    // decodeProjectPath is lossy ('-' becomes '/'), so the session cwd is the
+    // truth: the second upsert carries it.
+    expect(upsertProject).toHaveBeenCalledTimes(2)
+    expect(upsertProject).toHaveBeenLastCalledWith(
+      1,
+      '-home-u-my-proj',
+      '/home/u/my-proj',
+      'my-proj'
     )
   })
 })

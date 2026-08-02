@@ -385,8 +385,21 @@ export interface HistoryEntry {
   pastedContents?: Record<string, unknown>;
 }
 
-export async function parseHistoryFile(historyPath: string): Promise<HistoryEntry[]> {
+// History entries are convenience data (the prompt-history picker), so a line
+// this parser cannot read is counted rather than quarantined — but it is never
+// silent: the caller gets the counts and is expected to surface them.
+export interface ParsedHistory {
+  entries: HistoryEntry[];
+  // Lines that were not valid JSON.
+  malformedLines: number;
+  // Lines that parsed but carried no usable timestamp.
+  invalidTimestamps: number;
+}
+
+export async function parseHistoryFile(historyPath: string): Promise<ParsedHistory> {
   const entries: HistoryEntry[] = [];
+  let malformedLines = 0;
+  let invalidTimestamps = 0;
 
   const fileStream = createReadStream(historyPath);
   const rl = createInterface({
@@ -406,7 +419,10 @@ export async function parseHistoryFile(historyPath: string): Promise<HistoryEntr
       };
 
       const timestamp = parseTimestamp(parsed.timestamp);
-      if (!timestamp) continue;
+      if (!timestamp) {
+        invalidTimestamps++;
+        continue;
+      }
 
       entries.push({
         display: parsed.display,
@@ -414,10 +430,10 @@ export async function parseHistoryFile(historyPath: string): Promise<HistoryEntr
         project: parsed.project,
         pastedContents: parsed.pastedContents,
       });
-    } catch (e) {
-      // Skip malformed lines
+    } catch {
+      malformedLines++;
     }
   }
 
-  return entries;
+  return { entries, malformedLines, invalidTimestamps };
 }

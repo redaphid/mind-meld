@@ -33,7 +33,14 @@ pnpm run sync:embeddings        # Generate pending embeddings
 pnpm run compute:centroids # Compute session/project centroids for weighted search
 pnpm run search "query"    # Search conversations
 pnpm run stats             # Show sync statistics
+
+pnpm run verify            # Compare session files on disk against the DB; exits nonzero on drift
+pnpm run verify --repair   # Also clear the sync stamp on drifted sessions and recompute stats
 ```
+
+A sync run that records any error exits nonzero and prints a per-run summary
+(sessions, messages, skipped, quarantined, every error in full), so container
+monitoring sees failures instead of an eternal exit 0.
 
 ## Web UI
 

@@ -4,6 +4,7 @@
 
 import { query } from '../db/postgres.js'
 import { config } from '../config.js'
+import { normalizeText } from '../utils/text-encoding.js'
 import type { LogEntry } from '../mcp/log-buffer.js'
 
 export type PendingLog = {
@@ -46,7 +47,12 @@ export const enqueue = (entry: LogEntry) => {
     machine: config.machine,
     service,
     level: entry.level,
-    message: entry.message,
+    // Postgres text cannot hold U+0000, and one poisoned line wedges its whole
+    // batch: the flush fails, retries forever, and every later log line queues
+    // behind it until the cap starts dropping them. normalizeText is the
+    // repo's single NUL policy (issue #20), applied here because log lines
+    // travel through raw query(), not the normalized queries.* boundary.
+    message: normalizeText(entry.message),
     loggedAt: new Date(entry.timestamp),
   })
 
@@ -143,6 +149,42 @@ export const startDbLogSink = (serviceName: string) => {
 }
 
 let handlersInstalled = false
+let exitFlushFailures = 0 // consecutive FAILED flushes on the exit path
+const MAX_EXIT_FLUSH_FAILURES = 3
+
+// One beforeExit cycle: flush if there is anything left and we have not given
+// up. Exported for tests; the subtlety it guards is an infinite shutdown loop —
+// a failing flush schedules async work, the loop drains, beforeExit fires
+// again, forever. Seen live with a NUL-poisoned queue: the process printed its
+// summary and then never exited.
+//
+// The bound counts consecutive FAILURES, not cycles: a healthy shutdown that
+// legitimately needs several beforeExit rounds (lines trickling in during
+// teardown) must not discard its tail, and a cycle where another flush holds
+// the latch costs nothing — flushLogs no-ops without attempting a write.
+export const exitFlush = async (): Promise<void> => {
+  if (queue.length === 0) return
+  if (exitFlushFailures >= MAX_EXIT_FLUSH_FAILURES) {
+    reportProblem(
+      `giving up on exit flush after ${MAX_EXIT_FLUSH_FAILURES} consecutive failures; ${queue.length} line(s) not persisted`
+    )
+    dropped += queue.length
+    queue = []
+    return
+  }
+
+  const failuresBefore = failures
+  await flushLogs()
+
+  if (failures > failuresBefore) {
+    exitFlushFailures++
+  } else if (queue.length === 0) {
+    // Real progress — the database is reachable again; a later failure starts
+    // its own fresh countdown. (A latch collision lands in neither branch:
+    // no write was attempted, so nothing is learned and nothing is charged.)
+    exitFlushFailures = 0
+  }
+}
 
 // beforeExit still allows async work, so a short-lived process (the sync CLI)
 // gets its final lines persisted instead of losing them on exit.
@@ -151,7 +193,7 @@ export const installFlushOnExit = () => {
   handlersInstalled = true
 
   process.on('beforeExit', () => {
-    void flushLogs()
+    void exitFlush()
   })
 
   for (const signal of ['SIGTERM', 'SIGINT'] as const) {
@@ -169,6 +211,7 @@ export const __resetForTests = () => {
   failures = 0
   flushing = false
   lastPruneAt = 0
+  exitFlushFailures = 0
   service = 'unknown'
   if (timer) {
     clearInterval(timer)

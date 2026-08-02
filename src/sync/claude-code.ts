@@ -23,7 +23,7 @@ export interface SyncStats {
 }
 
 // Discover all Claude Code project directories
-async function discoverProjects(basePath: string): Promise<string[]> {
+export async function discoverProjects(basePath: string): Promise<string[]> {
   const projectsDir = join(basePath, 'projects');
   const projects: string[] = [];
 
@@ -43,22 +43,55 @@ async function discoverProjects(basePath: string): Promise<string[]> {
   return projects;
 }
 
-// Discover session files in a project directory
-async function discoverSessionFiles(projectPath: string): Promise<string[]> {
+// Discover session files in a project directory. Recursive, because newer
+// Claude Code versions store subagent transcripts under
+// `<project>/<sessionId>/subagents/agent-*.jsonl` (nested further when agents
+// spawn agents) — a top-level-only walk silently missed every one of them.
+// On one machine that was 161 of 193 session files invisible to sync (#29).
+//
+// Failures are returned, not just logged: a directory that cannot be read
+// must cost exactly that directory, be visible in stats.errors (and therefore
+// the exit code), and never silently shrink the walk.
+export interface DiscoveredSessions {
+  files: string[];
+  errors: string[];
+}
+
+export async function discoverSessionFiles(projectPath: string): Promise<DiscoveredSessions> {
   const files: string[] = [];
+  const errors: string[] = [];
 
-  try {
-    const entries = await readdir(projectPath);
-    for (const entry of entries) {
-      if (entry.endsWith('.jsonl')) {
-        files.push(join(projectPath, entry));
-      }
+  const walk = async (dir: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (e) {
+      // The projects tree is live while sync runs — subagent and workflow
+      // directories come and go. One unreadable directory loses only itself.
+      errors.push(`Failed to read directory ${dir}: ${e}`);
+      return;
     }
-  } catch (e) {
-    console.error(`Failed to discover sessions in ${projectPath}:`, e);
-  }
+    for (const entry of entries) {
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
+        files.push(fullPath);
+      }
+      // Symlinks are deliberately not followed (Dirent.isDirectory/isFile are
+      // lstat-based, so a link fails both checks). Claude Code DOES create
+      // intra-tree symlinks between subagent transcripts; those targets are
+      // discovered once via their real path, and following the link would
+      // risk cycles and double-ingest. Known trade-off: a symlink whose
+      // target lives outside the walked tree is skipped, and that transcript
+      // stays invisible until discovery learns to follow file links with a
+      // resolved-path dedup.
+    }
+  };
 
-  return files;
+  await walk(projectPath);
+
+  return { files, errors };
 }
 
 export type SessionSyncResult = {
@@ -274,10 +307,16 @@ export async function syncClaudeCode(options?: {
       stats.projectsProcessed++;
       let correctedFromCwd = false;
 
-      // Discover and process session files
-      const sessionFiles = await discoverSessionFiles(projectPath);
+      // Discover and process session files. Walk failures count as sync
+      // errors: an unreadable directory means files this run never saw, and
+      // that must reach the exit code, not just the console (#29).
+      const discovered = await discoverSessionFiles(projectPath);
+      for (const walkError of discovered.errors) {
+        console.error(walkError);
+        stats.errors.push(walkError);
+      }
 
-      for (const sessionFile of sessionFiles) {
+      for (const sessionFile of discovered.files) {
         try {
           const fileStat = await stat(sessionFile);
 
@@ -332,8 +371,13 @@ export async function syncClaudeCode(options?: {
             continue;
           }
 
-          // Correct project path from session cwd (decodeProjectPath is lossy with hyphens)
-          if (!correctedFromCwd && session.cwd) {
+          // Correct project path from session cwd (decodeProjectPath is lossy
+          // with hyphens). Agent sessions are never allowed to drive this:
+          // subagent transcripts carry their isolated worktree as cwd
+          // (.claude/worktrees/agent-*), and on incremental runs the freshest
+          // file — usually a subagent transcript — is often the only candidate,
+          // so one of them would rename the whole project row to agent-xxx.
+          if (!correctedFromCwd && session.cwd && !session.isAgent) {
             const cwdName = extractProjectName(session.cwd);
             if (session.cwd !== decodedPath) {
               projectId = await queries.upsertProject(
@@ -386,7 +430,11 @@ export async function syncClaudeCode(options?: {
 }
 
 // Sync history.jsonl
-export async function syncClaudeHistory(): Promise<{ entriesInserted: number }> {
+export async function syncClaudeHistory(): Promise<{
+  entriesInserted: number;
+  malformedLines: number;
+  invalidTimestamps: number;
+}> {
   const basePath = config.sources.claudeCode.path;
   const historyPath = join(basePath, 'history.jsonl');
 
@@ -395,10 +443,15 @@ export async function syncClaudeHistory(): Promise<{ entriesInserted: number }> 
     throw new Error('Claude Code source not found');
   }
 
-  const entries = await parseHistoryFile(historyPath);
+  const { entries, malformedLines, invalidTimestamps } = await parseHistoryFile(historyPath);
   console.log(`Parsed ${entries.length} history entries`);
+  if (malformedLines > 0 || invalidTimestamps > 0) {
+    console.warn(
+      `History file ${historyPath}: skipped ${malformedLines} malformed line(s) and ${invalidTimestamps} entr(ies) with unusable timestamps`
+    );
+  }
 
   // TODO: Insert history entries into database
   // For now, just return count
-  return { entriesInserted: entries.length };
+  return { entriesInserted: entries.length, malformedLines, invalidTimestamps };
 }

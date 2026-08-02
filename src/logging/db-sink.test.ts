@@ -6,9 +6,11 @@ vi.mock('../config.js', () => ({
   config: { machine: 'test-machine', logs: { retentionDays: 14 } },
 }))
 
-const { enqueue, flushLogs, sinkStats, startDbLogSink, __resetForTests } = await import(
+const { enqueue, flushLogs, exitFlush, sinkStats, startDbLogSink, __resetForTests } = await import(
   './db-sink.js'
 )
+
+const NUL = String.fromCharCode(0)
 
 const entry = (over: Partial<{ message: string; level: string }> = {}) => ({
   seq: 0,
@@ -39,6 +41,83 @@ describe('enqueue', () => {
     enqueue(entry())
     expect(query).not.toHaveBeenCalled()
     expect(sinkStats().pending).toBe(1)
+  })
+
+  // Postgres rejects U+0000 in text, and a rejected batch is retried forever:
+  // one poisoned line would wedge the sink and eventually cost every later
+  // line. normalizeText — the repo's single NUL policy — strips it at enqueue,
+  // because log lines travel through raw query(), not the normalized
+  // queries.* boundary.
+  it('normalizes NUL bytes so one poisoned line cannot wedge the whole sink', async () => {
+    enqueue(entry({ message: `saw wsl${NUL}--list${NUL} in a path` }))
+    await flushLogs()
+
+    const [, params] = query.mock.calls[0]
+    expect(params[3]).toEqual(['saw wsl--list in a path'])
+    expect((params[3] as string[])[0]).not.toContain(NUL)
+  })
+
+  // A failing flush at shutdown used to re-fire beforeExit forever: the
+  // process printed its summary and then never exited. The exit path gets a
+  // bounded number of attempts, then reports and abandons the queue.
+  it('exitFlush gives up after bounded consecutive failures instead of spinning forever', async () => {
+    query.mockRejectedValue(new Error('invalid byte sequence for encoding "UTF8": 0x00'))
+    enqueue(entry({ message: 'poisoned batch' }))
+
+    await exitFlush()
+    await exitFlush()
+    await exitFlush()
+    expect(sinkStats().pending).toBe(1) // still queued: three real attempts
+
+    await exitFlush() // fourth: gives up, abandons the queue, counts the loss
+    expect(sinkStats().pending).toBe(0)
+    expect(sinkStats().droppedSinceStart).toBe(1)
+
+    await exitFlush() // nothing left — must be a no-op, not another query
+    expect(query).toHaveBeenCalledTimes(3)
+  })
+
+  // The bound is on consecutive failures, not lifetime cycles: a shutdown
+  // where lines keep trickling in must not discard its tail while the
+  // database is healthy.
+  it('exitFlush resets its failure count once a flush succeeds', async () => {
+    query.mockRejectedValueOnce(new Error('down')).mockRejectedValueOnce(new Error('down'))
+    enqueue(entry({ message: 'first' }))
+    await exitFlush()
+    await exitFlush() // two consecutive failures banked
+    await exitFlush() // third attempt succeeds and resets the count
+    expect(sinkStats().pending).toBe(0)
+
+    // A later outage gets a fresh three attempts, not the remainder of one.
+    query.mockRejectedValue(new Error('down again'))
+    enqueue(entry({ message: 'second' }))
+    await exitFlush()
+    await exitFlush()
+    await exitFlush()
+    expect(sinkStats().pending).toBe(1) // three real attempts, still queued
+    await exitFlush() // now it gives up
+    expect(sinkStats().pending).toBe(0)
+  })
+
+  // A cycle where the interval-driven flush already holds the latch attempts
+  // no write, so it must not be charged as a failure.
+  it('exitFlush does not burn an attempt on a flushing-latch collision', async () => {
+    let release: (value: { rows: never[] }) => void = () => {}
+    query.mockImplementationOnce(() => new Promise((resolve) => (release = resolve)))
+    enqueue(entry({ message: 'slow line' }))
+
+    const inflight = flushLogs() // acquires the latch and parks on the query
+    await exitFlush() // collides with the latch — no attempt, no charge
+    release({ rows: [] })
+    await inflight
+
+    expect(sinkStats().pending).toBe(0)
+    // Only the in-flight flush ever wrote (a successful flush also prunes,
+    // so count inserts, not calls).
+    const inserts = query.mock.calls.filter(([sql]) =>
+      (sql as string).includes('INSERT INTO logs')
+    )
+    expect(inserts).toHaveLength(1)
   })
 
   it('drops the oldest entries once the queue cap is exceeded', () => {
