@@ -9,11 +9,12 @@ export const meta = {
   ],
 }
 
-// args: { pr: number, lenses?: string[] }
-const pr = args?.pr
+// args: { pr: number, lenses?: string[] } — may arrive JSON-stringified
+const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args
+const pr = parsedArgs?.pr
 if (!pr) throw new Error('args.pr (PR number) is required')
 
-const LENSES = args?.lenses ?? [
+const LENSES = parsedArgs?.lenses ?? [
   'spec-compliance: does the diff do exactly what the referenced issue specifies — nothing missing, nothing extra',
   'correctness: construct concrete inputs that make the new code produce wrong output, corrupt data, or throw',
   'data-safety: truncation, silent drops, destructive migrations, hot-path performance, and repo No-Truncation-Policy violations',
