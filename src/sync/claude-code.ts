@@ -61,48 +61,112 @@ async function discoverSessionFiles(projectPath: string): Promise<string[]> {
   return files;
 }
 
-// Sync a single session to the database
-async function syncSession(
+export type SessionSyncResult = {
+  messagesInserted: number;
+  // Records preserved in sync_quarantine — confirmed written, not just attempted.
+  quarantined: number;
+  // Records that could NOT be preserved: the original insert failed AND the
+  // quarantine write failed. These are reported up into sync errors so
+  // /status never claims "data is waiting" for data that was actually lost.
+  errors: string[];
+};
+
+// Sync a single session to the database. Exported for tests.
+export async function syncSession(
   sourceId: number,
   projectId: number,
   session: ParsedSession
-): Promise<{ messagesInserted: number; quarantined: number }> {
-  // Upsert session
-  const sessionId = await queries.upsertSession({
-    projectId,
-    externalId: session.sessionId,
-    title: session.messages[0]?.contentText?.slice(0, 200),
-    isAgent: session.isAgent,
-    agentId: session.agentId,
-    claudeVersion: session.claudeVersion,
-    modelUsed: session.modelUsed,
-    gitBranch: session.gitBranch,
-    cwd: session.cwd,
-    rawFilePath: session.filePath,
-    fileModifiedAt: session.fileModifiedAt,
-    startedAt: session.firstTimestamp,
-    endedAt: session.lastTimestamp,
-  });
+): Promise<SessionSyncResult> {
+  let quarantined = 0;
+  const errors: string[] = [];
+
+  // quarantine() never throws; it returns null when even the preserving write
+  // failed. A null must never be counted as saved — it becomes a visible sync
+  // error instead.
+  const keep = async (input: {
+    recordKey: string;
+    lineNumber?: number;
+    sessionId?: number;
+    stage: 'parse' | 'insert';
+    payload: string;
+    error: unknown;
+  }) => {
+    const id = await quarantine({
+      source: 'claude_code',
+      filePath: session.filePath,
+      sessionExternalId: session.sessionId,
+      projectId,
+      ...input,
+    });
+    if (id === null)
+      errors.push(
+        `Quarantine write failed for ${session.filePath}#${input.recordKey} — record NOT preserved`
+      );
+    else quarantined++;
+  };
+
+  // Upsert session. This is the one insert the per-message quarantine below
+  // cannot protect: if the session row itself fails, there is nothing to
+  // attach messages to, and before this guard the whole file just errored on
+  // every cycle with nothing preserved (issue #20). Now every record is
+  // quarantined against the session's external id and replays once the
+  // session row exists — file_modified_at is never advanced on this path, so
+  // the next sync retries the file.
+  let sessionId: number;
+  try {
+    sessionId = await queries.upsertSession({
+      projectId,
+      externalId: session.sessionId,
+      title: session.messages[0]?.contentText?.slice(0, 200),
+      isAgent: session.isAgent,
+      agentId: session.agentId,
+      claudeVersion: session.claudeVersion,
+      modelUsed: session.modelUsed,
+      gitBranch: session.gitBranch,
+      cwd: session.cwd,
+      rawFilePath: session.filePath,
+      fileModifiedAt: session.fileModifiedAt,
+      startedAt: session.firstTimestamp,
+      endedAt: session.lastTimestamp,
+    });
+  } catch (e) {
+    for (const bad of session.badLines) {
+      await keep({
+        recordKey: `line:${bad.lineNumber}`,
+        lineNumber: bad.lineNumber,
+        stage: 'parse',
+        payload: bad.raw,
+        error: bad.error,
+      });
+    }
+    for (const message of session.messages) {
+      await keep({
+        recordKey: `uuid:${message.uuid}`,
+        lineNumber: session.lineNumbers.get(message.uuid),
+        stage: 'insert',
+        payload: JSON.stringify(message),
+        error: e,
+      });
+    }
+    console.error(
+      `Session upsert failed for ${session.filePath} — quarantined ${quarantined} record(s) for replay${errors.length > 0 ? `, ${errors.length} NOT preserved` : ''}: ${e instanceof Error ? e.message : e}`
+    );
+    return { messagesInserted: 0, quarantined, errors };
+  }
 
   let messagesInserted = 0;
-  let quarantined = 0;
 
   // Lines the parser could not read at all. Kept before anything else touches
   // them, so a file that is partly unreadable still yields everything else.
   for (const bad of session.badLines) {
-    await quarantine({
-      source: 'claude_code',
-      filePath: session.filePath,
+    await keep({
       recordKey: `line:${bad.lineNumber}`,
       lineNumber: bad.lineNumber,
-      sessionExternalId: session.sessionId,
       sessionId,
-      projectId,
       stage: 'parse',
       payload: bad.raw,
       error: bad.error,
     });
-    quarantined++;
   }
 
   // Insert messages. One record that Postgres rejects — a NUL byte, a column
@@ -131,19 +195,14 @@ async function syncSession(
 
       if (msgId) messagesInserted++;
     } catch (e) {
-      await quarantine({
-        source: 'claude_code',
-        filePath: session.filePath,
+      await keep({
         recordKey: `uuid:${message.uuid}`,
         lineNumber: session.lineNumbers.get(message.uuid),
-        sessionExternalId: session.sessionId,
         sessionId,
-        projectId,
         stage: 'insert',
         payload: JSON.stringify(message),
         error: e,
       });
-      quarantined++;
     }
   }
 
@@ -156,7 +215,7 @@ async function syncSession(
   await queries.updateSessionStats(sessionId);
   await queries.updateSessionContentChars(sessionId);
 
-  return { messagesInserted, quarantined };
+  return { messagesInserted, quarantined, errors };
 }
 
 // Main sync function for Claude Code
@@ -250,7 +309,7 @@ export async function syncClaudeCode(options?: {
           // session's external id and resolve it on replay.
           if (session.messages.length === 0) {
             for (const bad of session.badLines) {
-              await quarantine({
+              const quarantineId = await quarantine({
                 source: 'claude_code',
                 filePath: session.filePath,
                 recordKey: `line:${bad.lineNumber}`,
@@ -261,7 +320,13 @@ export async function syncClaudeCode(options?: {
                 payload: bad.raw,
                 error: bad.error,
               });
-              stats.quarantined++;
+              // null means even the preserving write failed — that is a loss,
+              // and it must surface as an error, never count as saved.
+              if (quarantineId === null)
+                stats.errors.push(
+                  `Quarantine write failed for ${session.filePath}#line:${bad.lineNumber} — record NOT preserved`
+                );
+              else stats.quarantined++;
             }
             stats.skipped++;
             continue;
@@ -286,6 +351,7 @@ export async function syncClaudeCode(options?: {
           stats.sessionsProcessed++;
           stats.messagesInserted += result.messagesInserted;
           stats.quarantined += result.quarantined;
+          stats.errors.push(...result.errors);
 
           if (stats.sessionsProcessed % 50 === 0) {
             console.log(`Processed ${stats.sessionsProcessed} sessions...`);

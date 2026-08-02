@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { config } from '../config.js';
 import { isAutomated } from '../embeddings/classify.js';
+import { normalizeText, normalizeDeep } from '../utils/text-encoding.js';
 
 const { Pool } = pg;
 
@@ -73,23 +74,24 @@ export async function closePool(): Promise<void> {
   }
 }
 
-// Postgres stores no U+0000 — not in text, not in jsonb — and rejects the whole
-// INSERT with 'invalid byte sequence for encoding "UTF8": 0x00'. Transcripts hit
-// this legitimately: WSL tools (`wsl --list`) emit UTF-16 output that Claude Code
-// records faithfully as an escaped \u0000 inside otherwise valid JSON, and one
-// such line used to fail an entire session's sync. Dropping the character is the
-// only lossless-enough option — it carries no meaning in these transcripts.
-export const stripNulls = (value: string): string => value.replace(/\u0000/g, '');
+// Postgres stores no U+0000 — not in text, not in jsonb values or keys — and
+// rejects the whole INSERT with 'invalid byte sequence for encoding "UTF8":
+// 0x00'; lone surrogates fail the same way. Transcripts hit this legitimately:
+// WSL tools (`wsl --list`) emit UTF-16 output that Claude Code records
+// faithfully as escaped \u0000 inside otherwise valid JSON, and one such line
+// used to fail an entire session's sync. Removing the NULs IS the decode for
+// that corruption class; normalizeText drops only what Postgres cannot store — see
+// src/utils/text-encoding.ts. Every text parameter below goes through it, so
+// every write path (file sync, /api/ingest, quarantine replay) is protected
+// regardless of which machine or code version produced the data.
+const clean = (value: string | undefined | null): string | null =>
+  value === undefined || value === null ? null : normalizeText(value);
 
-const stripNullsIn = (value: string | undefined): string | null =>
-  value === undefined ? null : stripNulls(value);
-
-// Sanitises during serialisation, so a genuine "\\u0000" in the text is left
-// alone — only real NUL characters are removed.
+// Normalises the whole tree — values and keys — before serialisation, so a
+// genuine literal "\\u0000" in the text is left alone; only real NUL
+// characters and lone surrogates are repaired.
 const toJson = (value: object | undefined): string | null =>
-  value === undefined
-    ? null
-    : JSON.stringify(value, (_key, v) => (typeof v === 'string' ? stripNulls(v) : v));
+  value === undefined ? null : JSON.stringify(normalizeDeep(value));
 
 // Query builders for common operations
 export const queries = {
@@ -133,7 +135,7 @@ export const queries = {
                      machine = COALESCE($5, projects.machine),
                      last_synced_at = NOW()
        RETURNING id`,
-      [sourceId, externalId, path, name, machine]
+      [sourceId, normalizeText(externalId), normalizeText(path), normalizeText(name), clean(machine)]
     );
     return result.rows[0].id;
   },
@@ -181,20 +183,20 @@ export const queries = {
       RETURNING id`,
       [
         params.projectId,
-        params.externalId,
-        stripNullsIn(params.title),
+        normalizeText(params.externalId),
+        clean(params.title),
         params.isAgent ?? false,
         params.parentSessionId ?? null,
-        params.agentId ?? null,
-        params.claudeVersion ?? null,
-        params.modelUsed ?? null,
-        params.gitBranch ?? null,
-        params.cwd ?? null,
-        params.rawFilePath ?? null,
+        clean(params.agentId),
+        clean(params.claudeVersion),
+        clean(params.modelUsed),
+        clean(params.gitBranch),
+        clean(params.cwd),
+        clean(params.rawFilePath),
         params.fileModifiedAt ?? null,
         params.startedAt ?? null,
         params.endedAt ?? null,
-        isAutomated(params.title ?? null),
+        isAutomated(clean(params.title)),
       ]
     );
     return result.rows[0].id;
@@ -295,16 +297,16 @@ export const queries = {
       RETURNING id`,
       [
         params.sessionId,
-        params.externalId,
+        normalizeText(params.externalId),
         params.parentMessageId ?? null,
         params.role,
-        stripNullsIn(params.contentText),
+        clean(params.contentText),
         toJson(params.contentJson),
-        params.toolName ?? null,
+        clean(params.toolName),
         toJson(params.toolInput),
-        stripNullsIn(params.toolResult),
-        stripNullsIn(params.thinkingText),
-        params.model ?? null,
+        clean(params.toolResult),
+        clean(params.thinkingText),
+        clean(params.model),
         params.inputTokens ?? null,
         params.outputTokens ?? null,
         params.cacheCreationTokens ?? null,
@@ -355,7 +357,7 @@ export const queries = {
          last_error = $5,
          last_file_modified = COALESCE($6, sync_state.last_file_modified),
          updated_at = NOW()`,
-      [sourceId, entityType, filesProcessed, recordsSynced, lastError ?? null, lastFileModified ?? null]
+      [sourceId, entityType, filesProcessed, recordsSynced, clean(lastError), lastFileModified ?? null]
     );
   },
 
