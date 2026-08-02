@@ -15,6 +15,7 @@ import { query } from '../db/postgres.js'
 import { config } from '../config.js'
 import { parseClaudeLine, type ParsedMessage } from '../parsers/claude-messages.js'
 import { queries } from '../db/postgres.js'
+import { normalizeText } from '../utils/text-encoding.js'
 
 export type QuarantineStage = 'parse' | 'insert'
 
@@ -35,7 +36,13 @@ export type QuarantineInput = {
   error: unknown
 }
 
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
+// The error string is derived from the record's bytes — V8's JSON.parse quotes
+// a snippet of the failing input in e.message, raw NULs included — so it must
+// be normalized like any other text column. Without this, the very bytes that
+// broke the original insert break the INSERT that preserves them, which is
+// exactly what rule 1 above promises cannot happen.
+const message = (error: unknown) =>
+  normalizeText(error instanceof Error ? error.message : String(error))
 
 export const encodePayload = (payload: string) => Buffer.from(payload, 'utf8').toString('base64')
 
@@ -60,10 +67,10 @@ export const quarantine = async (input: QuarantineInput): Promise<number | null>
       [
         input.source,
         config.machine,
-        input.filePath,
-        input.recordKey,
+        normalizeText(input.filePath),
+        normalizeText(input.recordKey),
         input.lineNumber ?? null,
-        input.sessionExternalId ?? null,
+        input.sessionExternalId == null ? null : normalizeText(input.sessionExternalId),
         input.sessionId ?? null,
         input.projectId ?? null,
         input.stage,
@@ -271,7 +278,14 @@ export const replayQuarantine = async (opts: { limit?: number; id?: number } = {
     try {
       outcomes.push(await replayRow(row))
     } catch (e) {
-      await markAttempted(row.id, e)
+      // Recording the attempt must never abort the rest of the batch: one
+      // record whose bookkeeping fails still leaves every other record
+      // replayable, and its own row keeps the previous error.
+      try {
+        await markAttempted(row.id, e)
+      } catch (attemptError) {
+        console.error(`[quarantine] could not record attempt for row ${row.id}:`, message(attemptError))
+      }
       outcomes.push({ id: row.id, ok: false, error: message(e) })
     }
   }

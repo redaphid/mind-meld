@@ -210,9 +210,10 @@ export interface BadLine {
 export function parseClaudeLine(line: string, sequenceNum: number): ParsedLine {
   // Normalized the moment it becomes structured data: transcripts of Windows
   // tool output carry escaped-NUL UTF-16LE runs that JSON.parse turns into
-  // real U+0000 characters. normalizeDeep decodes those runs back to readable
-  // text (and drops stray NULs / lone surrogates) before anything downstream
-  // stores, embeds, or searches the content.
+  // real U+0000 characters. Removing the NULs recovers the readable text of
+  // such a run (that is all the decode there is — see text-encoding.ts), and
+  // lone surrogates are dropped, before anything downstream stores, embeds,
+  // or searches the content.
   const parsed = normalizeDeep(JSON.parse(line)) as ClaudeMessage;
 
   if (!['user', 'assistant'].includes(parsed.type))

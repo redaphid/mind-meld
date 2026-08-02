@@ -79,6 +79,31 @@ describe('quarantine', () => {
     query.mockRejectedValueOnce(new Error('disk full'))
     await expect(quarantine(input())).resolves.toBeNull()
   })
+
+  // The error column is text, and the error string is derived from the
+  // record's bytes: V8's JSON.parse quotes a snippet of the failing input in
+  // e.message, raw NULs included. Unnormalized, the very bytes that broke the
+  // original insert would break the INSERT that preserves them.
+  it('normalizes NULs out of the error string before writing it', async () => {
+    await quarantine(input({ error: new Error(`invalid W${NUL}S${NUL}L${NUL} bytes`) }))
+    const params = query.mock.calls[0][1] as unknown[]
+    expect(params).toContain('invalid WSL bytes')
+    expect(params.some(p => typeof p === 'string' && p.includes(NUL))).toBe(false)
+  })
+
+  it('survives a genuine V8 parse error over NUL-bearing input', async () => {
+    const parseError = (() => {
+      try {
+        JSON.parse(`{"a": W${NUL}S${NUL}L${NUL} garbage`)
+        return null
+      } catch (e) {
+        return e
+      }
+    })()
+    await quarantine(input({ error: parseError }))
+    const params = query.mock.calls[0][1] as unknown[]
+    expect(params.some(p => typeof p === 'string' && p.includes(NUL))).toBe(false)
+  })
 })
 
 describe('replayQuarantine', () => {
@@ -166,6 +191,38 @@ describe('replayQuarantine', () => {
 
     expect(getSessionByExternalId).toHaveBeenCalledWith(3, 'sess-1')
     expect(insertMessage).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 91 }))
+  })
+
+  // The attempt bookkeeping writes the new error into a text column; a
+  // NUL-bearing replay failure must not poison it.
+  it('normalizes a NUL-bearing replay error before recording the attempt', async () => {
+    query.mockResolvedValueOnce({ rows: [row()] }).mockResolvedValue({ rows: [] })
+    insertMessage.mockRejectedValueOnce(new Error(`bad byte W${NUL}S${NUL}L`))
+
+    const result = await replayQuarantine({ limit: 10 })
+
+    expect(result.outcomes[0].error).toBe('bad byte WSL')
+    const attemptCall = query.mock.calls.find(c => String(c[0]).includes('attempts = attempts + 1'))
+    expect(attemptCall).toBeDefined()
+    expect((attemptCall![1] as unknown[]).some(p => typeof p === 'string' && p.includes(NUL))).toBe(false)
+  })
+
+  // One record whose bookkeeping fails must not abort the rest of the batch —
+  // otherwise a single poisoned row 500s every retry of everything behind it.
+  it('continues the batch when recording an attempt fails', async () => {
+    query.mockImplementation(async (sql: unknown) => {
+      if (String(sql).includes('FROM sync_quarantine'))
+        return { rows: [row({ id: 5 }), row({ id: 6, record_key: 'uuid:def' })] }
+      if (String(sql).includes('attempts = attempts + 1')) throw new Error('db hiccup')
+      return { rows: [] }
+    })
+    insertMessage.mockRejectedValue(new Error('still broken'))
+
+    const result = await replayQuarantine({ limit: 10 })
+
+    expect(result.attempted).toBe(2)
+    expect(result.recovered).toBe(0)
+    expect(result.outcomes.map(o => o.id)).toEqual([5, 6])
   })
 
   it('reports rather than throws when the session still does not exist', async () => {

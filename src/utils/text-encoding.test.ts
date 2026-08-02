@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { decodeUtf16Runs, normalizeText, normalizeDeep } from './text-encoding.js'
+import { normalizeText, normalizeDeep } from './text-encoding.js'
 
 const NUL = String.fromCharCode(0)
 
@@ -9,9 +9,13 @@ const NUL = String.fromCharCode(0)
 const utf16le = (text: string) => [...text].map((c) => c + NUL).join('')
 const utf16be = (text: string) => [...text].map((c) => NUL + c).join('')
 
+// For ASCII-in-UTF-16LE — the only form this corruption takes, since
+// non-ASCII arrives as NUL-free mojibake — removing the NULs IS the decode:
+// the readable characters are already present in order. These cases pin that
+// the repair yields the text the tool actually printed.
 describe('normalizeText: UTF-16 run recovery', () => {
   // The real byte pattern from the failing transcript in issue #20.
-  it('decodes a UTF-16LE run back to the text it encodes', () => {
+  it('recovers a UTF-16LE run as the text it encodes', () => {
     expect(normalizeText(utf16le('WSL version: 2.6.1.0'))).toBe('WSL version: 2.6.1.0')
   })
 
@@ -22,12 +26,12 @@ describe('normalizeText: UTF-16 run recovery', () => {
 
   // Transcripts mix clean UTF-8 (the shell wrapper, exit codes) with mangled
   // UTF-16 runs (the captured tool output). Only the run may change.
-  it('decodes the run without touching surrounding clean text', () => {
+  it('recovers the run without touching surrounding clean text', () => {
     const mixed = `Exit code 255\n${utf16le('WSL version: 2.6.1.0')}\ndone`
     expect(normalizeText(mixed)).toBe('Exit code 255\nWSL version: 2.6.1.0\ndone')
   })
 
-  it('decodes the big-endian alternation too', () => {
+  it('recovers the big-endian alternation too', () => {
     expect(normalizeText(utf16be('WSL version'))).toBe('WSL version')
   })
 
@@ -87,19 +91,6 @@ describe('normalizeText: stray NULs and lone surrogates', () => {
   })
 })
 
-describe('decodeUtf16Runs', () => {
-  // A single char+NUL is no evidence of UTF-16; the NUL strip handles it and
-  // the result is the same either way.
-  it('leaves a single pair for the NUL strip', () => {
-    expect(decodeUtf16Runs(`x${NUL}`)).toBe(`x${NUL}`)
-  })
-
-  it('is a no-op on NUL-free text', () => {
-    const text = 'plain text, no NULs'
-    expect(decodeUtf16Runs(text)).toBe(text)
-  })
-})
-
 describe('normalizeDeep', () => {
   it('normalizes strings wherever they sit in the tree', () => {
     const input = {
@@ -116,6 +107,22 @@ describe('normalizeDeep', () => {
   // replacers cannot rename keys — this is why toJson walks the tree instead.
   it('normalizes object keys too', () => {
     expect(normalizeDeep({ [`k${NUL}ey`]: 'v' })).toEqual({ key: 'v' })
+  })
+
+  // Keys that differ only by NULs collapse. The clean key must win, whatever
+  // order the entries arrive in — a repaired key never overwrites a value
+  // that is already present.
+  it('lets the clean key win when a repaired key collides with it', () => {
+    expect(normalizeDeep({ [`a${NUL}`]: 1, a: 2 })).toEqual({ a: 2 })
+    expect(normalizeDeep({ a: 2, [`a${NUL}`]: 1 })).toEqual({ a: 2 })
+  })
+
+  it('collides deterministically among repaired keys: first one wins', () => {
+    expect(normalizeDeep({ [`a${NUL}`]: 1, [`a${NUL}${NUL}`]: 3 })).toEqual({ a: 1 })
+  })
+
+  it('resolves the reviewer counterexample with the clean value intact', () => {
+    expect(normalizeDeep({ [`a${NUL}`]: 1, a: 2, [`a${NUL}${NUL}`]: 3 })).toEqual({ a: 2 })
   })
 
   it('passes non-strings through untouched', () => {

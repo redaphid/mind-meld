@@ -79,8 +79,8 @@ export async function closePool(): Promise<void> {
 // 0x00'; lone surrogates fail the same way. Transcripts hit this legitimately:
 // WSL tools (`wsl --list`) emit UTF-16 output that Claude Code records
 // faithfully as escaped \u0000 inside otherwise valid JSON, and one such line
-// used to fail an entire session's sync. normalizeText decodes those UTF-16
-// runs back to readable text and drops only what Postgres cannot store — see
+// used to fail an entire session's sync. Removing the NULs IS the decode for
+// that corruption class; normalizeText drops only what Postgres cannot store — see
 // src/utils/text-encoding.ts. Every text parameter below goes through it, so
 // every write path (file sync, /api/ingest, quarantine replay) is protected
 // regardless of which machine or code version produced the data.
