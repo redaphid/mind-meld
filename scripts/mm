@@ -76,72 +76,90 @@ cmd_status() {
   require_docker
 
   head_ "Containers"
-  local any=0
-  for c in "$PG_CONTAINER" mindmeld-chroma "$SYNC_CONTAINER" mindmeld-sync-wsl mindmeld-mcp mindmeld-warmups mindmeld-centroids; do
-    if running "$c"; then
-      local st; st=$(docker inspect "$c" --format '{{.State.Status}}{{if .State.Health}} ({{.State.Health.Status}}){{end}}' 2>/dev/null)
-      ok "$(printf '%-22s %s' "$c" "$st")"
-      any=1
-    else
-      # Only complain about containers that should exist on this host.
-      docker inspect "$c" >/dev/null 2>&1 && bad "$(printf '%-22s stopped' "$c")"
+  # One `docker inspect` for every container rather than one apiece — each
+  # docker invocation costs a few hundred ms, and this loop ran fourteen of
+  # them.
+  local want="$PG_CONTAINER mindmeld-chroma $SYNC_CONTAINER mindmeld-sync-wsl mindmeld-mcp mindmeld-warmups mindmeld-centroids"
+  local states any=0
+  states=$(docker inspect $want     --format '{{.Name}} {{.State.Status}}{{if .State.Health}} ({{.State.Health.Status}}){{end}}' 2>/dev/null     | sed 's|^/||')
+
+  for c in $want; do
+    local line; line=$(printf '%s
+' "$states" | grep -m1 "^$c ")
+    if [ -z "$line" ]; then
+      continue          # container does not exist on this host — not an error
     fi
+    local st; st=${line#"$c "}
+    case "$st" in
+      running*) ok "$(printf '%-22s %s' "$c" "$st")"; any=1 ;;
+      *)        bad "$(printf '%-22s %s' "$c" "$st")" ;;
+    esac
   done
   [ "$any" = 1 ] || bad "No mindmeld containers are running. Try: docker compose up -d"
 
-  if ! db "select 1" >/dev/null 2>&1 || [ -z "$(db 'select 1')" ]; then
+  # One round trip. Each `docker exec` costs ~500ms of startup, so asking six
+  # separate questions made `mm status` take twelve seconds on a 175k-message
+  # database — longer than the default `mm watch` refresh interval.
+  local row
+  row=$(db "select
+      (select count(*) from sessions),
+      (select count(*) from messages),
+      (select count(*) from projects),
+      (select count(*) from messages m
+         left join embeddings e on e.message_id = m.id and e.chroma_collection = 'convo-messages'
+         left join embeddings skip on skip.message_id = m.id and skip.chroma_collection = 'UNEMBEDDABLE'
+        where m.content_text is not null and length(m.content_text) > 10 and m.role != 'tool'
+          and e.id is null and skip.id is null),
+      (select to_char(max(last_synced_at), 'YYYY-MM-DD HH24:MI:SS') from sessions),
+      (select count(*) from sessions s
+         left join (select session_id, count(*) c from messages group by 1) mc on mc.session_id = s.id
+        where s.message_count <> coalesce(mc.c, 0)
+          and (s.last_synced_at is null or s.last_synced_at < now() - interval '$SYNC_GRACE')),
+      (select coalesce(string_agg(x.line, '; ' order by x.n desc), '')
+         from (select src.name || ': ' || count(distinct se.id) as line, count(distinct se.id) as n
+                 from sources src
+                 left join projects p on p.source_id = src.id
+                 left join sessions se on se.project_id = p.id
+                group by src.name having count(distinct se.id) > 0) x)")
+
+  if [ -z "$row" ]; then
     head_ "Database"
     bad "Cannot reach postgres in $PG_CONTAINER — skipping data checks."
     return 1
   fi
 
+  local sessions messages projects pending last mismatch sources
+  IFS='|' read -r sessions messages projects pending last mismatch sources <<< "$row"
+
   head_ "Indexed"
-  local sessions messages projects
-  sessions=$(db "select count(*) from sessions")
-  messages=$(db "select count(*) from messages")
-  projects=$(db "select count(*) from projects")
-  printf "  %s sessions, %s messages, %s projects\n" "${sessions:-?}" "${messages:-?}" "${projects:-?}"
-  db "select '    ' || s.name || ': ' || count(distinct se.id)
-      from sources s
-      left join projects p on p.source_id = s.id
-      left join sessions se on se.project_id = p.id
-      group by s.name having count(distinct se.id) > 0 order by 2 desc" 2>/dev/null
+  printf "  %s sessions, %s messages, %s projects
+" "$sessions" "$messages" "$projects"
+  [ -n "$sources" ] && printf "    %s
+" "$sources"
 
   head_ "Embedding queue"
-  local pending
-  pending=$(db "
-    select count(*) from messages m
-    left join embeddings e on e.message_id = m.id and e.chroma_collection = 'convo-messages'
-    left join embeddings skip on skip.message_id = m.id and skip.chroma_collection = 'UNEMBEDDABLE'
-    where m.content_text is not null and length(m.content_text) > 10 and m.role != 'tool'
-      and e.id is null and skip.id is null")
-  if [ -z "$pending" ]; then
-    warn "could not read queue depth"
-  elif [ "$pending" -eq 0 ]; then
+  if [ "${pending:-0}" -eq 0 ]; then
     ok "nothing pending"
   else
-    printf "  %s messages awaiting embedding\n" "$pending"
+    printf "  %s messages awaiting embedding
+" "$pending"
   fi
 
   head_ "Last sync"
-  local last
-  last=$(db "select to_char(max(last_synced_at), 'YYYY-MM-DD HH24:MI:SS') from sessions")
   if [ -n "$last" ]; then
-    printf "  %s UTC\n" "$last"
+    printf "  %s UTC
+" "$last"
   else
     warn "never"
   fi
   if running "$SYNC_CONTAINER"; then
     local phase
     phase=$(docker logs --tail 40 "$SYNC_CONTAINER" 2>&1 | grep -E '^(=== |--- )' | tail -1)
-    [ -n "$phase" ] && printf "  %s%s%s\n" "$DIM" "$phase" "$RST"
+    [ -n "$phase" ] && printf "  %s%s%s
+" "$DIM" "$phase" "$RST"
   fi
 
   head_ "Health"
-  local stuck mismatch
-  stuck=$(db "select count(*) from sessions s
-              where s.message_count <> (select count(*) from messages m where m.session_id = s.id)")
-  mismatch="${stuck:-}"
   if [ -z "$mismatch" ]; then
     warn "integrity check unavailable"
   elif [ "$mismatch" -eq 0 ]; then
