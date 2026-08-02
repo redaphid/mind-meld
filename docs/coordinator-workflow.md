@@ -19,11 +19,12 @@ Two layers sit above the implementation agents:
   channel) — either party can start a thread there, so the operator can steer
   the coordinator without going through the interactive session at all.
 
-State between cycles is PERSISTED, not re-derived: see "Persistent cycle
-state" below. The comms protocol all agents follow is
-`.claude/skills/comms/SKILL.md` (loadable as the `comms` skill) and, for any
-non-Claude tool, `AGENTS.md` at the repo root. Hooks in `.claude/settings.json`
-(scripts under `.claude/hooks/`) enforce the load-bearing parts.
+State between cycles is CACHED, never depended on: see "Persistent cycle
+state" below. The comms protocol all agents follow is `AGENTS.md` at the repo
+root (short form) and `docs/comms-protocol.md` (full form with commands).
+Both are provider-agnostic on purpose; the enforcement scripts under
+`scripts/comms/` are plain node, and a runtime-specific settings file such as
+`.claude/settings.json` only points at them.
 
 ## Roles
 
@@ -143,8 +144,8 @@ cycle and whenever the orchestrator is active between cycles.
 
 ## Persistent cycle state
 
-`.claude/coordinator-state.json` (gitignored, local to each checkout) holds
-the coordinator's high-water marks so no cycle ever re-reads a whole
+`.coord-state.json` (gitignored, local to each checkout) holds the
+coordinator's high-water marks so a cycle need not re-read a whole
 conversation history:
 
 ```json
@@ -161,23 +162,31 @@ conversation history:
   `issues.*.lastSeenCommentId` for the issues it inspects and
   `lastReconcileAt`; the coordinator maintains `prs.*.lastReviewedSha` when a
   review round completes.
-- Helpers live in `.claude/hooks/lib.mjs` (`readState`/`writeState`).
+- Helpers live in `scripts/comms/lib.mjs` (`readState`/`writeState`).
+- **It is a cache, not a source of truth.** `scripts/coord/state.sh` derives
+  the whole coordination state from GitHub precisely so a brand-new cycle on
+  a clean machine is current in one page; nothing here may weaken that.
+  Deleting `.coord-state.json` costs API calls, never correctness.
 - For recall beyond the state file ("when did we decide X?", "what did the
   operator say about Y last month?"), query **mindmeld itself** via its MCP
   `search` tool — every past session is indexed.
 
-## Enforcement hooks
+## Enforcement scripts
 
-`.claude/settings.json` wires two hooks (scripts in `.claude/hooks/`, plain
-node, zero dependencies, all fail-open — a network or gh failure warns and
-never blocks the session):
+The enforcement logic lives in `scripts/comms/` — plain node, zero
+dependencies, all fail-open (a network or `gh` failure warns and never blocks
+the session). Each is a normal executable script: a human or CI can run it
+directly, and any agent runtime can wire it to whatever lifecycle event it
+calls a "hook". For Claude Code specifically, `.claude/settings.json` is a
+thin adapter that maps two of them to `Stop` and `PostToolUse` and contains
+no logic of its own.
 
-- **Stop** (`stop-pr-progress.mjs`): if the current branch has an open PR
+- **Session stop** (`stop-pr-progress.mjs`): if the current branch has an open PR
   with pushes newer than its last comment, the stop is blocked once with
   instructions to post a progress comment (`stop_hook_active` prevents
   loops).
-- **PostToolUse on Bash** (`post-pr-create.mjs`): after `gh pr create`,
-  warns Claude if the linked issue (branch `-<n>` suffix or `#<n>` in the
+- **After a shell command** (`post-pr-create.mjs`): after `gh pr create`,
+  warns the agent if the linked issue (branch `-<n>` suffix or `#<n>` in the
   command) was not flipped to `in-review`.
 - **Label reconciler** (`reconcile-labels.mjs`, also
   `pnpm run reconcile:labels`): dry-run prints drift and exits 1; `--fix`
@@ -186,18 +195,42 @@ never blocks the session):
   `RECONCILE_STALE_HOURS`) removed; `in-review` with no open PR removed;
   `in-progress` with a ready PR flipped to `in-review`.
 
-Tests: `src/__tests__/comms-hooks.test.ts` (black-box, stubbed `gh`).
+Tests: `src/__tests__/comms-hooks.test.ts` (black-box, stubbed `gh`) — which
+also asserts the layout rule itself: the protocol doc and every enforcement
+script must stay outside `.claude/`, and the settings file may only point at
+them.
+
+### Relationship to `scripts/coord/`
+
+Two script families, deliberately not merged:
+
+- `scripts/coord/*.sh` (issue #78) — coordinator **lifecycle**: handoff,
+  heartbeat, deadman, and state derived from GitHub on demand.
+- `scripts/comms/*.mjs` (issue #75) — **protocol enforcement**: hook-shaped
+  entry points (JSON on stdin, meaning in the exit code) plus the label
+  reconciler.
+
+They share conventions rather than code, because they are different shapes
+(long-lived bash operator tooling vs. short-lived hook processes) and
+different languages. The shared conventions: only `author_association ==
+OWNER` counts as the operator, and a leading `🤖` marks a machine-authored
+comment — `unanswered_operator_comments` in `scripts/coord/lib.sh` and
+`isAgentMarked` in `scripts/comms/lib.mjs` must agree on that, forever. The
+reconciler deliberately does NOT re-implement handoff, heartbeat, or state
+derivation; the deadman and context guard stay exactly as #80 left them.
 
 ## Migration notes (for the running coordinator)
 
 1. Pull main; the hooks activate on the next session start (project
-   `.claude/settings.json`).
-2. Start each cycle by loading the `comms` skill and reading
-   `.claude/coordinator-state.json`; create it on first run by running
-   `pnpm run reconcile:labels` once.
-3. Delegation prompts can now point agents at `AGENTS.md` +
-   `.claude/skills/comms/SKILL.md` instead of restating the comms rules
-   inline.
+   `.claude/settings.json`, which now points at `scripts/comms/`).
+2. Start each cycle by reading `AGENTS.md` (or `docs/comms-protocol.md` for
+   the full form) and `.coord-state.json`; create the latter on first run
+   with `pnpm run reconcile:labels`. If you have an old
+   `.claude/coordinator-state.json`, delete it — it is a cache, so nothing is
+   lost.
+3. Delegation prompts can point agents at `AGENTS.md` +
+   `docs/comms-protocol.md` instead of restating the comms rules inline.
+   Neither path assumes a particular agent runtime.
 4. The interactive session should hand the cycle to a coordinator agent and
    return to the prompt; steer the coordinator on issue #66, not in chat,
    whenever the operator is remote.
