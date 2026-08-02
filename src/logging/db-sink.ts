@@ -4,6 +4,7 @@
 
 import { query } from '../db/postgres.js'
 import { config } from '../config.js'
+import { normalizeText } from '../utils/text-encoding.js'
 import type { LogEntry } from '../mcp/log-buffer.js'
 
 export type PendingLog = {
@@ -48,9 +49,10 @@ export const enqueue = (entry: LogEntry) => {
     level: entry.level,
     // Postgres text cannot hold U+0000, and one poisoned line wedges its whole
     // batch: the flush fails, retries forever, and every later log line queues
-    // behind it until the cap starts dropping them. Escape visibly instead —
-    // the byte is shown, not silently eaten.
-    message: entry.message.replaceAll('\u0000', '\\u0000'),
+    // behind it until the cap starts dropping them. normalizeText is the
+    // repo's single NUL policy (issue #20), applied here because log lines
+    // travel through raw query(), not the normalized queries.* boundary.
+    message: normalizeText(entry.message),
     loggedAt: new Date(entry.timestamp),
   })
 

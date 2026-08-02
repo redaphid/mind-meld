@@ -45,13 +45,15 @@ describe('enqueue', () => {
 
   // Postgres rejects U+0000 in text, and a rejected batch is retried forever:
   // one poisoned line would wedge the sink and eventually cost every later
-  // line. The byte is escaped visibly at enqueue instead of eaten.
-  it('escapes NUL bytes so one poisoned line cannot wedge the whole sink', async () => {
+  // line. normalizeText — the repo's single NUL policy — strips it at enqueue,
+  // because log lines travel through raw query(), not the normalized
+  // queries.* boundary.
+  it('normalizes NUL bytes so one poisoned line cannot wedge the whole sink', async () => {
     enqueue(entry({ message: `saw wsl${NUL}--list${NUL} in a path` }))
     await flushLogs()
 
     const [, params] = query.mock.calls[0]
-    expect(params[3]).toEqual(['saw wsl\\u0000--list\\u0000 in a path'])
+    expect(params[3]).toEqual(['saw wsl--list in a path'])
     expect((params[3] as string[])[0]).not.toContain(NUL)
   })
 
