@@ -25,31 +25,35 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Check if version already published
-        id: check
-        run: |
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-          if npm view "${PACKAGE_NAME}@${{ steps.version.outputs.version }}" version 2>/dev/null; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+      # Setup runs BEFORE the published check, unconditionally. The check asks
+      # the registry a question, and it can only ask it once setup-node has
+      # written the .npmrc that points at GitHub Packages and carries the auth
+      # token. Ordered the other way round, `npm view` queried public npm --
+      # where this package does not exist -- so `exists` was always false and
+      # every run walked into `409 Cannot publish over existing version`.
       - name: Setup pnpm
-        if: steps.check.outputs.exists == 'false'
         uses: pnpm/action-setup@v4
         with:
           run_install: false
 
       - name: Setup Node
-        if: steps.check.outputs.exists == 'false'
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
           registry-url: 'https://npm.pkg.github.com'
+
+      - name: Check if version already published
+        id: check
+        run: |
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          if npm view "${PACKAGE_NAME}@${{ steps.version.outputs.version }}" version                --registry=https://npm.pkg.github.com 2>/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Bun
         if: steps.check.outputs.exists == 'false'
