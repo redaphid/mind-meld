@@ -33,7 +33,7 @@ active_channel() {
   nums="$(active_channels)"
   count="$(printf '%s' "$nums" | grep -c . || true)"
   if [ "${count:-0}" -gt 1 ]; then
-    echo "⚠️  $count issues carry coordinator-active ($(echo $nums | tr '\n' ' ')) — coordination is AMBIGUOUS." >&2
+    echo "⚠️  $count issues carry coordinator-active ($(echo "$nums" | tr '\n' ' ')) — coordination is AMBIGUOUS." >&2
     echo "    Fix: gh issue edit <n> --remove-label coordinator-active on all but one." >&2
   fi
   printf '%s' "$nums" | head -1

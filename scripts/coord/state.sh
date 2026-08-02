@@ -24,7 +24,7 @@ if [ "${CHANNEL_COUNT:-0}" -gt 1 ]; then
   # Reachable, not theoretical: handoff.sh creates the successor carrying
   # `coordinator-active` and only then clears the predecessor's, so any failure
   # in between leaves two. `.[0]` reported the winner as fact.
-  echo "- 🚨 **$CHANNEL_COUNT issues carry \`coordinator-active\`: $(echo $CHANNELS | sed 's/\([0-9][0-9]*\)/#\1/g'). Coordination is AMBIGUOUS** — two coordinators may both believe they own it. Clear the label from all but one before doing anything else."
+  echo "- 🚨 **$CHANNEL_COUNT issues carry \`coordinator-active\`: $(echo "$CHANNELS" | sed 's/^/#/' | tr '\n' ' '). Coordination is AMBIGUOUS** — two coordinators may both believe they own it. Clear the label from all but one before doing anything else."
 fi
 if [ -n "$CHANNEL" ]; then
   hb="$(heartbeat_updated_at "$CHANNEL" || true)"

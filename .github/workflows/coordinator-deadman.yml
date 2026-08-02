@@ -75,7 +75,7 @@ jobs:
             # Reachable, not theoretical: handoff.sh creates the successor
             # carrying the label and only then clears the predecessor's.
             echo "::error::$count issues carry coordinator-active — coordination is ambiguous."
-            gh issue comment "$channel" --body "⏱️ **Deadman:** $count issues carry \`coordinator-active\` ($(echo $channels | tr '\n' ' ')). Coordination is **ambiguous** — more than one coordinator may believe it owns this. Clear the label from all but one."
+            gh issue comment "$channel" --body "⏱️ **Deadman:** $count issues carry \`coordinator-active\` ($(echo "$channels" | tr '\n' ' ')). Coordination is **ambiguous** — more than one coordinator may believe it owns this. Clear the label from all but one."
           fi
 
           # `--slurp` (one array per page) rather than `--paginate --jq`, which
