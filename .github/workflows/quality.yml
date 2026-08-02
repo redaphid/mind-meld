@@ -1,0 +1,52 @@
+# Quality ratchet (issue #43): dead code and test coverage are allowed to
+# improve, never to regress. Warnings-first: the remaining debt recorded in
+# quality/*.json shows up as warning annotations, not failures. The job FAILS
+# only on a regression (new knip finding, coverage drop) or a stale baseline
+# (an improvement that was not ratcheted into quality/*.json).
+#
+# Anti-cheating (see docs/quality-ratchet.md): raising the numbers by deleting
+# tests, narrowing coverage include, adding knip ignores without justification
+# comments, or hand-growing the baselines is rejected in review. Baselines may
+# only grow by hand, with a written justification in the PR.
+#
+# This workflow is deliberately separate from release.yml, which is
+# semver-gated and must not be disturbed.
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm run type-check
+
+      - name: Tests with coverage
+        run: pnpm run test:coverage
+
+      - name: Knip ratchet (fails only on regression or stale baseline)
+        run: pnpm run quality:knip
+
+      - name: Coverage ratchet (fails only on regression or stale baseline)
+        run: pnpm run quality:coverage

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  // Every ignore in this file MUST carry a justification comment.
+  // See docs/quality-ratchet.md — unexplained ignore sprawl counts as
+  // cheating the ratchet and will be rejected in review.
+  "entry": [
+    // src/index.ts (main/bin) and src/mcp/{server,http-server}.ts are picked
+    // up automatically from package.json, so they are not listed here.
+    // scripts/ is excluded from tsconfig but still real, executed code
+    // (package.json scripts, Dockerfiles, cron). Each file is a standalone
+    // tsx/node entry point, so scan them all as entries.
+    "scripts/*.ts",
+    "scripts/*.mjs",
+    // Ratchet checkers, run by CI and pnpm quality:*.
+    "scripts/quality/*.ts",
+    // Ad-hoc investigation scripts, run manually with tsx. Kept scanned so
+    // the deps/exports they use are not falsely reported as unused.
+    "scripts/test/*.ts"
+  ],
+  "project": ["src/**/*.ts", "scripts/**/*.{ts,mjs}"]
+}
