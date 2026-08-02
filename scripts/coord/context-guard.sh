@@ -10,6 +10,25 @@
 # can brick a coordinator session is worse than no guard.
 set -uo pipefail
 
+# OPT-IN, and silent for everyone else.
+#
+# This is registered in `.claude/settings.json`, which is committed, so it runs
+# for every contributor to this public repo — not just the coordinator. Without
+# this gate any developer with a large transcript is told, in a session that has
+# nothing to do with coordination, to run `handoff.sh --to vNEXT`. Advice that
+# arrives in the wrong context is not advice, it is noise, and it teaches people
+# to ignore the channel that matters.
+#
+# The coordinator opts in by exporting COORD_CONTEXT_GUARD=1 in its own
+# environment (or in .claude/settings.local.json, which is gitignored). Default
+# off: an unset variable means "not the coordinator".
+#
+# This script lives under scripts/, not .claude/, for the same reason the comms
+# hooks do (#77): nothing about measuring a transcript or moving a label is
+# specific to one vendor's agent runtime. `.claude/settings.json` is only the
+# registration that happens to invoke it.
+[ "${COORD_CONTEXT_GUARD:-0}" = "1" ] || exit 0
+
 WARN_BYTES="${COORD_WARN_BYTES:-3500000}"
 ROTATE_BYTES="${COORD_ROTATE_BYTES:-5500000}"
 

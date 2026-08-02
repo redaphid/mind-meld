@@ -29,14 +29,12 @@ if [ "$AGE" -lt 150 ]; then STATE=ALIVE; else STATE="STALE — rotate it"; fi
 echo "$STATE — coordinator $GEN on #$CHANNEL, last heartbeat ${AGE}m ago"
 echo
 echo "Last cycle said:"
-gh api "repos/$GH_REPO/issues/$CHANNEL/comments" --paginate \
-  --jq "[.[] | select(.body | contains(\"$HEARTBEAT_MARKER\"))] | last | .body" \
-  | sed -n '3,5p'
+heartbeat_record "$CHANNEL" | cut -f3 | tr '\t' ' ' | sed 's/\\n/\n/g' | sed -n '3,5p'
 echo
 echo "Work it currently claims to be running:"
-gh issue list --repo "$GH_REPO" --label in-progress --state open \
+gh issue list --repo "$GH_REPO" --label in-progress --state open --limit "$COORD_LIST_LIMIT" \
   --json number,title -q '.[] | "  #\(.number) \(.title)"' || true
-gh pr list --repo "$GH_REPO" --state open --json number,title,isDraft \
+gh pr list --repo "$GH_REPO" --state open --limit "$COORD_LIST_LIMIT" --json number,title,isDraft \
   -q '.[] | "  PR #\(.number) \(if .isDraft then "(draft) " else "" end)\(.title)"' || true
 echo
 echo "To force a cycle now, without waiting for the hourly run:"
