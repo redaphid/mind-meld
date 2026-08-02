@@ -103,14 +103,23 @@ export async function discoverSessionFiles(projectPath: string): Promise<Discove
 // of the 204 subagent transcripts checked on disk; the one exception carries
 // no sessionId on any line and yields no link either way.
 //
-// The *nearest* enclosing `subagents/` wins, because agents spawn agents and a
-// nested transcript's parent is the agent above it, not the root conversation.
+// A doubly-nested transcript (an agent spawned by an agent) returns null
+// rather than a guess. Live sync resolves the in-file `sessionId`, and there
+// is no evidence about whether that names the spawning agent or the root
+// conversation — the two derivations would disagree and only one can be right.
+// Zero such transcripts exist across the 210 checked on this host, so there is
+// nothing to validate a guess against, and a wrong parent is worse than none:
+// a reader traverses it.
 export function parentExternalIdFromRawPath(rawFilePath: string | null | undefined): string | null {
   if (!rawFilePath) return null;
   const segments = rawFilePath.replace(/\\/g, '/').split('/');
-  const marker = segments.lastIndexOf('subagents');
-  if (marker < 1) return null;
-  return segments[marker - 1] || null;
+  const markers = segments.reduce<number[]>(
+    (found, segment, index) => (segment === 'subagents' ? [...found, index] : found),
+    []
+  );
+  if (markers.length !== 1) return null;
+  if (markers[0] < 1) return null;
+  return segments[markers[0] - 1] || null;
 }
 
 export type SessionSyncResult = {
@@ -174,11 +183,16 @@ export async function syncSession(
   //
   // An unresolved parent is a missing link, never a failed session: discovery
   // can still reach a subagent whose parent has not been indexed on this host
-  // at all. It stays NULL and a later run picks it up, because the upsert
-  // COALESCEs the value rather than overwriting it.
+  // at all. It stays NULL, and a later run that can resolve it overwrites the
+  // NULL — COALESCE($5, existing) takes the new value whenever it is non-NULL.
+  //
+  // getLiveSessionByExternalId, not getSessionByExternalId: a soft-deleted
+  // parent must not be linked. Tombstones are excluded from search, so the
+  // link would be a pointer into data no reader can open. The backfill script
+  // applies the same rule, so both halves agree about the same row.
   let parentSessionId: number | undefined;
   if (session.parentSessionId) {
-    const parent = await queries.getSessionByExternalId(projectId, session.parentSessionId);
+    const parent = await queries.getLiveSessionByExternalId(projectId, session.parentSessionId);
     parentSessionId = parent?.id;
   }
 
@@ -358,9 +372,15 @@ export async function syncClaudeCode(options?: {
       // resolves its link (#48). The walk is depth-first and `<sessionId>/`
       // sorts before `<sessionId>.jsonl`, so raw discovery order reaches
       // subagents *first* and every link would resolve to nothing on a fresh
-      // index. Nesting depth is the ordering key rather than "is it an agent",
-      // because agents spawn agents: a transcript under two `subagents/`
-      // segments has an agent for a parent and must follow it.
+      // index.
+      //
+      // Depth rather than a plain is-agent flag only because depth is the
+      // thing that actually orders parents before children; it is not a claim
+      // that deeper nesting is handled end-to-end. It is not: a doubly-nested
+      // transcript's parent is not derivable today (see
+      // parentExternalIdFromRawPath) and none exist on this host. Ordering is
+      // simply correct for the case that does exist and harmless for the rest
+      // — the sort is per-project and stable, so nothing else about sync moves.
       const nestingDepth = (filePath: string) =>
         filePath.replace(/\\/g, '/').split('/subagents/').length - 1;
       const sessionFiles = [...discovered.files].sort(

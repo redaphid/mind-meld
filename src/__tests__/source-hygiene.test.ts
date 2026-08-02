@@ -27,15 +27,23 @@ describe('source hygiene', () => {
     return found
   }
 
-  it('has no raw NUL bytes in any TypeScript source, so every file diffs as text', async () => {
+  // Widened past 0x00 on purpose. The first fix for this swapped the NUL for a
+  // raw 0x1f, which git does not call binary but which is just as invisible to
+  // a human reading the diff -- the separator simply vanishes and the key looks
+  // like plain concatenation. Any C0 control byte other than tab, newline and
+  // carriage return is a bug or an invisible surprise; the \uXXXX escape reads
+  // identically and survives review.
+  it('has no raw control characters in any TypeScript source, so every file reviews as text', async () => {
     const files = (await Promise.all(roots.map(walk))).flat()
     expect(files.length).toBeGreaterThan(0)
 
+    const allowed = new Set([0x09, 0x0a, 0x0d])
     const offenders: string[] = []
     for (const file of files) {
       const bytes = await readFile(file)
-      const at = bytes.indexOf(0)
-      if (at !== -1) offenders.push(`${file} (first at byte ${at})`)
+      const at = bytes.findIndex((b) => b < 0x20 && !allowed.has(b))
+      if (at !== -1)
+        offenders.push(`${file} (0x${bytes[at].toString(16).padStart(2, '0')} at byte ${at})`)
     }
 
     expect(offenders).toEqual([])

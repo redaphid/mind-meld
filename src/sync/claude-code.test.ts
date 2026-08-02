@@ -382,6 +382,11 @@ describe('syncClaudeCode parent linkage ordering', () => {
         ? { id: rows.get(externalId), file_modified_at: null, content_chars: 0, message_count: 0 }
         : null
     )
+    // Parent resolution goes through the tombstone-excluding lookup.
+    getLiveSessionByExternalId.mockImplementation(
+      async (_projectId: number, externalId: string) =>
+        rows.has(externalId) ? { id: rows.get(externalId) } : null
+    )
     upsertSession.mockImplementation(async (params: { externalId: string }) => {
       const id = 100 + rows.size
       rows.set(params.externalId, id)

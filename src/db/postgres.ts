@@ -215,6 +215,26 @@ export const queries = {
     return result.rows[0].id;
   },
 
+  // Resolve a session that is safe to *point at*. Deliberately narrower than
+  // getSessionByExternalId below: a soft-deleted session is excluded from
+  // search, so linking a subagent to one would create a pointer into data the
+  // reader can never open. Used for parent linkage (#48), where the two
+  // lookups previously disagreed — the backfill refused a tombstone parent
+  // while live sync happily wrote it.
+  getLiveSessionByExternalId: async (projectId: number, externalId: string) => {
+    const result = await query<{ id: number }>(
+      'SELECT id FROM sessions WHERE project_id = $1 AND external_id = $2 AND deleted_at IS NULL',
+      [projectId, externalId]
+    );
+    return result.rows[0] ?? null;
+  },
+
+  // Deliberately does NOT filter deleted_at. This backs the incremental skip
+  // check: sync compares file_modified_at against the existing row to decide
+  // whether to re-parse a file. Hiding soft-deleted sessions here would make
+  // every deleted transcript look unsynced and be re-parsed and re-upserted on
+  // every run, forever. Use getLiveSessionByExternalId when the answer will be
+  // stored as a reference.
   getSessionByExternalId: async (projectId: number, externalId: string) => {
     const result = await query<{
       id: number;
