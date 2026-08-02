@@ -77,17 +77,17 @@ describe('mostRecentlyIndexed', () => {
   it('names the first machine that has ever been indexed', async () => {
     query.mockResolvedValue(
       rows(
-        activityRow({ machine: 'survivor', last_indexed_at: '2026-08-02T00:14:40.000Z' }),
+        activityRow({ machine: 'wsl-box', last_indexed_at: '2026-08-02T00:14:40.000Z' }),
         activityRow({ machine: 'windows', last_indexed_at: '2026-08-01T23:47:10.000Z' })
       )
     )
-    expect(mostRecentlyIndexed(await getMachineActivity())).toBe('survivor')
+    expect(mostRecentlyIndexed(await getMachineActivity())).toBe('wsl-box')
   })
 
   it('skips machines that have never been indexed', async () => {
     query.mockResolvedValue(
       rows(
-        activityRow({ machine: 'soul', last_indexed_at: null }),
+        activityRow({ machine: 'gpu-host', last_indexed_at: null }),
         activityRow({ machine: 'windows', last_indexed_at: '2026-08-01T23:47:10.000Z' })
       )
     )
@@ -102,9 +102,9 @@ describe('mostRecentlyIndexed', () => {
 describe('getMachineSessions', () => {
   it('filters by machine and applies limit/offset', async () => {
     query.mockResolvedValue(rows())
-    await getMachineSessions('survivor', 25, 50)
+    await getMachineSessions('wsl-box', 25, 50)
 
-    expect(query.mock.calls[0][1]).toEqual([UNKNOWN_MACHINE, 'survivor', 25, 50])
+    expect(query.mock.calls[0][1]).toEqual([UNKNOWN_MACHINE, 'wsl-box', 25, 50])
   })
 
   it('maps rows and defaults a null message_count to zero', async () => {

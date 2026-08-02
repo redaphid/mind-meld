@@ -366,7 +366,7 @@ export async function parseClaudeSessionFile(filePath: string): Promise<ParsedSe
 
 // Decode project path from encoded directory name
 export function decodeProjectPath(encodedName: string): string {
-  // Convert "-Users-hypnodroid-Projects-sibi" to "/Users/hypnodroid/Projects/sibi"
+  // Convert "-Users-you-Projects-acme" to "/Users/you/Projects/acme"
   if (encodedName.startsWith('-')) {
     return encodedName.replace(/^-/, '/').replace(/-/g, '/');
   }

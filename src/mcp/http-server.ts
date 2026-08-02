@@ -10,9 +10,10 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { hostHeaderValidation } from '@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js'
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { query, closePool, queries } from '../db/postgres.js'
+import { query, closePool } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
 import { search, formatSearchResults, findProjectsByPath, UnknownDataClassError } from './search.js'
+import { IngestPayloadSchema, ingestConversation, MissingDataClassError } from './ingest.js'
 import { sinceSchema } from './since.js'
 import {
   getSessionDigest,
@@ -37,44 +38,6 @@ import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../../package.json')
-
-const IngestMessageSchema = z.object({
-  externalId: z.string(),
-  role: z.string(),
-  content: z.string(),
-  timestamp: z.string().transform(s => new Date(s)),
-  sequenceNum: z.number(),
-  metadata: z.record(z.unknown()).optional(),
-})
-
-const IngestPayloadSchema = z.object({
-  source: z.string(),
-  sourceDisplayName: z.string().optional(),
-  // Classification for the source ('coding' | 'personal' | 'meetings' | ...,
-  // open vocabulary). Omitted, a new source defaults to 'personal' — fail
-  // closed — and an existing source keeps its current class. Normalized like
-  // the search side: a source stamped "Coding " would be unreachable.
-  dataClass: z
-    .string()
-    .max(32)
-    .optional()
-    .transform(s => s?.trim().toLowerCase() || undefined),
-  // The sending computer. Omitted means "unknown" — we record nothing rather
-  // than mislabelling it as the machine running this server.
-  machine: z.string().max(64).optional(),
-  project: z.object({
-    externalId: z.string(),
-    name: z.string(),
-    path: z.string().optional(),
-  }),
-  session: z.object({
-    externalId: z.string(),
-    title: z.string(),
-    startedAt: z.string().transform(s => new Date(s)),
-    endedAt: z.string().transform(s => new Date(s)).optional(),
-  }),
-  messages: z.array(IngestMessageSchema),
-})
 
 const getServer = () => {
   const server = new McpServer({
@@ -818,45 +781,16 @@ app.post('/api/quarantine/retry', apiRoute('Quarantine retry', async (req, res) 
 app.post('/api/ingest', async (req: any, res: any) => {
   try {
     const payload = IngestPayloadSchema.parse(req.body)
-
-    const source = await queries.getOrCreateSource(payload.source, payload.sourceDisplayName, payload.dataClass)
-
-    const projectId = await queries.upsertProject(
-      source.id,
-      payload.project.externalId,
-      payload.project.path ?? '',
-      payload.project.name,
-      payload.machine ?? null
-    )
-
-    const sessionId = await queries.upsertSession({
-      projectId,
-      externalId: payload.session.externalId,
-      title: payload.session.title,
-      startedAt: payload.session.startedAt,
-      endedAt: payload.session.endedAt,
-    })
-
-    let messagesInserted = 0
-    for (const msg of payload.messages) {
-      const msgId = await queries.insertMessage({
-        sessionId,
-        externalId: msg.externalId,
-        role: msg.role,
-        contentText: msg.content,
-        contentJson: msg.metadata,
-        timestamp: msg.timestamp,
-        sequenceNum: msg.sequenceNum,
-      })
-      if (msgId) messagesInserted++
-    }
-
-    await queries.updateSessionStats(sessionId)
-
-    res.json({ success: true, sourceId: source.id, projectId, sessionId, messagesInserted })
+    const result = await ingestConversation(payload)
+    res.json({ success: true, ...result })
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ success: false, error: 'Validation failed', details: error.errors })
+      return
+    }
+    // The caller's mistake, not ours: creating a source demands a dataClass.
+    if (error instanceof MissingDataClassError) {
+      res.status(400).json({ success: false, error: error.message })
       return
     }
     console.error('[API] Ingest error:', error)

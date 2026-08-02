@@ -3,5 +3,5 @@
 # Scoped to the coordinator toolchain to avoid colliding with the repo-wide
 # line-ending pass still in flight on another branch.
 scripts/coord/*.sh text eol=lf
-.claude/hooks/*.sh text eol=lf
+scripts/coord/*.mjs text eol=lf
 .github/workflows/*.yml text eol=lf

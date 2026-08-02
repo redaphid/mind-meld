@@ -3,7 +3,7 @@
 // (e.g. ~30k chars, hitting num_predict).
 //
 // Usage: POSTGRES_HOST=localhost POSTGRES_PORT=5433 \
-//        OLLAMA_URL=http://soul.local:11434 \
+//        OLLAMA_URL=http://ollama-host.local:11434 \
 //        pnpm tsx scripts/debug-chunk.ts <sessionId> <chunkIndex>
 
 import { query, closePool } from "../src/db/postgres.js";

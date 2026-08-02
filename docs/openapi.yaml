@@ -175,6 +175,7 @@ paths:
                 value:
                   source: huddle
                   sourceDisplayName: Slack Huddles
+                  dataClass: meetings
                   project:
                     externalId: C0123ABCD
                     name: '#platform-team'
@@ -205,11 +206,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/IngestResult'
         '400':
-          description: The payload failed schema validation.
+          description: |
+            The payload failed schema validation (`ValidationError`, with Zod
+            issues in `details`), or it would create a new source without a
+            `dataClass` (`IngestError`, whose message names the classes in
+            use).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ValidationError'
+                oneOf:
+                  - $ref: '#/components/schemas/ValidationError'
+                  - $ref: '#/components/schemas/IngestError'
         '500':
           description: Indexing failed (usually Postgres unreachable).
           content:
@@ -1323,11 +1330,14 @@ components:
           description: |
             Classification stamped on the source when it is first created
             (`coding`, `personal`, `meetings`, …; open vocabulary, lowercase).
-            Omitted, a new source defaults to `personal` — fail closed,
-            invisible to the default search until classified. An existing
-            source's class is never changed through ingest: this endpoint is
-            unauthenticated, and reclassification would silently move data
-            across the class boundary.
+            **Required whenever the ingest would create a new source** — a
+            payload naming an unknown `source` without a `dataClass` is
+            rejected with `400`, and the error lists the classes currently in
+            use. A new source's class decides who sees its data, so it must be
+            an explicit choice, never a default. An existing source's class is
+            never changed through ingest: this endpoint is unauthenticated,
+            and reclassification would silently move data across the class
+            boundary — the response reports the stored class either way.
           examples: [meetings]
         project:
           type: object
@@ -1389,7 +1399,7 @@ components:
 
     IngestResult:
       type: object
-      required: [success, sourceId, projectId, sessionId, messagesInserted]
+      required: [success, sourceId, projectId, sessionId, messagesInserted, dataClass]
       properties:
         success:
           type: boolean
@@ -1404,6 +1414,11 @@ components:
         messagesInserted:
           type: integer
           description: Newly inserted messages; `0` on a replayed payload.
+        dataClass:
+          type: string
+          description: |
+            The source's STORED class — for an existing source this may differ
+            from the `dataClass` sent, since ingest never reclassifies.
 
     ValidationError:
       type: object

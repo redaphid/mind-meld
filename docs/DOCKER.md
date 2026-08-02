@@ -71,7 +71,7 @@ takes ~1.6s.
 So sync runs as a host process, reaching Postgres and Chroma through their
 published ports:
 
-- **macOS** — `scripts/sync-host.sh` under launchd (`com.hypnodroid.mindmeld-sync`)
+- **macOS** — `scripts/sync-host.sh` under launchd (`com.example.mindmeld-sync`)
 - **Linux** — a systemd user timer; `mindmeld start` / `mindmeld stop` control it.
   Unit files: [LINUX.md](LINUX.md#systemd-user-timer--mind-the-toolchain-path)
 - **Ad hoc** — `pnpm run sync`

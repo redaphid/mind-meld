@@ -48,7 +48,7 @@ services:
   # NOTE: the `sync` worker no longer runs in Docker on macOS. Docker Desktop's
   # container network proxy (gvisor/vpnkit) backpressures Ollama's response
   # stream, inflating chunk summaries from ~3s to ~30s. It now runs as a HOST
-  # process via scripts/sync-host.sh (launchd: com.hypnodroid.mindmeld-sync),
+  # process via scripts/sync-host.sh (launchd: com.example.mindmeld-sync),
   # reaching Ollama over the fast host->tunnel path and Postgres/Chroma via their
   # published ports. On a Linux host where Ollama is local, restore this service.
 
@@ -78,11 +78,14 @@ services:
       SUMMARIZE_MODEL: ${SUMMARIZE_MODEL:-qwen3:4b-instruct}
       SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-3600}
       # Stamped onto every project this sync indexes, so /logs/<machine> can
-      # tell this WSL distro apart from the Windows host and the laptop —
-      # they all use /home/hypnodroid, so paths alone cannot.
-      MACHINE_NAME: ${MACHINE_NAME_WSL:-survivor}
+      # tell this WSL distro apart from the Windows host and the laptop — they
+      # all use the same /home/<user> shape, so paths alone cannot. Set
+      # MACHINE_NAME_WSL in .env to a name that means something to you.
+      MACHINE_NAME: ${MACHINE_NAME_WSL:-wsl}
     volumes:
-      - /home/hypnodroid/.claude:/root/.claude:ro
+      # Your WSL home's .claude directory. Set WSL_CLAUDE_PATH in .env — the
+      # default below is a placeholder and will not find real transcripts.
+      - ${WSL_CLAUDE_PATH:-/home/you/.claude}:/root/.claude:ro
 
   centroid-compute:
     image: ghcr.io/redaphid/mindmeld-centroids:latest
@@ -147,7 +150,7 @@ services:
   # The browser UI as its own container. Serves public/ at the root and
   # reverse-proxies the API surface (/mcp, /api, /status, /health, /logs,
   # /openapi.yaml) to the mcp service — so the Cloudflare tunnel's public
-  # hostname (mindmeld.hypnodroid.com) points at http://ui:3000 with a single
+  # hostname (e.g. mindmeld.example.com) points at http://ui:3000 with a single
   # ingress rule and every path keeps working. The mcp service remains fully
   # standalone on ${MCP_HTTP_PORT:-3847} for MCP clients.
   ui:

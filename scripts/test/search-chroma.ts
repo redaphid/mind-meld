@@ -32,7 +32,7 @@ const queries = [
   "git commit push merge rebase",
   "API endpoint REST HTTP request response",
 
-  // Sibi/Business context
+  // Business/domain context
   "HVAC heating cooling installation replacement",
   "property management real estate landlord tenant",
   "warranty claim service repair",
