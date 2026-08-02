@@ -11,25 +11,22 @@ host — see [Where sync runs](#where-sync-runs).
 **Ollama on the host**, not in Docker. Docker's Ollama is CPU-only on macOS,
 which makes summarization 10–50× slower; the host build uses Metal or CUDA.
 
-Mindmeld needs **two** Ollama endpoints:
+One instance serves both jobs, via `OLLAMA_URL` (default
+`http://localhost:11434`): `bge-m3` for vectorization and `SUMMARIZE_MODEL` for
+generation.
 
-| Env var | Default | Model | Why separate |
-| --- | --- | --- | --- |
-| `OLLAMA_URL` | `http://localhost:11434` | `SUMMARIZE_MODEL` | Generation; flash attention is fine and helps |
-| `OLLAMA_EMBEDDING_URL` | `http://localhost:21434` | `bge-m3` | **`bge-m3` returns all-null vectors when flash attention is ON** |
+> **Flash attention must be OFF on that instance.** `bge-m3` returns all-null
+> vectors when `OLLAMA_FLASH_ATTENTION=1`, and nothing errors — sync completes
+> "successfully" and produces zero usable embeddings. Probe before trusting any
+> endpoint:
+>
+> ```bash
+> curl -s localhost:11434/api/embed -d '{"model":"bge-m3","input":"probe"}' | head -c 80
+> # expect a long, non-null "embeddings":[[...]] array
+> ```
 
-`OLLAMA_EMBEDDING_URL` does **not** fall back to `OLLAMA_URL`. If nothing is
-listening on `:21434`, sync completes "successfully" and produces zero
-embeddings. Always probe before trusting it:
-
-```bash
-curl -s localhost:21434/api/embed -d '{"model":"bge-m3","input":"probe"}' | head -c 80
-# expect a long, non-null "embeddings":[[...]] array
-```
-
-Setting up the second instance: [LINUX.md](LINUX.md#dedicated-embedding-instance-flash-attention-off).
 Models are pulled automatically on first run; you can pre-pull with
-`ollama pull bge-m3`.
+`ollama pull bge-m3` and `ollama pull qwen3:8b`.
 
 ---
 
@@ -119,9 +116,8 @@ MCP_HTTP_PORT=3847
 # Database — must match on every machine feeding one shared index
 POSTGRES_PASSWORD=mindmeld
 
-# Ollama — two endpoints, see Prerequisites
+# Ollama — one endpoint, flash attention off (see Prerequisites)
 OLLAMA_URL=http://192.168.1.100:11434
-OLLAMA_EMBEDDING_URL=http://192.168.1.100:21434
 OLLAMA_MAX_CONCURRENCY=1        # over an SSH tunnel, keep this at 1
 
 # Models
@@ -211,7 +207,7 @@ from anything that can reach the port.
 
 ### Search returns nothing, sync reported success
 
-Dead embeddings, nearly always. Probe `:21434` (see
+Dead embeddings, nearly always — flash attention. Probe Ollama (see
 [Prerequisites](#prerequisites)), then check the backlog:
 
 ```bash

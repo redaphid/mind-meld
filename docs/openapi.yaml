@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Mindmeld HTTP API
-  version: 1.5.2
+  version: 1.7.1
   summary: Unified conversation index for Claude Code and Cursor.
   description: |
     Mindmeld indexes AI coding conversations into PostgreSQL (metadata +
@@ -63,7 +63,7 @@ paths:
               example:
                 status: ok
                 name: mindmeld
-                version: 1.5.2
+                version: 1.7.1
 
   /status:
     get:
@@ -347,7 +347,7 @@ components:
         version:
           type: string
           description: Version from the running image's `package.json`.
-          examples: ['1.5.2']
+          examples: ['1.7.1']
 
     Status:
       type: object

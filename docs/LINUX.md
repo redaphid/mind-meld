@@ -12,11 +12,16 @@ on both:
 ```bash
 # .env
 CLAUDE_CODE_PATH=~/.claude                              # same as macOS
-CURSOR_GLOBALSTATE_PATH=~/.config/Cursor/User/globalStorage
+CURSOR_PATH=~/.config/Cursor/User/globalStorage         # read by the CLI / sync
+CURSOR_GLOBALSTATE_PATH=~/.config/Cursor/User/globalStorage  # read by compose's bind mount
 ```
 
-If you don't use Cursor, point `CURSOR_GLOBALSTATE_PATH` at any existing empty
-directory so the Docker bind mount / copy step doesn't error.
+Both names exist and are **not** interchangeable: `src/config.ts` reads
+`CURSOR_PATH`, while `docker-compose.local.yml`'s bind mount reads
+`CURSOR_GLOBALSTATE_PATH`. Set whichever your setup uses — or both.
+
+If you don't use Cursor, point them at any existing empty directory so the Docker
+bind mount / copy step doesn't error.
 
 ## Ollama on Linux
 
@@ -25,38 +30,34 @@ Install and enable Ollama, then pull the models mindmeld uses:
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
 systemctl enable --now ollama
-ollama pull qwen3:4b-instruct   # summaries (SUMMARIZE_MODEL)
+ollama pull qwen3:8b            # summaries (SUMMARIZE_MODEL)
 ollama pull bge-m3              # embeddings (EMBEDDING_MODEL, 1024-dim)
 ```
 
-### Dedicated embedding instance (flash attention off)
+### Flash attention must be off
 
-`bge-m3` returns **all-null embeddings when flash attention is ON**. If your main
-Ollama has it on for generation speed, run a second, flash-off instance for
-embeddings on `21434` and point `OLLAMA_EMBEDDING_URL` at it:
+One Ollama serves both jobs, but `bge-m3` returns **all-null embeddings when
+flash attention is ON** — silently, with no error. Sync then completes
+"successfully" having stored nothing searchable.
+
+Make sure the instance mindmeld talks to has it disabled:
 
 ```ini
-# ~/.config/systemd/user/ollama-embed.service   (or a system unit)
-[Unit]
-Description=Ollama (embeddings, flash attention off)
+# /etc/systemd/system/ollama.service.d/override.conf
 [Service]
-Environment=OLLAMA_HOST=127.0.0.1:21434
 Environment=OLLAMA_FLASH_ATTENTION=0
 Environment=OLLAMA_KEEP_ALIVE=-1
-ExecStart=/usr/local/bin/ollama serve
-Restart=always
-[Install]
-WantedBy=default.target
 ```
 ```bash
-systemctl --user enable --now ollama-embed.service
-OLLAMA_HOST=127.0.0.1:21434 ollama pull bge-m3
-# verify non-null:
-curl -s localhost:21434/api/embed -d '{"model":"bge-m3","input":"probe"}' | head -c 80
+systemctl daemon-reload && systemctl restart ollama
+# verify non-null — this is the only real proof:
+curl -s localhost:11434/api/embed -d '{"model":"bge-m3","input":"probe"}' | head -c 80
 ```
 
-If your main Ollama already has flash attention **off**, you can skip this and set
-`OLLAMA_EMBEDDING_URL=http://localhost:11434` — but run the probe above first.
+> Earlier versions of mindmeld ran a second, flash-off Ollama on `21434` via
+> `OLLAMA_EMBEDDING_URL`. That variable no longer exists — everything goes
+> through `OLLAMA_URL`. If you have an old `.env` or systemd unit setting it,
+> it is now ignored.
 
 ## Hosting the Docker stack on native Linux
 
@@ -71,7 +72,7 @@ services:
       - "host.docker.internal:host-gateway"
 ```
 
-Alternatives: point `OLLAMA_URL`/`OLLAMA_EMBEDDING_URL` at the docker bridge gateway
+Alternatives: point `OLLAMA_URL` at the docker bridge gateway
 (`http://172.17.0.1:11434`), or run the container with `network_mode: host` and use
 `http://localhost:11434`. Make sure Ollama is bound to an interface the container
 can reach (`OLLAMA_HOST=0.0.0.0` or the bridge IP), not just `127.0.0.1`.
@@ -116,8 +117,10 @@ unit files). Two Linux-specific notes:
 ## Quick verification
 
 ```bash
-systemctl --user status ollama-embed.service       # embeddings instance up
-curl -s localhost:11434/api/tags | head -c 60       # generation reachable
+curl -s localhost:11434/api/tags | head -c 60        # Ollama reachable
+curl -s localhost:11434/api/embed \
+  -d '{"model":"bge-m3","input":"probe"}' | head -c 80   # NON-NULL vectors
 curl -s localhost:3847/health                        # MCP: {"status":"ok",...}
+curl -s localhost:3847/status | jq .pendingEmbeddings  # backlog draining?
 systemctl --user list-timers mindmeld-sync.timer     # real NEXT time, not n/a
 ```

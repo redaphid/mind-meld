@@ -41,12 +41,16 @@ Ask Claude *"what was I working on yesterday?"* and you're done.
 
 Two things to know before you trust the results:
 
-- **Sync does not run in `docker compose` anymore.** It runs as a host process —
-  see [Running the sync](#running-the-sync) below. Without it, nothing is indexed.
-- **Embeddings need a second Ollama.** `bge-m3` returns all-null vectors when
-  Ollama's flash attention is on, so vectorization goes to a dedicated flash-off
-  instance on `:21434`. Skip it and sync appears to succeed while producing zero
-  embeddings. Setup: [LINUX.md](docs/LINUX.md#dedicated-embedding-instance-flash-attention-off).
+- **Sync does not run in `docker compose`.** It runs as a host process — see
+  [Running the sync](#running-the-sync) below. Without it, nothing is indexed.
+- **Your Ollama must have flash attention OFF.** `bge-m3` returns all-null
+  vectors when it's on, and sync then appears to succeed while producing zero
+  embeddings. One probe settles it:
+
+  ```bash
+  curl -s localhost:11434/api/embed -d '{"model":"bge-m3","input":"probe"}' | head -c 80
+  # expect a long, non-null "embeddings":[[...]] array
+  ```
 
 Verify:
 
@@ -104,11 +108,12 @@ pnpm run sync -- --full       # ignore incremental state, re-scan everything
 pnpm run sync -- -s cursor    # one source only
 ```
 
-To run it hourly, install the systemd user timer and drive it with:
+To run it hourly on Linux, install the `mindmeld-sync` systemd user timer:
 
 ```bash
-mindmeld start   # enable + start mindmeld-sync.timer
-mindmeld stop    # disable the timer and stop any in-flight run
+systemctl --user enable --now mindmeld-sync.timer   # or: mindmeld start
+systemctl --user disable --now mindmeld-sync.timer  # or: mindmeld stop
+loginctl enable-linger "$USER"                      # survive logout
 ```
 
 Unit files and the toolchain-path gotcha (fnm/nvm shims don't exist for systemd):
@@ -173,9 +178,9 @@ the containers.
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `mindmeld` / `mindmeld` / `conversations` | Must match across every machine feeding one index |
 | `CHROMA_HOST` / `CHROMA_PORT` | `localhost` / `8001` | |
 | `MCP_HTTP_PORT` | `3847` | Host port published for the `mcp` container |
-| `OLLAMA_URL` | `http://localhost:11434` | Generation / summaries |
-| `OLLAMA_EMBEDDING_URL` | `http://localhost:21434` | Vectorization. **Does not fall back** to `OLLAMA_URL` |
+| `OLLAMA_URL` | `http://localhost:11434` | Serves both vectorization (`bge-m3`) and generation (`qwen3`). Flash attention must be off |
 | `OLLAMA_MAX_CONCURRENCY` | `1` | Over an SSH tunnel, concurrent requests each balloon to ~30s. Raise only when Ollama is local |
+| `OLLAMA_TIMEOUT_MS` / `OLLAMA_MAX_RETRIES` | `120000` / `3` | Per-request timeout and retry count |
 | `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | `bge-m3` / `1024` | Changing the model requires re-embedding everything |
 | `SUMMARIZE_MODEL` | `qwen3:8b` | Compose overrides this per-deployment |
 | `CLAUDE_CODE_PATH` | `~/.claude` | Same on macOS and Linux |
@@ -202,6 +207,9 @@ pnpm run search "query"       # full-text search from the CLI
 pnpm run sync:embeddings      # drain the pending-embedding queue
 pnpm run compute:centroids    # recompute session/project centroids
 pnpm run db:reset             # destroys all indexed data
+
+# repair vectors built from text ollama silently clipped, pre-1.7.0
+pnpm exec tsx scripts/backfill-truncated.ts --dry-run
 ```
 
 Migrations in `init-db/` are applied automatically when the `mcp` container
@@ -233,10 +241,11 @@ Details in [CLAUDE.md](CLAUDE.md#deployment).
 ## Troubleshooting
 
 **Search returns nothing, but sync says it succeeded.** Almost always dead
-embeddings. Probe the vectorization endpoint — a non-null array is the only proof:
+embeddings from flash attention. Probe Ollama — a non-null array is the only
+proof:
 
 ```bash
-curl -s localhost:21434/api/embed -d '{"model":"bge-m3","input":"probe"}' | head -c 80
+curl -s localhost:11434/api/embed -d '{"model":"bge-m3","input":"probe"}' | head -c 80
 ```
 
 Then check the backlog: `curl -s localhost:3847/status | jq .pendingEmbeddings`.
