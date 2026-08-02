@@ -90,6 +90,22 @@ describe('marker.mjs CLI', () => {
     expect(r.stdout).toContain('still waiting on this');
   });
 
+  it('threads-waiting marks the threads whose last word is the operator (inbox.sh)', () => {
+    const threads = [
+      { number: 1, last: { body: 'ping?' }, labels: ['bug'] },
+      { number: 2, last: { body: `${ROBOT} **Agent (Mira):** working` }, labels: [] },
+      { number: 3, last: { body: '<!-- coord-heartbeat -->\nalive' }, labels: [] },
+      // No comments and no labels: nobody has touched it, so it is the
+      // operator's and it is waiting.
+      { number: 4, last: null, labels: [] },
+      { number: 5, last: null, labels: ['triaged'] },
+    ];
+    const out = JSON.parse(
+      run(MARKER, ['threads-waiting'], JSON.stringify(threads)).stdout,
+    ) as Array<{ number: number; waiting: boolean }>;
+    expect(out.filter((t) => t.waiting).map((t) => t.number)).toEqual([1, 4]);
+  });
+
   it('survives garbage on stdin without failing the caller', () => {
     const r = run(MARKER, ['unanswered', '--owner', 'owner'], 'not json');
     expect(r.status).toBe(0);

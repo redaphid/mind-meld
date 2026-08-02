@@ -37,9 +37,15 @@ This is the operator's only signal that a message was seen. Never skip it.
 - Only comments whose API `author_association` is `OWNER` can be the
   operator.
 - Agent-authored comments are ALWAYS marked: the coordinator prefixes
-  `🤖 **Coordinator:**`, implementation agents prefix `🤖 **Agent:**`.
+  `🤖 **Coordinator vN:**`, implementation agents prefix `🤖 **Agent (Name):**`
+  with a short human first name they pick for themselves (#79).
 - Any OWNER comment WITHOUT such a marker is the operator speaking. It is an
   instruction, not information.
+- Only the COORDINATOR's marker counts as *the operator has been answered*. An
+  agent posting progress must never make an unanswered question look answered.
+- The rule is enforced mechanically — see `docs/agent-authorship.md`. Parsing
+  lives in exactly one place, `scripts/coord/marker.mjs`; do not add a second
+  emoji test anywhere.
 
 ## 3. Honor operator comments — before starting and before PR-ready
 

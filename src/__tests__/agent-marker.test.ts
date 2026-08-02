@@ -32,6 +32,17 @@ describe('classifyComment: coordinator', () => {
     expect(c.generation).toBe('v11');
   });
 
+  it('accepts the generation-less form documented in AGENTS.md', () => {
+    // Docs and habit both produce `🤖 **Coordinator:**`. Rejecting it would
+    // block the coordinator mid-cycle over a detail only the handoff protocol
+    // needs, so it is valid — the generation is recorded when it is there.
+    const c = marker.classifyComment(`${ROBOT} **Coordinator:** answered`);
+    expect(c.actor).toBe('coordinator');
+    expect(c.valid).toBe(true);
+    expect(c.isCoordinatorReply).toBe(true);
+    expect(c.generation).toBe(null);
+  });
+
   it('matches the marker produced by coord_marker() in scripts/coord/lib.sh', () => {
     // lib.sh: coord_marker() { printf '🤖 **Coordinator %s:**' "$1"; }
     const c = marker.classifyComment(`${ROBOT} **Coordinator v3:** heartbeat`);

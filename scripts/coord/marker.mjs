@@ -35,6 +35,9 @@ const INFRA_HTML = /^<!--\s*coord-[a-z0-9-]+\s*-->$/i;
 // Invisible characters GitHub, editors, and copy-paste like to leave in front
 // of a marker. Stripping them is not politeness — a BOM would otherwise turn a
 // perfectly marked agent comment into a false "the operator is waiting" alarm.
+/** Unit separator: safe column delimiter for `read`, unlike tab. */
+const US = '\u001F';
+
 const INVISIBLE = /^[\uFEFF\u200B-\u200D\u2060\u00A0\s]+/;
 
 const AGENT_NAME = /^[\p{L}][\p{L}\p{M}'\- ]{0,39}$/u;
@@ -111,7 +114,10 @@ export function classifyComment(body) {
         isMachine: true,
         // ONLY the coordinator's marker means "the operator has been answered".
         isCoordinatorReply: true,
-        valid: Boolean(generation),
+        // The generation is only needed by the handoff protocol; blocking a
+        // coordinator mid-cycle over a missing `vN` would be enforcement for
+        // its own sake. AGENTS.md documents the bare form, so it is valid.
+        valid: true,
         generation,
         marker,
         reason: generation ? 'coordinator marker' : 'coordinator marker without a generation',
@@ -286,6 +292,40 @@ function main(argv) {
       for (const c of unansweredOperatorComments(comments, owner)) {
         const first = String(c.body ?? '').split('\n')[0];
         process.stdout.write(`- [${c.created_at}] ${c.html_url}\n  ${first}\n`);
+      }
+      return 0;
+    }
+    case 'threads-waiting': {
+      // Thread-level inbox rule, in one place: a thread is waiting on us when
+      // its last comment is unmarked, or when nobody has touched it at all
+      // (no comments and no labels means the operator opened it and left).
+      const threads = parseComments(readStdin());
+      const out = threads.map((t) => ({
+        ...t,
+        waiting: t?.last ? lastWordIsOperators(t.last) : (t?.labels ?? []).length === 0,
+      }));
+      if (!rest.includes('--format')) {
+        process.stdout.write(`${JSON.stringify(out)}\n`);
+        return 0;
+      }
+      // Formatted for `read`: unit separator, not tab, because tab is IFS
+      // whitespace and an empty labels field would silently shift every later
+      // column. Formatting lives here so inbox.sh needs no external `jq` —
+      // `gh --jq` is built in, a standalone jq is not installed everywhere.
+      for (const t of out) {
+        const first = String(t.last?.body ?? '(no comments — untriaged)').split('\n')[0];
+        process.stdout.write(
+          [
+            t.waiting ? 'WAITING' : 'ok',
+            t.kind ?? '',
+            t.number ?? '',
+            t.last?.createdAt ?? t.updatedAt ?? '',
+            (t.labels ?? []).join(','),
+            t.title ?? '',
+            first, // first LINE, not a byte slice — nothing is truncated
+            t.last?.url ?? '',
+          ].join(US) + '\n',
+        );
       }
       return 0;
     }

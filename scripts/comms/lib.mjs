@@ -12,7 +12,14 @@
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+// The one definition of comment authorship, shared with the coordinator
+// toolchain rather than reimplemented here. See docs/agent-authorship.md.
+const { classifyComment } = await import(
+  pathToFileURL(resolve(dirname(fileURLToPath(import.meta.url)), '../coord/marker.mjs')).href
+);
 
 /** Read the hook's stdin (runtimes pass hook input as one JSON doc). */
 export const readStdinJson = () => {
@@ -69,8 +76,15 @@ export const newest = (timestamps) => {
 /**
  * Comments starting with an agent/coordinator marker are machine-authored;
  * everything else from the OWNER is the operator speaking.
+ *
+ * Delegated to `scripts/coord/marker.mjs`, which is the single definition. The
+ * regex that used to live here was the third one in the repo, and all three
+ * disagreed: none could see past the `<!-- coord-heartbeat -->` that opens
+ * every heartbeat, so the coordinator's own heartbeat read as the operator
+ * speaking — which here would strip `needs-human` off a thread nobody had
+ * actually answered. See docs/agent-authorship.md.
  */
-export const isAgentMarked = (body) => /^(🤖|👁|\[agent\]|\[bot\])/u.test((body ?? '').trimStart());
+export const isAgentMarked = (body) => classifyComment(body).isMachine;
 
 export const warn = (message) => {
   process.stderr.write(`comms-hook warning: ${message}\n`);

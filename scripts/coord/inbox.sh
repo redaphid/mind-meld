@@ -7,9 +7,12 @@
 # coordinator can poke or regenerate the responsible subagent instead of
 # discovering the backlog hours later.
 #
-# Everyone posts under one GitHub account, so authorship is by marker: agent
-# and coordinator comments begin with 🤖 / 🔎 / ⏱️. A thread whose LAST comment
-# carries no marker is waiting on us.
+# Everyone posts under one GitHub account, so authorship is by marker, and the
+# marker is parsed in exactly one place: scripts/coord/marker.mjs. The emoji
+# test that used to live in this jq pipeline disagreed with the one in lib.sh,
+# and neither could see past the `<!-- coord-heartbeat -->` that opens every
+# heartbeat body — so the coordinator's own heartbeat showed up here as a
+# thread waiting on a reply. See docs/agent-authorship.md.
 #
 #   scripts/coord/inbox.sh          # threads awaiting a reply
 #   scripts/coord/inbox.sh --all    # every open thread, with its last speaker
@@ -47,22 +50,9 @@ query($owner:String!, $name:String!) {
       labels: [.labels.nodes[].name],
       last: (.comments.nodes[0] // null)
     })
-  | map(. + {
-      # No comments at all + no labels ⇒ operator-authored and untouched.
-      waiting: (
-        if .last == null then (.labels | length) == 0
-        else (.last.body | test("^\\s*(🤖|🔎|⏱️)") | not)
-        end)
-    })
-  | .[] | [ (if .waiting then "WAITING" else "ok" end), .kind, .number,
-            (.last.createdAt // .updatedAt),
-            (.labels | join(",")),
-            .title,
-            # First LINE, not a byte slice: the no-truncation policy exists so
-            # meaning is never silently destroyed.
-            ((.last.body // "(no comments — untriaged)") | split("\n")[0]),
-            (.last.url // "") ] | join("")
-' | while IFS=$'\037' read -r state kind num when labels title preview url; do
+' \
+| node "$(dirname "$0")/marker.mjs" threads-waiting --format \
+| while IFS=$'\037' read -r state kind num when labels title preview url; do
   # Unit separator, not tab: tab counts as IFS whitespace, so `read` collapses
   # runs of it and an empty labels field silently shifts every later column.
   [ "$SHOW_ALL" -eq 0 ] && [ "$state" = "ok" ] && continue

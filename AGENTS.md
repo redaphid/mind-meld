@@ -21,9 +21,24 @@ script checks it.
 1. **Read receipts**: 👀-react to every new issue and every operator comment
    the moment you read it (`gh api .../reactions -f content=eyes`).
 2. **Authorship markers**: all agents post under the owner's account, so mark
-   your comments — `🤖 **Coordinator:**` (coordinator) or `🤖 **Agent:**`
-   (implementation/review agents). Any unmarked OWNER comment is the human
+   your comments — `🤖 **Coordinator vN:**` (coordinator) or
+   `🤖 **Agent (Name):**` (implementation/review agents). **Pick a short human
+   first name for yourself**, announce it in your first comment, and sign
+   every comment with it (#79). Any unmarked OWNER comment is the human
    operator and is an instruction.
+
+   This is enforced, not requested: `scripts/coord/hooks/gh-comment-guard.mjs`
+   blocks a `gh` comment whose body has no valid marker, and an unnamed
+   `🤖 **Agent:**` does not count. Easiest correct path:
+
+   ```bash
+   export COORD_AGENT_NAME=YourName
+   node scripts/coord/comment.mjs --pr <n> --body "..."
+   ```
+
+   Only the COORDINATOR's marker means the operator has been answered — an
+   agent's comment must never bury a question he is waiting on. Full protocol:
+   `docs/agent-authorship.md`.
 3. **Honor operator comments**: re-fetch issue and PR comments before
    starting work AND before marking a PR ready. Every unmarked OWNER comment
    gets honored or answered with a reason — never ignored.
