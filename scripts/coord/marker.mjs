@@ -22,6 +22,7 @@
 //   gh api ... | node scripts/coord/marker.mjs unanswered --owner redaphid
 
 import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 
 /** The marker grammar, in one place. */
 export const ROBOT = '\u{1F916}'; // 🤖 — machine-authored
@@ -286,6 +287,6 @@ function main(argv) {
   }
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1].replace(/\\/g, '/')}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   process.exitCode = main(process.argv.slice(2));
 }
