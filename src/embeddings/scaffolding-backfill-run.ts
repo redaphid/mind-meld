@@ -22,6 +22,7 @@
 //      permanently unsearchable after a "successful" restore.
 
 import { planStrip, type BackfillRow, type StripPlan } from './scaffolding-backfill.js'
+import { classifyNoise } from './classify.js'
 
 export interface BackfillCandidate extends BackfillRow {
   has_vector: boolean
@@ -65,8 +66,18 @@ export interface BackfillSummary {
   rewrite: number
   vectorsDropped: number
   sessionsReset: number
+  // Rewrites — rows whose real content survives — whose surviving text is short
+  // enough that the embedding worker will refuse it afterwards. `rewrite` alone
+  // reads as "kept", and for these it is only half true: the text is kept and
+  // full-text search still finds them, but the vector is dropped and never
+  // comes back.
+  shortAfterStrip: number
+  // Husks plus short survivors: every message this run leaves unembeddable.
+  unembeddableAfter: number
+  // Of those, the ones that hold a vector today — the messages that are
+  // findable by semantic search now and will not be afterwards.
+  findabilityLost: number
   samples: StripPlan[]
-  onProgress?: never
 }
 
 export const runBackfill = async (
@@ -83,7 +94,16 @@ export const runBackfill = async (
     await store.drainVectorDeletes()
   }
 
-  const counts = { scanned: 0, skip: 0, unembeddable: 0, rewrite: 0, vectorsDropped: 0 }
+  const counts = {
+    scanned: 0,
+    skip: 0,
+    unembeddable: 0,
+    rewrite: 0,
+    vectorsDropped: 0,
+    shortAfterStrip: 0,
+    unembeddableAfter: 0,
+    findabilityLost: 0,
+  }
   const samples: StripPlan[] = []
   const sessionsToReset = new Set<number>()
   let queued = 0
@@ -101,6 +121,15 @@ export const runBackfill = async (
       if (plan.action === 'skip') continue
 
       if (samples.length < sampleLimit) samples.push(plan)
+
+      // Asked of the same function the worker will ask, so the preview cannot
+      // drift away from what actually happens next.
+      const refusedAfterwards = classifyNoise(plan.stripped) !== null
+      if (plan.action === 'rewrite' && refusedAfterwards) counts.shortAfterStrip++
+      if (refusedAfterwards) {
+        counts.unembeddableAfter++
+        if (row.has_vector) counts.findabilityLost++
+      }
 
       const dropVector = plan.dropVector && row.has_vector
       if (dropVector) {

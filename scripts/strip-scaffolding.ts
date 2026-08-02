@@ -384,6 +384,18 @@ const main = async () => {
     `sessionsReset deletes every session_chunk of those ${summary.sessionsReset} sessions; the chunks are ` +
       'copied to session_chunk_backup first and --revert puts them back.'
   )
+  // `rewrite` reads as "kept", and for the short ones that is only half true.
+  // The text is kept and full-text search still finds them; the vector is
+  // dropped, the message requeues, and the worker refuses it on length. Anyone
+  // approving this run is approving that too, so it is printed next to the
+  // number they are approving rather than left to be discovered afterwards.
+  console.log(
+    `\nSemantic findability: ${summary.unembeddableAfter} messages are left unembeddable ` +
+      `(${summary.unembeddable} scaffolding husks + ${summary.shortAfterStrip} rewrites whose surviving ` +
+      `text falls under the 50-character embedding floor). ${summary.findabilityLost} of them hold a ` +
+      'vector today, so that many lose semantic findability they currently have. All remain in full-text ' +
+      'search, and --revert clears the terminal rows for every one of them.'
+  )
   if (!APPLY)
     console.log('Re-run with --apply to perform the backfill (originals are backed up).')
   else

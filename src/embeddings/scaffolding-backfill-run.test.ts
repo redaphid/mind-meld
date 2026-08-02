@@ -145,6 +145,46 @@ describe('runBackfill: the dry run reports the real blast radius (review F2)', (
   })
 })
 
+const shortSurvivor = (id: number, session: number): BackfillCandidate => ({
+  id,
+  session_id: session,
+  // Real content, and it survives the strip — but only 28 characters of it, so
+  // the embedding worker's 50-character floor discards it afterwards.
+  content_text:
+    '<system-reminder>a long hook injection that dominates the message body and then some more of it</system-reminder>\n' +
+    '<command-name>/ask</command-name>\n<command-args>why is the queue stuck?</command-args>',
+  has_vector: true,
+})
+
+describe('runBackfill: the preview names what becomes unsearchable (review F4)', () => {
+  it('counts rewrites whose stripped text falls under the embedding floor', async () => {
+    // These are the rows the plan labels "real content survives". It does
+    // survive — in full-text search. But the vector is dropped, the message
+    // requeues, the worker measures 28 characters and marks it terminal noise.
+    // Framing the loss as only the 269 husks understates it by more than
+    // double, and the operator approves the number that is printed.
+    const f = fakeStore([husk(1, 10), material(2, 11), shortSurvivor(3, 12)])
+    const summary = await runBackfill(f.store, { apply: false })
+
+    expect(summary.rewrite).toBe(2)
+    expect(summary.shortAfterStrip).toBe(1)
+    // Husks plus short survivors: everything the worker will refuse to embed.
+    expect(summary.unembeddableAfter).toBe(2)
+  })
+
+  it('counts only the ones that are findable today as findability lost', async () => {
+    const f = fakeStore([
+      husk(1, 10),
+      { ...shortSurvivor(3, 12), has_vector: false },
+      shortSurvivor(4, 13),
+    ])
+    const summary = await runBackfill(f.store, { apply: false })
+
+    expect(summary.unembeddableAfter).toBe(3)
+    expect(summary.findabilityLost).toBe(2)
+  })
+})
+
 describe('runBackfill: an interrupted run can be finished (review F3)', () => {
   it('records a vector in the journal before dropping its row', async () => {
     // Reverse this order and a crash in the window leaves a live vector with no
