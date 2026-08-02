@@ -39,10 +39,13 @@ interface KnipReport { issues: KnipFileIssues[] }
 
 const runKnip = (): KnipReport => {
   // --no-exit-code: knip's own pass/fail is irrelevant; the baseline decides.
+  // shell on Windows: pnpm is a .cmd there, and execFileSync does not apply
+  // PATHEXT resolution, so a bare 'pnpm' is ENOENT without it.
   const out = execFileSync('pnpm', ['exec', 'knip', '--reporter', 'json', '--no-exit-code'], {
     cwd: ROOT,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    shell: process.platform === 'win32',
   });
   return JSON.parse(out) as KnipReport;
 };

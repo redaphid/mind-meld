@@ -1,7 +1,3 @@
-# These run in git-bash on the Windows host and on the Actions runner. CRLF
-# breaks both, so pin them regardless of the checkout's autocrlf setting.
-# Scoped to the coordinator toolchain to avoid colliding with the repo-wide
-# line-ending pass still in flight on another branch.
-scripts/coord/*.sh text eol=lf
-scripts/coord/*.mjs text eol=lf
+# These run on the Actions runner, where CRLF breaks them, so pin the line
+# endings regardless of the checkout's autocrlf setting.
 .github/workflows/*.yml text eol=lf

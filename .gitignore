@@ -30,8 +30,6 @@ logs/
 # Stray Claude version symlinks
 /2.1.*
 
-# Coordinator cycle state (local high-water marks, see docs/coordinator-workflow.md)
-.coord-state.json
 
 # Local pnpm store (appears in-project when the global store is on another drive)
 .pnpm-store/
