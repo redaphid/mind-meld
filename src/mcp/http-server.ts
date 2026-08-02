@@ -35,6 +35,7 @@ import { readStoredLogs, countStoredLogs, getLogWriters } from './stored-logs.js
 import { startDbLogSink, installFlushOnExit, sinkStats, flushLogs } from '../logging/db-sink.js'
 import { ensureSummarizeModel } from '../embeddings/summarize.js'
 import { createRequire } from 'node:module'
+import { resolveTitle } from './title.js'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../../package.json')
@@ -342,12 +343,13 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
 
     const recentlyProcessed = await query<{
       id: number
-      title: string
+      title: string | null
+      summary: string | null
       project: string
       last_synced_at: string
       message_count: number
     }>(`
-      SELECT s.id, s.title, p.name as project,
+      SELECT s.id, s.title, s.summary, p.name as project,
              s.last_synced_at, s.message_count
       FROM sessions s
       JOIN projects p ON s.project_id = p.id
@@ -375,14 +377,15 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
 
     const latestSession = await query<{
       started_at: string
-      title: string
+      title: string | null
+      summary: string | null
       project: string
     }>(`
-      SELECT s.started_at, s.title, p.name as project
+      SELECT s.started_at, s.title, s.summary, p.name as project
       FROM sessions s
       JOIN projects p ON s.project_id = p.id
       WHERE s.deleted_at IS NULL
-        AND s.title NOT ILIKE '%briefing%'
+        AND COALESCE(s.title, '') NOT ILIKE '%briefing%'
       ORDER BY s.started_at DESC
       LIMIT 1
     `)
@@ -406,7 +409,8 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
         sources: syncStatus.sources,
         recentlyProcessed: recentlyProcessed.rows.map(r => ({
           sessionId: r.id,
-          title: r.title,
+          title: resolveTitle(r).title,
+          titleSource: resolveTitle(r).titleSource,
           project: r.project,
           lastSyncedAt: r.last_synced_at,
           messageCount: r.message_count,
@@ -420,7 +424,12 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
       quarantined,
       chroma: { collections: chromaCollections },
       latestSession: latest
-        ? { startedAt: latest.started_at, title: latest.title, project: latest.project }
+        ? {
+            startedAt: latest.started_at,
+            title: resolveTitle(latest).title,
+            titleSource: resolveTitle(latest).titleSource,
+            project: latest.project,
+          }
         : null,
     })
   } catch (error) {

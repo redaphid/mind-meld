@@ -129,7 +129,9 @@ export const SessionView = ({ id }) => {
       <span class="right faint mono">#${digest.sessionId}</span>
     </div>
 
-    <h2 class="session-title" title=${digest.title ?? ''}>${digest.title ?? 'Untitled session'}</h2>
+    <h2 class="session-title" title=${digest.title ?? ''}>
+      ${digest.title ?? html`<span class="faint">Session ${digest.sessionId} — no title yet</span>`}
+    </h2>
     <div class="m" style="margin-bottom:14px;font-size:13px;color:var(--muted)">
       <button
         class="pill"
