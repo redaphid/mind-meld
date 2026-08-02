@@ -132,3 +132,40 @@ describe('getMachineSessions', () => {
     expect(query.mock.calls[0][1]).toEqual([UNKNOWN_MACHINE, UNKNOWN_MACHINE, 10, 0])
   })
 })
+
+// Issue #95: the per-machine session list showed the same stale title column.
+describe('getMachineSessions title resolution (#95)', () => {
+  it('derives the title from the summary when the source supplied none', async () => {
+    query.mockResolvedValue(
+      rows({
+        id: 7,
+        title: null,
+        summary: 'Set up container monitoring.\nMore detail.',
+        project: 'mind-meld',
+        message_count: '3',
+        started_at: null,
+        last_synced_at: null,
+      })
+    )
+    const [s] = await getMachineSessions('windows', 10, 0)
+    expect(s.title).toBe('Set up container monitoring.')
+    expect(s.titleSource).toBe('summary')
+  })
+
+  it('leaves the title null rather than guessing when there is no summary', async () => {
+    query.mockResolvedValue(
+      rows({
+        id: 7,
+        title: null,
+        summary: null,
+        project: 'mind-meld',
+        message_count: '3',
+        started_at: null,
+        last_synced_at: null,
+      })
+    )
+    const [s] = await getMachineSessions('windows', 10, 0)
+    expect(s.title).toBeNull()
+    expect(s.titleSource).toBe('none')
+  })
+})

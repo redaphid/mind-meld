@@ -5,11 +5,16 @@
 // contract can stay stable while the query layer evolves.
 
 import type { SearchResult } from './search.js'
+import type { TitleSource } from './title.js'
 import type { SessionDigest, MessagesResult, RenderedMessage, SessionMessage } from './session.js'
 
 export type SearchHitDto = {
   sessionId: number
-  title: string
+  // Null when the session has no source-supplied title and is not yet
+  // summarized. `titleSource` distinguishes a real title from a derived one,
+  // so a client never has to guess whether a title means anything (issue #95).
+  title: string | null
+  titleSource: TitleSource
   project: string
   projectPath: string | null
   source: string
@@ -33,6 +38,7 @@ const iso = (value: Date | string | null | undefined): string | null => {
 export const toSearchHit = (r: SearchResult): SearchHitDto => ({
   sessionId: r.session_id,
   title: r.title,
+  titleSource: r.title_source,
   project: r.project_name,
   projectPath: r.project_path ?? null,
   source: r.source,
@@ -62,6 +68,7 @@ export type DigestDto = {
   projectId: number
   project: string
   title: string | null
+  titleSource: TitleSource
   summary: string | null
   excerpt: string | null
   messageCount: number
@@ -77,6 +84,7 @@ export const toDigest = (d: SessionDigest): DigestDto => ({
   projectId: d.project_id,
   project: d.project,
   title: d.title,
+  titleSource: d.title_source,
   summary: d.summary,
   excerpt: d.excerpt,
   messageCount: d.message_count,

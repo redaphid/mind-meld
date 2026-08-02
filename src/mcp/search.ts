@@ -6,6 +6,7 @@ import { getOllamaClient } from '../embeddings/ollama.js'
 import { subtractVectors, normalizeVector, addVectors, scaleVector } from '../utils/vector-math.js'
 import { fuseRanks, type RankedList } from './rrf.js'
 import { buildSnippet, ts_headline_options } from './snippet.js'
+import { resolveTitle, type TitleSource } from './title.js'
 import { parseSinceDate } from './since.js'
 
 const PROJECT_BOOST = 0.5
@@ -95,7 +96,11 @@ export type SearchResult = {
   project_path: string
   source: string
   data_class: string
-  title: string
+  // Null when the session has neither a source-supplied title nor a summary.
+  // `title_source` says which one this is, so a consumer can tell a real title
+  // from a derived one instead of guessing (issue #95).
+  title: string | null
+  title_source: TitleSource
   date: Date
   score: number
   matched_tier: MatchedTier
@@ -256,13 +261,20 @@ const resolveCentroids = async (table: 'sessions' | 'projects', weightedIds: Wei
   return resolved
 }
 
+// resolveTitle returns camelCase; SearchResult is the SQL-shaped snake_case row
+// shared with the MCP tools, so the seam converts once here.
+const resolveTitleFields = (row: { title: string | null; summary: string | null }) => {
+  const { title, titleSource } = resolveTitle(row)
+  return { title, title_source: titleSource }
+}
+
 const baseResult = (s: SessionRow, score: number, tier: MatchedTier): SearchResult => ({
   session_id: s.id,
   project_name: s.project_name,
   project_path: s.project_path,
   source: s.source_name,
   data_class: s.data_class,
-  title: s.title ?? 'Untitled',
+  ...resolveTitleFields(s),
   date: s.started_at,
   score,
   matched_tier: tier,
@@ -439,6 +451,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       session_id: number
       message_id: number
       title: string | null
+      summary: string | null
       project_name: string
       project_path: string
       source_name: string
@@ -462,7 +475,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         WHERE ${conditions.join('\n          AND ')}
         ORDER BY m.session_id, rank DESC
       )
-      SELECT rm.session_id, rm.message_id, s.title, p.name as project_name, p.path as project_path,
+      SELECT rm.session_id, rm.message_id, s.title, s.summary, p.name as project_name, p.path as project_path,
              src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
              s.started_at, s.message_count, rm.rank,
              p.id as project_id,
@@ -485,7 +498,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         project_path: row.project_path,
         source: row.source_name,
         data_class: row.data_class,
-        title: row.title ?? 'Untitled',
+        ...resolveTitleFields(row),
         date: row.started_at,
         score: row.rank,
         matched_tier: 'message',
@@ -524,7 +537,11 @@ export const formatSearchResults = (results: SearchResult[], projectIds: number[
         : r.cursor?.message_id != null
           ? `\n   Cursor: message ${r.cursor.message_id}`
           : ''
-      return `${i + 1}. **${r.title}**${projectLabel}
+      // No title is an honest answer: the session has no source-supplied title
+      // and has not been summarized yet. Naming the session and saying so beats
+      // handing a triaging LLM an instruction fragment as if it were a topic.
+      const heading = r.title ?? `Session ${r.session_id} (no title — not summarized yet)`
+      return `${i + 1}. **${heading}**${projectLabel}
    Session ID: ${r.session_id}
    Project: ${r.project_name} (${r.source}, ${r.data_class})
    Date: ${r.date.toISOString().split('T')[0]}

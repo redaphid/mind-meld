@@ -10,6 +10,7 @@ const hit = (over: Partial<SearchResult> = {}): SearchResult => ({
   source: 'claude_code',
   data_class: 'coding',
   title: 'Debugging the backfill',
+  title_source: 'source',
   date: new Date('2026-01-01T00:00:00Z'),
   score: 0.5,
   matched_tier: 'session',
@@ -38,6 +39,7 @@ describe('toSearchHit', () => {
     expect(toSearchHit(hit())).toEqual({
       sessionId: 42,
       title: 'Debugging the backfill',
+      titleSource: 'source',
       project: 'mind-meld',
       projectPath: '/p/mind-meld',
       source: 'claude_code',
@@ -72,6 +74,7 @@ describe('toDigest', () => {
     session_id: 42,
     project_id: 7,
     title: 'A session',
+    title_source: 'source',
     summary: 'a summary',
     excerpt: null,
     project: 'mind-meld',

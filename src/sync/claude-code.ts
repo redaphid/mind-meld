@@ -150,7 +150,12 @@ export async function syncSession(
     sessionId = await queries.upsertSession({
       projectId,
       externalId: session.sessionId,
-      title: session.messages[0]?.contentText?.slice(0, 200),
+      // No title. Claude Code transcripts carry no title field, and the old
+      // fallback — the first 200 characters of message one — titled every
+      // brief-opening conversation with its own brief, permanently, because
+      // this is the only write to sessions.title (issue #95). The read path
+      // derives a title from the summary instead, and shows none until then.
+      title: undefined,
       isAgent: session.isAgent,
       agentId: session.agentId,
       claudeVersion: session.claudeVersion,

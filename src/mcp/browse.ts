@@ -4,6 +4,7 @@
 
 import { query } from '../db/postgres.js'
 import { UNKNOWN_MACHINE } from './machines.js'
+import { resolveTitle, type TitleSource } from './title.js'
 
 export type ProjectSummary = {
   id: number
@@ -58,7 +59,10 @@ export const listProjects = async (): Promise<ProjectSummary[]> => {
 
 export type SessionListItem = {
   id: number
+  // Resolved from the summary when the source supplied no title; null rather
+  // than a fabricated one when neither exists (issue #95).
   title: string | null
+  titleSource: TitleSource
   summary: string | null
   project: string | null
   projectId: number
@@ -143,7 +147,7 @@ export const listSessions = async (
     total: result.rows[0] ? Number(result.rows[0].total) : 0,
     items: result.rows.map(r => ({
       id: r.id,
-      title: r.title,
+      ...resolveTitle(r),
       summary: r.summary,
       project: r.project,
       projectId: r.project_id,

@@ -4,6 +4,7 @@
 // container can report on sync work done by containers it cannot see.
 
 import { query } from '../db/postgres.js'
+import { resolveTitle, type TitleSource } from './title.js'
 
 // Projects that predate the machine column, or arrived via /api/ingest without
 // a declared sender, group under this name rather than being silently dropped.
@@ -96,7 +97,9 @@ export const mostRecentlyIndexed = (activity: MachineActivity[]): string | null 
 
 export type MachineSession = {
   id: number
+  // Resolved, never fabricated — see issue #95.
   title: string | null
+  titleSource: TitleSource
   project: string | null
   messageCount: number
   startedAt: string | null
@@ -106,6 +109,7 @@ export type MachineSession = {
 type SessionRow = {
   id: number
   title: string | null
+  summary: string | null
   project: string | null
   message_count: string | null
   started_at: string | null
@@ -120,7 +124,7 @@ export const getMachineSessions = async (
   offset: number
 ): Promise<MachineSession[]> => {
   const result = await query<SessionRow>(
-    `SELECT s.id, s.title, p.name AS project, s.message_count,
+    `SELECT s.id, s.title, s.summary, p.name AS project, s.message_count,
             s.started_at, s.last_synced_at
      FROM sessions s
      JOIN projects p ON p.id = s.project_id
@@ -133,7 +137,7 @@ export const getMachineSessions = async (
 
   return result.rows.map(r => ({
     id: r.id,
-    title: r.title,
+    ...resolveTitle(r),
     project: r.project,
     messageCount: Number(r.message_count ?? 0),
     startedAt: r.started_at,

@@ -395,6 +395,7 @@ describe('formatSearchResults', () => {
     source: 'claude_code',
     data_class: 'coding',
     title: 'Fixing the build',
+    title_source: 'source' as const,
     date: new Date('2026-01-01T00:00:00Z'),
     score: 0.7,
     matched_tier: 'session' as const,
@@ -425,5 +426,62 @@ describe('formatSearchResults', () => {
     expect(text).toContain('Cursor: chunk 3')
     expect(text).toContain('Cursor: message 900')
     expect(text).toContain('(no snippet)')
+  })
+})
+
+// Issue #95: a session's title used to be the first 200 characters of its first
+// message, and was never re-derived once a summary existed. Search is the surface
+// where that misled an LLM most, because formatSearchResults makes the title the
+// bold headline of every hit and never prints the summary.
+describe('search title resolution (#95)', () => {
+  it('derives the title from the summary when the source supplied none', async () => {
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (typeof sql === 'string' && sql.includes('s.id = $1'))
+        return params?.[0] === 2
+          ? rows(sessionRow({ id: 2, title: null, summary: 'Fixed the FTS ranking query.\nThen deployed it.' }))
+          : rows()
+      return rows()
+    })
+    mockChromaSessionsOnly()
+
+    const results = await search({ query: 'anything', mode: 'semantic' })
+    const hit = results.find(r => r.session_id === 2)
+    expect(hit?.title).toBe('Fixed the FTS ranking query.')
+    expect(hit?.title_source).toBe('summary')
+  })
+
+  it('reports no title rather than inventing one when there is no summary yet', async () => {
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (typeof sql === 'string' && sql.includes('s.id = $1'))
+        return params?.[0] === 2 ? rows(sessionRow({ id: 2, title: null, summary: null })) : rows()
+      return rows()
+    })
+    mockChromaSessionsOnly()
+
+    const results = await search({ query: 'anything', mode: 'semantic' })
+    const hit = results.find(r => r.session_id === 2)
+    expect(hit?.title).toBeNull()
+    expect(hit?.title_source).toBe('none')
+  })
+
+  it('formats an untitled hit as an honest placeholder, not as "Untitled"', () => {
+    const formatted = formatSearchResults([
+      {
+        session_id: 4268,
+        project_name: 'proj',
+        project_path: '/p/proj',
+        source: 'claude_code',
+        data_class: 'coding',
+        title: null,
+        title_source: 'none',
+        date: new Date('2026-01-01T00:00:00Z'),
+        score: 0.5,
+        matched_tier: 'message',
+        snippet: 'a matching excerpt',
+      },
+    ])
+    expect(formatted).toContain('Session 4268')
+    expect(formatted).toContain('not summarized yet')
+    expect(formatted).not.toContain('Untitled')
   })
 })

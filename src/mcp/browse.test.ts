@@ -101,3 +101,38 @@ describe('getActivity', () => {
     expect(await getActivity(1)).toEqual([{ day: '2026-01-01', sessions: 4, messages: 900 }])
   })
 })
+
+// Issue #95: /api/sessions is the UI's list surface. It already selected
+// s.summary; it just returned the stale title column beside it.
+describe('listSessions title resolution (#95)', () => {
+  const row = (over: Record<string, unknown>) => ({
+    id: 1,
+    title: null,
+    summary: null,
+    project: 'proj',
+    project_id: 2,
+    source: 'claude_code',
+    machine: 'unknown',
+    message_count: '10',
+    is_automated: false,
+    started_at: null,
+    last_synced_at: null,
+    chunk_count: '0',
+    total: '1',
+    ...over,
+  })
+
+  it('derives the title from the summary when none was stored', async () => {
+    query.mockResolvedValue({ rows: [row({ summary: 'Wired up the ntfy alerts.\nMore detail.' })] })
+    const { items } = await listSessions({ limit: 10, offset: 0 })
+    expect(items[0].title).toBe('Wired up the ntfy alerts.')
+    expect(items[0].titleSource).toBe('summary')
+  })
+
+  it('leaves the title null rather than guessing when there is no summary', async () => {
+    query.mockResolvedValue({ rows: [row({})] })
+    const { items } = await listSessions({ limit: 10, offset: 0 })
+    expect(items[0].title).toBeNull()
+    expect(items[0].titleSource).toBe('none')
+  })
+})
