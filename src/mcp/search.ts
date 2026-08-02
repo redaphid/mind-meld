@@ -160,21 +160,74 @@ const composeQueryVector = async (
 // each other, case-insensitively where the filesystem is. The caller sends
 // whatever its OS gave it — normalization is automatic here, never the
 // caller's job.
+// Every directory the cwd is inside, itself first: `D:/a/b` -> `D:/a/b`,
+// `D:/a`, `D:/`. Enumerating these lets an ancestor project be found by exact
+// equality instead of by using the stored path as a LIKE pattern — which both
+// removed a wildcard hazard (`_` and `%` are legal in a path) and gave the
+// comparison a real separator boundary, so a project at `D:/pro` no longer
+// matches a cwd of `D:/projects`.
+const ancestorsOf = (path: string): string[] => {
+  const out = [path]
+  let current = path
+  for (;;) {
+    if (current === '/' || /^[A-Za-z]:\/$/.test(current)) break
+    const cut = current.lastIndexOf('/')
+    if (cut < 0) break
+    let parent = current.slice(0, cut)
+    if (parent === '') parent = '/'
+    else if (/^[A-Za-z]:$/.test(parent)) parent = `${parent}/`
+    if (parent === current) break
+    out.push(parent)
+    current = parent
+  }
+  return [...new Set(out)]
+}
+
+// `_` and `%` are ordinary characters in a directory name; escape them so a
+// path is matched literally.
+const escapeLike = (value: string) => value.replace(/[\\%_]/g, (c) => `\\${c}`)
+
+const descendantPattern = (path: string) => `${escapeLike(path)}${path.endsWith('/') ? '' : '/'}%`
+
+// Matches the caller's cwd against stored (canonical, #33) project paths in
+// every spelling of the same directory: `D:\x`, `D:/x` and `/mnt/d/x` all find
+// each other, case-insensitively where the filesystem provably is. The caller
+// sends whatever its OS gave it — normalization is automatic here, never the
+// caller's job.
+//
+// A project matches when it contains the cwd (any ancestor directory, matched
+// exactly) or when it lives under the cwd (one escaped prefix pattern).
 export const findProjectsByPath = async (cwd: string) => {
   const variants = projectPathVariants(cwd)
   if (variants.length === 0) return []
-  const conditions = variants.map((variant, i) => {
-    const op = isWindowsBackedPath(variant) ? 'ILIKE' : 'LIKE'
-    return `($${i + 1} ${op} p.path || '%' OR p.path ${op} $${i + 1} || '%')`
-  })
+  // Case-insensitive matching needs the same evidence as everywhere else: a
+  // `D:` path proves the filesystem, a bare `/mnt/<letter>` does not. The
+  // drive-form variant of a `/mnt` cwd is generated above, so a Windows row
+  // is still found either way.
+  const exact: string[] = []
+  const exactLower: string[] = []
+  const under: string[] = []
+  const underLower: string[] = []
+  for (const variant of variants) {
+    const windowsBacked = isWindowsBackedPath(variant)
+    for (const ancestor of ancestorsOf(variant)) {
+      if (windowsBacked) exactLower.push(ancestor.toLowerCase())
+      else exact.push(ancestor)
+    }
+    if (windowsBacked) underLower.push(descendantPattern(variant))
+    else under.push(descendantPattern(variant))
+  }
   const result = await query<{ id: number; path: string; name: string; source_name: string }>(
     `SELECT p.id, p.path, p.name, s.name as source_name
      FROM projects p
      JOIN sources s ON p.source_id = s.id
      WHERE p.path IS NOT NULL
-       AND (${conditions.join(' OR ')})
+       AND (p.path = ANY($1::text[])
+            OR lower(p.path) = ANY($2::text[])
+            OR p.path LIKE ANY($3::text[])
+            OR p.path ILIKE ANY($4::text[]))
      ORDER BY LENGTH(p.path) DESC`,
-    variants
+    [exact, exactLower, under, underLower]
   )
   return result.rows
 }
