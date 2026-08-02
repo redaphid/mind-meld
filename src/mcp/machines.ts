@@ -1,5 +1,5 @@
 // Which computer indexed what, and when. Several machines sync into one
-// database; projects.machine records the origin (see init-db/014-machine.sql).
+// database; projects.machine records the origin (see init-db/016-machine.sql).
 // This is read from the DB rather than the process log buffer, so the MCP
 // container can report on sync work done by containers it cannot see.
 
