@@ -242,6 +242,12 @@ export const queries = {
       ON CONFLICT (project_id, external_id)
       DO UPDATE SET
         title = COALESCE($3, sessions.title),
+        -- Every subagent transcript already had a row before linkage existed
+        -- (#48), so the link only ever arrives on this path. COALESCE, not a
+        -- bare assignment: a run that reaches a subagent before its parent is
+        -- indexed passes NULL, and that must not clear a link an earlier run
+        -- established.
+        parent_session_id = COALESCE($5, sessions.parent_session_id),
         model_used = COALESCE($8, sessions.model_used),
         file_modified_at = $12,
         started_at = COALESCE($13, sessions.started_at),
@@ -272,6 +278,26 @@ export const queries = {
     return result.rows[0].id;
   },
 
+  // Resolve a session that is safe to *point at*. Deliberately narrower than
+  // getSessionByExternalId below: a soft-deleted session is excluded from
+  // search, so linking a subagent to one would create a pointer into data the
+  // reader can never open. Used for parent linkage (#48), where the two
+  // lookups previously disagreed — the backfill refused a tombstone parent
+  // while live sync happily wrote it.
+  getLiveSessionByExternalId: async (projectId: number, externalId: string) => {
+    const result = await query<{ id: number }>(
+      'SELECT id FROM sessions WHERE project_id = $1 AND external_id = $2 AND deleted_at IS NULL',
+      [projectId, externalId]
+    );
+    return result.rows[0] ?? null;
+  },
+
+  // Deliberately does NOT filter deleted_at. This backs the incremental skip
+  // check: sync compares file_modified_at against the existing row to decide
+  // whether to re-parse a file. Hiding soft-deleted sessions here would make
+  // every deleted transcript look unsynced and be re-parsed and re-upserted on
+  // every run, forever. Use getLiveSessionByExternalId when the answer will be
+  // stored as a reference.
   getSessionByExternalId: async (projectId: number, externalId: string) => {
     const result = await query<{
       id: number;

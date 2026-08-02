@@ -1,0 +1,328 @@
+/**
+ * Backfill sessions.parent_session_id on subagent transcripts (#48).
+ *
+ * WHY A BACKFILL IS NEEDED AT ALL
+ * The code fix links subagents at sync time, but sync is incremental: a file
+ * whose mtime has not changed is skipped before it is ever parsed. Every
+ * subagent transcript that already exists is in exactly that state, so the
+ * code fix alone would never reach them. They stay orphans until something
+ * repairs them from stored data.
+ *
+ * WHERE THE PARENT COMES FROM
+ * raw_file_path. Live sync uses the `sessionId` recorded inside the agent
+ * file, which is authoritative, but this script cannot read those files: rows
+ * come from several machines and most of those paths do not exist here. The
+ * two derivations were compared on the exact population being written -- all
+ * 188 rows joined to their real transcripts on disk -- and agree, with zero
+ * disagreements. Path derivation is pure string work on data already in the
+ * row, so it is machine-independent and gives the same answer wherever it runs.
+ *
+ * SAFETY
+ *   - Dry run by default. Nothing is written unless --apply is passed.
+ *   - Only ever fills rows where parent_session_id IS NULL.
+ *   - The parent must resolve to a NOT-deleted session in the same project,
+ *     matching queries.getLiveSessionByExternalId, so this script and live
+ *     sync agree about every row. A soft-deleted parent is reported as
+ *     soft-deleted, not misreported as absent.
+ *   - Self-links, cycles and doubly-nested transcripts are refused, not guessed.
+ *   - --apply journals the real previous value AND the value written, and
+ *     --revert restores only rows still holding what this script wrote -- so a
+ *     revert can never clear a link established by something else.
+ *
+ * Usage:
+ *   pnpm tsx scripts/backfill-parent-sessions.ts                 # dry run
+ *   pnpm tsx scripts/backfill-parent-sessions.ts --apply         # write
+ *   pnpm tsx scripts/backfill-parent-sessions.ts --revert <file> # undo
+ *
+ * Per the repo's data guardrails, --apply is NOT run as part of the change
+ * that introduces it. The operator approves data mutations.
+ */
+
+import { writeFile, readFile } from 'fs/promises'
+import { fileURLToPath } from 'url'
+import { resolve } from 'path'
+import { query, closePool } from '../src/db/postgres.js'
+import { parentExternalIdFromRawPath } from '../src/sync/claude-code.js'
+
+type AgentRow = {
+  id: number
+  project_id: number
+  external_id: string
+  raw_file_path: string | null
+  parent_session_id: number | null
+}
+
+export type Planned = {
+  id: number
+  externalId: string
+  parentId: number
+  parentExternalId: string
+  // Read from the row, not assumed. The old journal hardcoded null, which was
+  // only ever correct by inference from this query's own WHERE clause.
+  previousParentSessionId: number | null
+}
+
+type Skipped = { id: number; externalId: string; reason: string }
+
+export type JournalEntry = {
+  id: number
+  previousParentSessionId: number | null
+  wroteParentSessionId: number
+}
+
+// Composite Map key. The separator is written as an escape and never as a raw
+// control byte: a literal 0x00 in source makes git classify the whole file as
+// binary, and this is the one file an operator most needs to read line by line
+// before approving a mutation (#48 review, finding 4).
+const projectScopedKey = (projectId: number, externalId: string) =>
+  `${projectId}\u001f${externalId}`
+
+const journalPath = () =>
+  `backfill-parent-sessions.revert.${new Date().toISOString().replace(/[:.]/g, '-')}.json`
+
+export const plan = async () => {
+  const orphans = await query<AgentRow>(
+    `SELECT id, project_id, external_id, raw_file_path, parent_session_id
+       FROM sessions
+      WHERE is_agent = true
+        AND deleted_at IS NULL
+        AND parent_session_id IS NULL
+      ORDER BY id`
+  )
+
+  const wanted = new Set<string>()
+  for (const row of orphans.rows) {
+    const parentExternalId = parentExternalIdFromRawPath(row.raw_file_path)
+    if (parentExternalId) wanted.add(parentExternalId)
+  }
+
+  // Soft-deleted parents are fetched too, so a tombstone can be *named* as a
+  // tombstone. Filtering them out here is what produced the claim that one
+  // orphan's parent "is not indexed and will appear later", when in fact it
+  // had been deleted and was never going to appear.
+  const parents = await query<{
+    id: number
+    project_id: number
+    external_id: string
+    deleted: boolean
+  }>(
+    `SELECT id, project_id, external_id, deleted_at IS NOT NULL AS deleted
+       FROM sessions
+      WHERE external_id = ANY($1::text[])`,
+    [[...wanted]]
+  )
+  const byProjectAndExternalId = new Map(
+    parents.rows.map((p) => [projectScopedKey(p.project_id, p.external_id), p])
+  )
+
+  const planned: Planned[] = []
+  const skipped: Skipped[] = []
+
+  for (const row of orphans.rows) {
+    const parentExternalId = parentExternalIdFromRawPath(row.raw_file_path)
+    if (!parentExternalId) {
+      skipped.push({
+        id: row.id,
+        externalId: row.external_id,
+        reason: 'no derivable parent in path',
+      })
+      continue
+    }
+    if (parentExternalId === row.external_id) {
+      skipped.push({ id: row.id, externalId: row.external_id, reason: 'parent is itself' })
+      continue
+    }
+    const parent = byProjectAndExternalId.get(projectScopedKey(row.project_id, parentExternalId))
+    if (!parent) {
+      skipped.push({
+        id: row.id,
+        externalId: row.external_id,
+        reason: 'parent not indexed in this project',
+      })
+      continue
+    }
+    if (parent.deleted) {
+      // Live sync resolves parents through getLiveSessionByExternalId, which
+      // excludes tombstones. Linking here would point a reader at a session
+      // search deliberately hides, and the two halves would disagree.
+      skipped.push({ id: row.id, externalId: row.external_id, reason: 'parent is soft-deleted' })
+      continue
+    }
+    if (parent.id === row.id) {
+      skipped.push({ id: row.id, externalId: row.external_id, reason: 'parent is itself' })
+      continue
+    }
+    planned.push({
+      id: row.id,
+      externalId: row.external_id,
+      parentId: parent.id,
+      parentExternalId,
+      previousParentSessionId: row.parent_session_id,
+    })
+  }
+
+  // Cycle check across the planned set plus links already in the table. A
+  // cycle would make parent traversal in any reader loop forever.
+  const proposed = new Map(planned.map((p) => [p.id, p.parentId]))
+  const existing = await query<{ id: number; parent_session_id: number }>(
+    `SELECT id, parent_session_id FROM sessions WHERE parent_session_id IS NOT NULL`
+  )
+  for (const row of existing.rows) proposed.set(row.id, row.parent_session_id)
+
+  const cyclic = new Set<number>()
+  for (const p of planned) {
+    const seen = new Set<number>([p.id])
+    let cursor: number | undefined = p.parentId
+    while (cursor !== undefined) {
+      if (seen.has(cursor)) {
+        cyclic.add(p.id)
+        break
+      }
+      seen.add(cursor)
+      cursor = proposed.get(cursor)
+    }
+  }
+
+  const safe = planned.filter((p) => !cyclic.has(p.id))
+  for (const p of planned.filter((p) => cyclic.has(p.id)))
+    skipped.push({ id: p.id, externalId: p.externalId, reason: 'would create a parent cycle' })
+
+  return { total: orphans.rows.length, planned: safe, skipped }
+}
+
+/**
+ * Write the links, and report exactly which rows were written.
+ *
+ * The UPDATE keeps its `parent_session_id IS NULL` guard, so a concurrent sync
+ * that linked a row between plan and apply wins. RETURNING is what makes that
+ * skip observable: the previous version journalled the row anyway, as though
+ * it had been written, and a later revert would then clear sync's link.
+ */
+export const applyLinks = async (planned: Planned[]) => {
+  const written: Planned[] = []
+  const skipped: Planned[] = []
+
+  for (const p of planned) {
+    const result = await query<{ id: number }>(
+      `UPDATE sessions SET parent_session_id = $2
+        WHERE id = $1 AND parent_session_id IS NULL
+        RETURNING id`,
+      [p.id, p.parentId]
+    )
+    if (result.rows.length > 0) written.push(p)
+    else skipped.push(p)
+  }
+
+  const journal: JournalEntry[] = written.map((p) => ({
+    id: p.id,
+    previousParentSessionId: p.previousParentSessionId,
+    wroteParentSessionId: p.parentId,
+  }))
+
+  return { written, skipped, journal }
+}
+
+/**
+ * Restore rows this script wrote, and only those.
+ *
+ * `IS NOT DISTINCT FROM` rather than `=`, so the guard still matches against a
+ * NULL. A row whose link has since changed is left alone and reported, never
+ * silently counted as reverted -- rowCount alone concealed exactly that.
+ */
+export const revertFromJournal = async (entries: JournalEntry[]) => {
+  for (const entry of entries)
+    if (typeof entry.wroteParentSessionId !== 'number')
+      throw new Error(
+        `Journal entry for session ${entry.id} has no wroteParentSessionId, so its revert ` +
+          `could not be guarded and might clear a link this script never wrote. Refusing.`
+      )
+
+  const reverted: number[] = []
+  const untouched: number[] = []
+
+  for (const entry of entries) {
+    const result = await query<{ id: number }>(
+      `UPDATE sessions SET parent_session_id = $2
+        WHERE id = $1 AND parent_session_id IS NOT DISTINCT FROM $3
+        RETURNING id`,
+      [entry.id, entry.previousParentSessionId, entry.wroteParentSessionId]
+    )
+    if (result.rows.length > 0) reverted.push(entry.id)
+    else untouched.push(entry.id)
+  }
+
+  return { reverted, untouched }
+}
+
+const report = (total: number, planned: Planned[], skipped: Skipped[]) => {
+  console.log(`Orphaned subagent sessions (is_agent, parent_session_id IS NULL): ${total}`)
+  console.log(`  would gain linkage : ${planned.length}`)
+  console.log(`  left unlinked      : ${skipped.length}`)
+
+  const reasons = new Map<string, number>()
+  for (const s of skipped) reasons.set(s.reason, (reasons.get(s.reason) ?? 0) + 1)
+  for (const [reason, count] of reasons) console.log(`    - ${reason}: ${count}`)
+
+  console.log('\nSample of what would be written:')
+  for (const p of planned.slice(0, 5))
+    console.log(
+      `  session ${p.id} (${p.externalId})  ->  parent ${p.parentId} (${p.parentExternalId})`
+    )
+}
+
+const run = async () => {
+  const args = process.argv.slice(2)
+  const revertIndex = args.indexOf('--revert')
+
+  if (revertIndex !== -1) {
+    const file = args[revertIndex + 1]
+    if (!file) throw new Error('--revert needs the path to a revert journal written by --apply')
+    const entries: JournalEntry[] = JSON.parse(await readFile(file, 'utf8'))
+    console.log(`Reverting ${entries.length} row(s) from ${file}...`)
+    const { reverted, untouched } = await revertFromJournal(entries)
+    console.log(`Restored ${reverted.length} row(s).`)
+    if (untouched.length > 0)
+      console.log(
+        `Left ${untouched.length} row(s) alone: their link is no longer the value this backfill ` +
+          `wrote, so it belongs to something else. Sessions: ${untouched.join(', ')}`
+      )
+    return
+  }
+
+  const apply = args.includes('--apply')
+  const { total, planned, skipped } = await plan()
+  report(total, planned, skipped)
+
+  if (!apply) {
+    console.log('\nDRY RUN -- nothing was written. Re-run with --apply to write these links.')
+    return
+  }
+
+  const { written, skipped: notWritten, journal } = await applyLinks(planned)
+  const file = journalPath()
+  await writeFile(file, JSON.stringify(journal, null, 2))
+
+  console.log(`\nLinked ${written.length} session(s).`)
+  if (notWritten.length > 0)
+    console.log(
+      `Skipped ${notWritten.length} row(s) that something else linked between plan and apply. ` +
+        `They are NOT in the journal, so a revert will not touch them. ` +
+        `Sessions: ${notWritten.map((p) => p.id).join(', ')}`
+    )
+  console.log(`Revert journal: ${file}`)
+  console.log(`Undo with: pnpm tsx scripts/backfill-parent-sessions.ts --revert ${file}`)
+}
+
+// Run only when invoked directly, so the exported helpers above are importable
+// by tests without executing a database script as a side effect of the import.
+const invokedDirectly =
+  process.argv[1] !== undefined &&
+  resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
+
+if (invokedDirectly)
+  run()
+    .catch((e) => {
+      console.error(e)
+      process.exitCode = 1
+    })
+    .finally(closePool)
