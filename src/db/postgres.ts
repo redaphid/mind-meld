@@ -73,6 +73,24 @@ export async function closePool(): Promise<void> {
   }
 }
 
+// Postgres stores no U+0000 — not in text, not in jsonb — and rejects the whole
+// INSERT with 'invalid byte sequence for encoding "UTF8": 0x00'. Transcripts hit
+// this legitimately: WSL tools (`wsl --list`) emit UTF-16 output that Claude Code
+// records faithfully as an escaped \u0000 inside otherwise valid JSON, and one
+// such line used to fail an entire session's sync. Dropping the character is the
+// only lossless-enough option — it carries no meaning in these transcripts.
+export const stripNulls = (value: string): string => value.replace(/\u0000/g, '');
+
+const stripNullsIn = (value: string | undefined): string | null =>
+  value === undefined ? null : stripNulls(value);
+
+// Sanitises during serialisation, so a genuine "\\u0000" in the text is left
+// alone — only real NUL characters are removed.
+const toJson = (value: object | undefined): string | null =>
+  value === undefined
+    ? null
+    : JSON.stringify(value, (_key, v) => (typeof v === 'string' ? stripNulls(v) : v));
+
 // Query builders for common operations
 export const queries = {
   // Sources
@@ -164,7 +182,7 @@ export const queries = {
       [
         params.projectId,
         params.externalId,
-        params.title ?? null,
+        stripNullsIn(params.title),
         params.isAgent ?? false,
         params.parentSessionId ?? null,
         params.agentId ?? null,
@@ -280,12 +298,12 @@ export const queries = {
         params.externalId,
         params.parentMessageId ?? null,
         params.role,
-        params.contentText ?? null,
-        params.contentJson ? JSON.stringify(params.contentJson) : null,
+        stripNullsIn(params.contentText),
+        toJson(params.contentJson),
         params.toolName ?? null,
-        params.toolInput ? JSON.stringify(params.toolInput) : null,
-        params.toolResult ?? null,
-        params.thinkingText ?? null,
+        toJson(params.toolInput),
+        stripNullsIn(params.toolResult),
+        stripNullsIn(params.thinkingText),
         params.model ?? null,
         params.inputTokens ?? null,
         params.outputTokens ?? null,

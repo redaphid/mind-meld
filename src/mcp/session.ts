@@ -5,6 +5,7 @@ import { buildExcerpt } from './snippet.js'
 export type SessionMetadata = {
   id: number
   external_id: string | null
+  project_id: number
   title: string | null
   summary: string | null
   project_name: string
@@ -30,6 +31,7 @@ export type ChunkManifestEntry = {
 export type SessionDigest = {
   session_id: number
   title: string | null
+  project_id: number
   summary: string | null
   // Issue #4: present only when summary is NULL — a labeled raw-text fallback so
   // the digest is never triage-blind. Yields to the real summary once it exists.
@@ -64,7 +66,8 @@ const DEFAULT_CHUNK_LIMIT = 20
 const DEFAULT_CHAR_BUDGET = 24000
 
 const SELECT_METADATA = `
-  SELECT s.id, s.external_id, s.title, s.summary, p.name as project_name, p.path as project_path,
+  SELECT s.id, s.external_id, s.title, s.summary, p.id as project_id,
+         p.name as project_name, p.path as project_path,
          src.name as source_name, s.started_at, s.ended_at, s.message_count,
          s.model_used, s.git_branch, s.total_input_tokens, s.total_output_tokens
   FROM sessions s
@@ -144,6 +147,7 @@ const toDigest = (
 ): SessionDigest => ({
   session_id: s.id,
   title: s.title,
+  project_id: s.project_id,
   summary: s.summary,
   excerpt: s.summary ? null : excerpt,
   project: s.project_name,
