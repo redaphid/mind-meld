@@ -38,7 +38,23 @@ const canReachPostgres = async (): Promise<boolean> => {
     await client.end().catch(() => {})
   }
 }
-const dbAvailable = await canReachPostgres()
+
+// A reachable server is not enough: these tests apply SQL through the `psql`
+// BINARY, exactly as src/db/migrations.ts does. Where the database is up but
+// psql is not installed (a Windows dev box, for one), probing only
+// connectivity made the suite hard-fail with `'psql' is not recognized`
+// instead of skipping — which is why "all green" used to be
+// environment-dependent. Probe for both.
+const hasPsqlBinary = async (): Promise<boolean> => {
+  try {
+    await execAsync('psql --version')
+    return true
+  } catch {
+    return false
+  }
+}
+
+const dbAvailable = (await canReachPostgres()) && (await hasPsqlBinary())
 
 // No ON_ERROR_STOP flag here — src/db/migrations.ts does not pass one either,
 // and the historical chain only applies under that leniency (001's
@@ -160,6 +176,15 @@ beforeAll(async () => {
   const unixUpper = await project('-home-u-App', '-home-u-App', 'zod2')
   await session(unixUpper, 's-case-2', '/home/u/App')
 
+  // 11. Round-2 review repro: the same case-distinct pair, but under `/mnt/d`
+  //     on a machine that has never reported a Windows drive path. `/mnt/d`
+  //     is drvfs only on WSL; here it is an ordinary ext4 mount, so these are
+  //     two real directories and merging them would destroy one.
+  const mntLower = await project('-mnt-d-data', '/mnt/d/data', 'linuxbox')
+  await session(mntLower, 's-mnt-1', '/mnt/d/data')
+  const mntUpper = await project('-mnt-d-Data', '/mnt/d/Data', 'linuxbox')
+  await session(mntUpper, 's-mnt-2', '/mnt/d/Data')
+
   // Give the drvfs husk a data_class override the survivor lacks — the merge
   // must carry it over, not drop it.
   await db.query(`UPDATE projects SET data_class = 'coding' WHERE external_id = '-mnt-d-tools-comfy'`)
@@ -212,7 +237,7 @@ describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
 
   it('loses no sessions and leaves distinct unix projects alone', async () => {
     const sessions = await db.query('SELECT count(*)::int AS n FROM sessions')
-    expect(sessions.rows[0].n).toBe(14)
+    expect(sessions.rows[0].n).toBe(16)
     expect(await pathOf('-home-alice-Projects-app')).toBe('/home/alice/Projects/app')
     expect(await pathOf('-home-bob-Projects-app')).toBe('/home/bob/Projects/app')
   })
@@ -234,6 +259,38 @@ describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
       { external_id: '-home-u-App', sessions: 1 },
       { external_id: '-home-u-app', sessions: 1 },
     ])
+  })
+
+  // Round-2 finding 1, migration half. The drvfs merge is driven by evidence,
+  // not by the shape of the path: `/mnt/d/tools/comfy` merges because machine
+  // `windows` demonstrably reports `D:` paths, while `/mnt/d/Data` on
+  // `linuxbox` does not and stays its own project.
+  it('never merges /mnt paths on a machine that has never reported a Windows drive', async () => {
+    const rows = await db.query(
+      `SELECT p.external_id, p.path, count(s.id)::int AS sessions
+       FROM projects p LEFT JOIN sessions s ON s.project_id = p.id
+       WHERE p.external_id IN ('-mnt-d-data', '-mnt-d-Data')
+       GROUP BY p.external_id, p.path ORDER BY p.external_id`
+    )
+    expect(rows.rows).toEqual([
+      { external_id: '-mnt-d-Data', path: '/mnt/d/Data', sessions: 1 },
+      { external_id: '-mnt-d-data', path: '/mnt/d/data', sessions: 1 },
+    ])
+  })
+
+  // Round-2 finding 3: the migration overwrites paths in place and deletes
+  // husk rows, so without this the only copy of the original state lived in
+  // CSV files outside the database.
+  it('leaves a pre-migration snapshot of projects inside the database', async () => {
+    const backup = await db.query('SELECT external_id, path FROM projects_pre_019 ORDER BY external_id')
+    // Every fixture row, with the paths as they were before 019 ran.
+    expect(backup.rows).toContainEqual({ external_id: '-mnt-d-tools-comfy', path: '/mnt/d/tools/comfy' })
+    expect(backup.rows).toContainEqual({
+      external_id: '-home-u-Projects-clasp-laser-cube',
+      path: '/home/u/Projects/clasp/laser/cube',
+    })
+    const live = await db.query('SELECT count(*)::int AS n FROM projects')
+    expect(backup.rows.length).toBeGreaterThan(live.rows[0].n)
   })
 
   it('carries a husk data_class override onto the merge survivor', async () => {
@@ -303,5 +360,56 @@ describe.skipIf(!dbAvailable)('upsertProject normalizes and adopts automatically
     expect(adoptedId).toBe(survivor.rows[0].id)
     const twins = await db.query(`SELECT id FROM projects WHERE external_id = '-mnt-d-tools-comfy'`)
     expect(twins.rows).toEqual([])
+  })
+})
+
+// Round-2 finding 2: the PR's merge is justified by "every such pair carries
+// machine='windows' on both sides — one host, one directory", but the code
+// grouped by source_id and the equivalence key only. Two hosts that both
+// report `/home/u/shared` are two different real directories, and merging
+// them deleted one. The migration must refuse and roll back instead — the
+// same "refuse rather than guess" rule as the session external_id collision.
+// This needs its own scratch database because a correct run aborts.
+describe.skipIf(!dbAvailable)('migration 019 refuses to merge across machines', () => {
+  const CROSS_DB = `mm_test_019x_${randomBytes(4).toString('hex')}`
+  let crossAdmin: pg.Client
+  let crossDb: pg.Client
+
+  beforeAll(async () => {
+    crossAdmin = new pg.Client({ ...PG, database: 'conversations' })
+    await crossAdmin.connect()
+    await crossAdmin.query(`CREATE DATABASE ${CROSS_DB}`)
+    const files = (await readdir(INIT_DB)).filter((f) => f.endsWith('.sql') && f < '019').sort()
+    for (const f of files) await psqlFile(CROSS_DB, join(INIT_DB, f))
+
+    crossDb = new pg.Client({ ...PG, database: CROSS_DB })
+    await crossDb.connect()
+    const src = await crossDb.query(`SELECT id FROM sources WHERE name = 'huddle'`)
+    for (const [externalId, machine] of [
+      ['shared-a', 'zod2'],
+      ['shared-b', 'windows'],
+    ]) {
+      await crossDb.query(
+        `INSERT INTO projects (source_id, external_id, path, name, machine)
+         VALUES ($1, $2, '/home/u/shared', $2, $3)`,
+        [src.rows[0].id, externalId, machine]
+      )
+    }
+  }, 120_000)
+
+  afterAll(async () => {
+    await crossDb?.end().catch(() => {})
+    if (crossAdmin) {
+      await crossAdmin.query(`DROP DATABASE IF EXISTS ${CROSS_DB} WITH (FORCE)`).catch(() => {})
+      await crossAdmin.end().catch(() => {})
+    }
+  })
+
+  it('aborts instead of collapsing two hosts into one project', async () => {
+    await expect(psqlFile(CROSS_DB, join(INIT_DB, '019-canonical-project-paths.sql'))).rejects.toThrow(
+      /different machines/
+    )
+    const rows = await crossDb.query('SELECT external_id FROM projects ORDER BY external_id')
+    expect(rows.rows.map((r) => r.external_id)).toEqual(['shared-a', 'shared-b'])
   })
 })
