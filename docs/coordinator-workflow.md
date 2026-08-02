@@ -81,6 +81,17 @@ Every PR — subagent-authored or not — goes through this before merge:
   the Claude in Chrome MCP in a dedicated tab. Screenshot evidence in the PR.
 - Progress comments on the issue at start, implementation-done, and PR-open.
 
+## The coordinator channel
+
+Issue #66 (label `coordinator-channel`) is a standing two-way conversation
+between the user and the orchestrator — priorities, questions, quick
+approvals, stop orders. Since everything posts under one GitHub account,
+authorship is by marker: the orchestrator's comments start with
+`🤖 **Coordinator:**`; anything without the marker is the user, and
+implementation/review agents never post there. The orchestrator 👀-reacts to
+each user comment on read, acts on it, and replies in-channel. Checked every
+cycle and whenever the orchestrator is active between cycles.
+
 ## Approvals from mobile
 
 The human approves plans from the GitHub mobile app, either way works:
