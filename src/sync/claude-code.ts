@@ -94,6 +94,25 @@ export async function discoverSessionFiles(projectPath: string): Promise<Discove
   return { files, errors };
 }
 
+// Recover a subagent's parent external id from its stored file path.
+//
+// Live sync does NOT use this — it uses the `sessionId` recorded inside the
+// agent file, which is authoritative. This exists for rows written before
+// linkage shipped: incremental sync skips them forever (unchanged mtime), so
+// raw_file_path is the only place their parent survives. The two agree on 203
+// of the 204 subagent transcripts checked on disk; the one exception carries
+// no sessionId on any line and yields no link either way.
+//
+// The *nearest* enclosing `subagents/` wins, because agents spawn agents and a
+// nested transcript's parent is the agent above it, not the root conversation.
+export function parentExternalIdFromRawPath(rawFilePath: string | null | undefined): string | null {
+  if (!rawFilePath) return null;
+  const segments = rawFilePath.replace(/\\/g, '/').split('/');
+  const marker = segments.lastIndexOf('subagents');
+  if (marker < 1) return null;
+  return segments[marker - 1] || null;
+}
+
 export type SessionSyncResult = {
   messagesInserted: number;
   // Records preserved in sync_quarantine — confirmed written, not just attempted.

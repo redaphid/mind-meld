@@ -43,7 +43,8 @@ vi.mock('../config.js', () => ({
   config: { machine: 'test-box', sources: { claudeCode: { path: '/nope' } } },
 }))
 
-const { syncSession, discoverSessionFiles, syncClaudeCode } = await import('./claude-code.js')
+const { syncSession, discoverSessionFiles, syncClaudeCode, parentExternalIdFromRawPath } =
+  await import('./claude-code.js')
 const { config } = await import('../config.js')
 
 const dirs: string[] = []
@@ -248,6 +249,45 @@ describe('syncSession parent linkage', () => {
     expect(upsertSession).toHaveBeenCalledWith(
       expect.objectContaining({ parentSessionId: undefined })
     )
+  })
+})
+
+// Rows that predate the linkage fix are skipped forever by incremental sync
+// (unchanged mtime), so they can only be repaired from stored data. The one
+// stored field that carries the parent is raw_file_path. Verified against the
+// transcripts on disk: this agrees with the in-file sessionId sync itself uses
+// on 203 of 204 subagent files (the exception has no sessionId at all).
+describe('parentExternalIdFromRawPath', () => {
+  it('reads the parent from the segment above subagents/', () => {
+    expect(parentExternalIdFromRawPath('/root/.claude/projects/-p/sess-1/subagents/agent-a.jsonl'))
+      .toBe('sess-1')
+  })
+
+  // Claude Code groups some subagents under an extra workflow directory. The
+  // parent is still the segment above subagents/, not the workflow folder.
+  it('is not confused by workflow subdirectories under subagents/', () => {
+    expect(
+      parentExternalIdFromRawPath('/root/.claude/projects/-p/sess-1/subagents/workflows/wf_x/agent-a.jsonl')
+    ).toBe('sess-1')
+  })
+
+  // Agents spawn agents. The nearest enclosing subagents/ wins, so a nested
+  // transcript links to the agent that spawned it, not the root conversation.
+  it('links a nested subagent to the agent that spawned it', () => {
+    expect(
+      parentExternalIdFromRawPath('/root/.claude/projects/-p/sess-1/subagents/agent-a/subagents/agent-b.jsonl')
+    ).toBe('agent-a')
+  })
+
+  it('handles Windows-style separators, since rows come from several machines', () => {
+    expect(parentExternalIdFromRawPath('D:\\c\\projects\\-p\\sess-1\\subagents\\agent-a.jsonl'))
+      .toBe('sess-1')
+  })
+
+  it('returns null for a path with no subagents/ segment and for no path at all', () => {
+    expect(parentExternalIdFromRawPath('/root/.claude/projects/-p/sess-1.jsonl')).toBeNull()
+    expect(parentExternalIdFromRawPath(null)).toBeNull()
+    expect(parentExternalIdFromRawPath('/subagents/agent-a.jsonl')).toBeNull()
   })
 })
 
