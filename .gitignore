@@ -30,6 +30,9 @@ logs/
 # Stray Claude version symlinks
 /2.1.*
 
+# Coordinator cycle state (local high-water marks, see docs/coordinator-workflow.md)
+.claude/coordinator-state.json
+
 # Temporary files
 tmp/
 *.tmp

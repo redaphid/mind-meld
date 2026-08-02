@@ -252,3 +252,121 @@ describe('post-pr-create hook', () => {
     expect(result.stderr).toContain('warning');
   });
 });
+
+describe('reconcile-labels script', () => {
+  const SCRIPT = 'reconcile-labels.mjs';
+  const HOUR = 60 * 60 * 1000;
+  const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
+
+  const issue = (number: number, labels: string[], msAgo = 0) => ({
+    number,
+    title: `Issue ${number}`,
+    labels: labels.map((name) => ({ name })),
+    updatedAt: iso(msAgo),
+  });
+  const listResponses = (issues: unknown[], prs: unknown[]): GhResponse[] => [
+    { match: ['issue', 'list'], stdout: JSON.stringify(issues) },
+    { match: ['pr', 'list'], stdout: JSON.stringify(prs) },
+  ];
+  const comments = (n: number, entries: Array<{ association: string; body: string; id?: number }>): GhResponse => ({
+    match: ['issue', 'view', String(n), '--json', 'comments'],
+    stdout: JSON.stringify({
+      comments: entries.map((e, i) => ({ authorAssociation: e.association, body: e.body, id: e.id ?? i + 1 })),
+    }),
+  });
+  const editCalls = () => sandbox.ghCalls().filter((args) => args[0] === 'issue' && args[1] === 'edit');
+
+  it('exists as a script', () => {
+    expect(existsSync(join(HOOKS_DIR, SCRIPT))).toBe(true);
+  });
+
+  it('reports no drift and exits 0 when labels match reality', async () => {
+    sandbox.setResponses(listResponses([issue(10, ['in-progress'], HOUR)], [{ number: 90, headRefName: 'feat/x-10', body: '', isDraft: true, updatedAt: iso(0) }]));
+    const result = await sandbox.run(SCRIPT, undefined);
+    expect(result.code).toBe(0);
+    expect(result.stdout.toLowerCase()).toContain('no drift');
+    expect(editCalls()).toEqual([]);
+  });
+
+  it('flags needs-human when the last comment is an unmarked OWNER response (dry-run, exit 1, no edits)', async () => {
+    sandbox.setResponses([
+      ...listResponses([issue(11, ['needs-human'])], []),
+      comments(11, [
+        { association: 'OWNER', body: '🤖 **Coordinator:** plan posted, needs your call' },
+        { association: 'OWNER', body: 'yes, go ahead', id: 555 },
+      ]),
+    ]);
+    const result = await sandbox.run(SCRIPT, undefined);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain('#11');
+    expect(result.stdout).toContain('needs-human');
+    expect(editCalls()).toEqual([]);
+  });
+
+  it('does not flag needs-human when the last comment is agent-marked', async () => {
+    sandbox.setResponses([
+      ...listResponses([issue(12, ['needs-human'])], []),
+      comments(12, [{ association: 'OWNER', body: '🤖 **Coordinator:** waiting on your approval' }]),
+    ]);
+    const result = await sandbox.run(SCRIPT, undefined);
+    expect(result.code).toBe(0);
+  });
+
+  it('flags stale in-progress with no open PR, but not fresh ones', async () => {
+    sandbox.setResponses(listResponses([issue(13, ['in-progress'], 9 * HOUR), issue(14, ['in-progress'], HOUR / 2)], []));
+    const result = await sandbox.run(SCRIPT, undefined);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain('#13');
+    expect(result.stdout).not.toContain('#14');
+  });
+
+  it('flags in-review with no open PR, and in-progress issues whose PR is ready for review', async () => {
+    sandbox.setResponses(
+      listResponses(
+        [issue(15, ['in-review']), issue(16, ['in-progress'], HOUR / 2)],
+        [{ number: 91, headRefName: 'feat/y-16', body: 'Implements #16', isDraft: false, updatedAt: iso(0) }],
+      ),
+    );
+    const result = await sandbox.run(SCRIPT, undefined);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain('#15');
+    expect(result.stdout).toContain('#16');
+  });
+
+  it('applies fixes with --fix and exits 0', async () => {
+    sandbox.setResponses([
+      ...listResponses([issue(17, ['needs-human'])], []),
+      comments(17, [{ association: 'OWNER', body: 'approved', id: 777 }]),
+      { match: ['issue', 'edit'], stdout: '' },
+    ]);
+    const result = await sandbox.run(SCRIPT, undefined, ['--fix']);
+    expect(result.code).toBe(0);
+    const edits = editCalls();
+    expect(edits.length).toBe(1);
+    expect(edits[0]).toContain('17');
+    expect(edits[0].join(' ')).toContain('--remove-label needs-human');
+  });
+
+  it('writes high-water marks to .claude/coordinator-state.json', async () => {
+    sandbox.setResponses([
+      ...listResponses([issue(18, ['needs-human'])], []),
+      comments(18, [{ association: 'OWNER', body: 'go', id: 999 }]),
+    ]);
+    await sandbox.run(SCRIPT, undefined);
+    const statePath = join(sandbox.repoDir, '.claude/coordinator-state.json');
+    expect(existsSync(statePath)).toBe(true);
+    const state = JSON.parse(readFileSync(statePath, 'utf8')) as {
+      lastReconcileAt: string;
+      issues: Record<string, { lastSeenCommentId: number }>;
+    };
+    expect(state.lastReconcileAt).toBeTruthy();
+    expect(state.issues['18'].lastSeenCommentId).toBe(999);
+  });
+
+  it('fails open (exit 0, warning) when gh is unavailable', async () => {
+    sandbox.setResponses([{ match: ['issue', 'list'], exitCode: 1 }]);
+    const result = await sandbox.run(SCRIPT, undefined);
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain('warning');
+  });
+});
