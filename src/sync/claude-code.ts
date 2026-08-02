@@ -67,22 +67,65 @@ async function syncSession(
   projectId: number,
   session: ParsedSession
 ): Promise<{ messagesInserted: number; quarantined: number }> {
-  // Upsert session
-  const sessionId = await queries.upsertSession({
-    projectId,
-    externalId: session.sessionId,
-    title: session.messages[0]?.contentText?.slice(0, 200),
-    isAgent: session.isAgent,
-    agentId: session.agentId,
-    claudeVersion: session.claudeVersion,
-    modelUsed: session.modelUsed,
-    gitBranch: session.gitBranch,
-    cwd: session.cwd,
-    rawFilePath: session.filePath,
-    fileModifiedAt: session.fileModifiedAt,
-    startedAt: session.firstTimestamp,
-    endedAt: session.lastTimestamp,
-  });
+  // Upsert session. This is the one insert the per-message quarantine below
+  // cannot protect: if the session row itself fails, there is nothing to
+  // attach messages to, and before this guard the whole file just errored on
+  // every cycle with nothing preserved (issue #20). Now every record is
+  // quarantined against the session's external id and replays once the
+  // session row exists — file_modified_at is never advanced on this path, so
+  // the next sync retries the file.
+  let sessionId: number;
+  try {
+    sessionId = await queries.upsertSession({
+      projectId,
+      externalId: session.sessionId,
+      title: session.messages[0]?.contentText?.slice(0, 200),
+      isAgent: session.isAgent,
+      agentId: session.agentId,
+      claudeVersion: session.claudeVersion,
+      modelUsed: session.modelUsed,
+      gitBranch: session.gitBranch,
+      cwd: session.cwd,
+      rawFilePath: session.filePath,
+      fileModifiedAt: session.fileModifiedAt,
+      startedAt: session.firstTimestamp,
+      endedAt: session.lastTimestamp,
+    });
+  } catch (e) {
+    let quarantined = 0;
+    for (const bad of session.badLines) {
+      await quarantine({
+        source: 'claude_code',
+        filePath: session.filePath,
+        recordKey: `line:${bad.lineNumber}`,
+        lineNumber: bad.lineNumber,
+        sessionExternalId: session.sessionId,
+        projectId,
+        stage: 'parse',
+        payload: bad.raw,
+        error: bad.error,
+      });
+      quarantined++;
+    }
+    for (const message of session.messages) {
+      await quarantine({
+        source: 'claude_code',
+        filePath: session.filePath,
+        recordKey: `uuid:${message.uuid}`,
+        lineNumber: session.lineNumbers.get(message.uuid),
+        sessionExternalId: session.sessionId,
+        projectId,
+        stage: 'insert',
+        payload: JSON.stringify(message),
+        error: e,
+      });
+      quarantined++;
+    }
+    console.error(
+      `Session upsert failed for ${session.filePath} — quarantined all ${quarantined} record(s) for replay: ${e instanceof Error ? e.message : e}`
+    );
+    return { messagesInserted: 0, quarantined };
+  }
 
   let messagesInserted = 0;
   let quarantined = 0;

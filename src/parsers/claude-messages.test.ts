@@ -85,3 +85,46 @@ describe('parseClaudeLine', () => {
     expect(result.kind === 'message' && result.message.sequenceNum).toBe(42)
   })
 })
+
+// Windows tools (wsl.exe, PowerShell) emit UTF-16LE; captured as UTF-8, each
+// character arrives followed by NUL, recorded in the transcript as escaped
+// NULs that JSON.parse turns into real U+0000 — which Postgres rejects
+// outright (issue #20). The parser must hand back the *decoded* text, not the
+// mangled bytes and not merely NUL-stripped ones.
+describe('parseClaudeLine: UTF-16LE console output (issue #20)', () => {
+  const NUL = String.fromCharCode(0)
+  const utf16le = (text: string) => [...text].map((c) => c + NUL).join('')
+
+  it('decodes wsl.exe output back to readable text', () => {
+    // JSON.stringify writes each NUL as the escape sequence, reproducing the
+    // failing transcript lines byte-for-byte.
+    const raw = line({
+      message: {
+        role: 'user',
+        content: `Exit code 255\n${utf16le('WSL version: 2.6.1.0\r\n\r\nKernel version: 6.6.87')}`,
+      },
+    })
+    expect(raw).toContain('\\u0000')
+    const { message } = asMessage(raw)
+    expect(message.contentText).toBe(
+      'Exit code 255\nWSL version: 2.6.1.0\r\n\r\nKernel version: 6.6.87'
+    )
+  })
+
+  it('leaves no NULs or lone surrogates anywhere in the parsed record', () => {
+    const raw = line({
+      gitBranch: `mai${NUL}n`,
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: utf16le('WSL version: 2.6.1.0') },
+          { type: 'tool_result', content: `stray${NUL} and \uD800 half` },
+        ],
+      },
+    })
+    const { message, metadata } = asMessage(raw)
+    expect(message.contentText).toBe('WSL version: 2.6.1.0\nstray and  half')
+    expect(metadata.gitBranch).toBe('main')
+    expect(JSON.stringify(message.contentJson)).not.toContain('\\u0000')
+  })
+})

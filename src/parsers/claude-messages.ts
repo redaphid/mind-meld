@@ -2,6 +2,7 @@ import { createReadStream } from 'fs';
 import { createInterface } from 'readline';
 import { stat } from 'fs/promises';
 import { basename, dirname, join } from 'path';
+import { normalizeDeep } from '../utils/text-encoding.js';
 
 // Types matching Claude Code JSONL format
 export interface ClaudeMessage {
@@ -207,7 +208,12 @@ export interface BadLine {
 // that the exact same code can replay a single quarantined record later; a
 // record that failed once must not take a second, different path back in.
 export function parseClaudeLine(line: string, sequenceNum: number): ParsedLine {
-  const parsed = JSON.parse(line) as ClaudeMessage;
+  // Normalized the moment it becomes structured data: transcripts of Windows
+  // tool output carry escaped-NUL UTF-16LE runs that JSON.parse turns into
+  // real U+0000 characters. normalizeDeep decodes those runs back to readable
+  // text (and drops stray NULs / lone surrogates) before anything downstream
+  // stores, embeds, or searches the content.
+  const parsed = normalizeDeep(JSON.parse(line)) as ClaudeMessage;
 
   if (!['user', 'assistant'].includes(parsed.type))
     return { kind: 'skip', reason: `not a message (type: ${parsed.type})` };
@@ -391,7 +397,7 @@ export async function parseHistoryFile(historyPath: string): Promise<HistoryEntr
     if (!line.trim()) continue;
 
     try {
-      const parsed = JSON.parse(line) as {
+      const parsed = normalizeDeep(JSON.parse(line)) as {
         display: string;
         timestamp: number;
         project: string;
