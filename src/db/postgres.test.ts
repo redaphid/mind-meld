@@ -117,6 +117,41 @@ describe('session upserts and lookups', () => {
     expect(sql).toContain('parent_session_id = COALESCE($5, sessions.parent_session_id)')
   })
 
+  // Review finding 2 asserted that COALESCE makes a link permanent once set.
+  // It does not, and the argument order is the whole reason: COALESCE($5, old)
+  // returns $5 whenever $5 is non-NULL, so an authoritative later resolution
+  // overwrites an earlier one. Only a NULL leaves the existing link alone.
+  // Pinned as a test because reversing these two arguments would silently make
+  // the first value written permanent and unreachable by any code path.
+  it('lets a later non-null parent correct an earlier one, and never clears on null', async () => {
+    poolQuery.mockResolvedValue({ rows: [{ id: 9 }], rowCount: 1 })
+    await queries.upsertSession({ projectId: 1, externalId: 'agent-abc', parentSessionId: 7 })
+    const [sql] = lastCall()
+    expect(sql).toContain('parent_session_id = COALESCE($5, sessions.parent_session_id)')
+    expect(sql).not.toContain('COALESCE(sessions.parent_session_id, $5)')
+  })
+
+  // Parent resolution must not link a subagent to a soft-deleted conversation:
+  // search excludes tombstones, so the link would be a dangling pointer into
+  // deleted data (#48 review, finding 1).
+  it('getLiveSessionByExternalId excludes soft-deleted rows', async () => {
+    poolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    await queries.getLiveSessionByExternalId(1, 'sess-1')
+    const [sql, params] = lastCall()
+    expect(sql).toContain('deleted_at IS NULL')
+    expect(params).toEqual([1, 'sess-1'])
+  })
+
+  // ...but the plain lookup must KEEP seeing tombstones. It backs the
+  // incremental skip check (src/sync/claude-code.ts) — hiding a soft-deleted
+  // session there would make sync re-parse and re-upsert every deleted
+  // transcript on every run, forever. The two lookups differ on purpose.
+  it('getSessionByExternalId still sees soft-deleted rows, so incremental skip keeps working', async () => {
+    poolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    await queries.getSessionByExternalId(1, 'sess-1')
+    expect(lastCall()[0]).not.toContain('deleted_at')
+  })
+
   it('getSessionByExternalId / global variant return null when absent', async () => {
     poolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
     expect(await queries.getSessionByExternalId(1, 'x')).toBeNull()

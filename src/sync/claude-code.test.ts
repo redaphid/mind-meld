@@ -7,6 +7,7 @@ const {
   getSourceByName,
   upsertProject,
   getSessionByExternalId,
+  getLiveSessionByExternalId,
   upsertSession,
   insertMessage,
   updateSessionStats,
@@ -17,6 +18,7 @@ const {
   getSourceByName: vi.fn(),
   upsertProject: vi.fn(),
   getSessionByExternalId: vi.fn(),
+  getLiveSessionByExternalId: vi.fn(),
   upsertSession: vi.fn(),
   insertMessage: vi.fn(),
   updateSessionStats: vi.fn(),
@@ -31,6 +33,7 @@ vi.mock('../db/postgres.js', () => ({
     getSourceByName,
     upsertProject,
     getSessionByExternalId,
+    getLiveSessionByExternalId,
     upsertSession,
     insertMessage,
     updateSessionStats,
@@ -57,6 +60,7 @@ beforeEach(() => {
   getSourceByName.mockReset().mockResolvedValue({ id: 1 })
   upsertProject.mockReset().mockResolvedValue(10)
   getSessionByExternalId.mockReset().mockResolvedValue(null)
+  getLiveSessionByExternalId.mockReset().mockResolvedValue(null)
   upsertSession.mockReset().mockResolvedValue(77)
   insertMessage.mockReset().mockResolvedValue(1)
   updateSessionStats.mockReset().mockResolvedValue(undefined)
@@ -195,16 +199,11 @@ describe('syncSession parent linkage', () => {
     })
 
   it('resolves the parent external id to a row id and passes it to upsertSession', async () => {
-    getSessionByExternalId.mockResolvedValue({
-      id: 55,
-      file_modified_at: null,
-      content_chars: 0,
-      message_count: 0,
-    })
+    getLiveSessionByExternalId.mockResolvedValue({ id: 55 })
 
     await syncSession(1, 3, agentSession() as never)
 
-    expect(getSessionByExternalId).toHaveBeenCalledWith(3, 'sess-1')
+    expect(getLiveSessionByExternalId).toHaveBeenCalledWith(3, 'sess-1')
     expect(upsertSession).toHaveBeenCalledWith(
       expect.objectContaining({ externalId: 'agent-abc', isAgent: true, parentSessionId: 55 })
     )
@@ -214,12 +213,7 @@ describe('syncSession parent linkage', () => {
   // passed the session's own row id would look like linkage and navigate
   // nowhere, so assert the two are distinct.
   it('never links a subagent to itself', async () => {
-    getSessionByExternalId.mockResolvedValue({
-      id: 55,
-      file_modified_at: null,
-      content_chars: 0,
-      message_count: 0,
-    })
+    getLiveSessionByExternalId.mockResolvedValue({ id: 55 })
     upsertSession.mockResolvedValue(77)
 
     await syncSession(1, 3, agentSession() as never)
@@ -232,7 +226,7 @@ describe('syncSession parent linkage', () => {
   // Discovery can reach a subagent before its parent is indexed. That must
   // cost the link for this run, not the session.
   it('indexes the session with a null parent when the parent is not indexed yet', async () => {
-    getSessionByExternalId.mockResolvedValue(null)
+    getLiveSessionByExternalId.mockResolvedValue(null)
 
     const result = await syncSession(1, 3, agentSession() as never)
 
@@ -245,7 +239,7 @@ describe('syncSession parent linkage', () => {
   it('does not look up a parent for an ordinary top-level session', async () => {
     await syncSession(1, 3, session() as never)
 
-    expect(getSessionByExternalId).not.toHaveBeenCalled()
+    expect(getLiveSessionByExternalId).not.toHaveBeenCalled()
     expect(upsertSession).toHaveBeenCalledWith(
       expect.objectContaining({ parentSessionId: undefined })
     )
@@ -271,12 +265,17 @@ describe('parentExternalIdFromRawPath', () => {
     ).toBe('sess-1')
   })
 
-  // Agents spawn agents. The nearest enclosing subagents/ wins, so a nested
-  // transcript links to the agent that spawned it, not the root conversation.
-  it('links a nested subagent to the agent that spawned it', () => {
+  // Agents can spawn agents, and this function cannot tell what such a
+  // transcript records as its parent: live sync reads the in-file sessionId,
+  // and there is no evidence it names the spawning *agent* rather than the
+  // root conversation. Zero doubly-nested transcripts exist to check against
+  // (verified across all 210 subagent transcripts on this host), so the
+  // honest answer is to decline rather than write a guess into a link that a
+  // reader will traverse (#48 review, finding 5).
+  it('refuses to guess a parent for a doubly-nested transcript', () => {
     expect(
       parentExternalIdFromRawPath('/root/.claude/projects/-p/sess-1/subagents/agent-a/subagents/agent-b.jsonl')
-    ).toBe('agent-a')
+    ).toBeNull()
   })
 
   it('handles Windows-style separators, since rows come from several machines', () => {
