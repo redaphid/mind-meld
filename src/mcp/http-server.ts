@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
 import express from 'express'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -288,6 +290,18 @@ app.delete('/mcp', mcpDeleteHandler)
 
 app.get('/health', (req: any, res: any) => {
   res.json({ status: 'ok', name: 'mindmeld', version })
+})
+
+// The REST surface documents itself: serve the spec that ships in the image, so
+// what a deployment claims can never drift from what that deployment runs.
+const OPENAPI_PATH = fileURLToPath(new URL('../../docs/openapi.yaml', import.meta.url))
+
+app.get('/openapi.yaml', async (req: any, res: any) => {
+  try {
+    res.type('application/yaml').send(await readFile(OPENAPI_PATH, 'utf8'))
+  } catch {
+    res.status(404).json({ status: 'error', error: 'OpenAPI spec not bundled in this deployment' })
+  }
 })
 
 app.get('/status', async (req: any, res: any) => {
