@@ -28,7 +28,7 @@ export interface BackfillCandidate extends BackfillRow {
   has_vector: boolean
 }
 
-export interface QueuedVector {
+interface QueuedVector {
   collection: string
   chromaId: string
 }

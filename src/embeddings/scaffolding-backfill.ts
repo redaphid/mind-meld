@@ -14,7 +14,7 @@ export interface BackfillRow {
   content_text: string
 }
 
-export type StripAction =
+type StripAction =
   // No scaffolding present, or removing it changed nothing. Do not touch.
   | 'skip'
   // Nothing but scaffolding. The row becomes an empty husk; embedding it
@@ -42,7 +42,7 @@ export interface StripPlan {
 // A strip that removed less than this much of a message left the meaning, and
 // therefore the embedding, essentially intact. Matches the threshold the
 // earlier hook-injection pass used.
-export const INVALIDATE_THRESHOLD = 0.1
+const INVALIDATE_THRESHOLD = 0.1
 
 export const planStrip = (row: BackfillRow): StripPlan => {
   const original = row.content_text ?? ''
