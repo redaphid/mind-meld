@@ -17,3 +17,5 @@ Steps, in order:
 7. **Status board**: GitHub reflects everything — `in-progress` label on delegation, `in-review` at PR-open, cleared on merge/close, status comment at every transition. Check TaskList before spawning agents to avoid duplicates.
 
 8. **End-of-cycle report (always, in chat)**: finish every cycle with a message to the user containing (a) **release notes** — what merged/released/deployed this cycle, or "no release" with what's in flight; and (b) **verification steps taken** — the explicit list of checks run this cycle (status fields inspected, DB queries, image pulls, version confirmed after restart, test/review evidence behind any merge) and their results.
+
+9. **Proactive updates (the user is AFK)**: do not save news for the cycle report. Post a status message in chat at every significant event — merge, release, deploy verified, review verdict, agent finished, escalation, anomaly — and send a PushNotification for milestones (deploy complete, something needs the user's decision, a failure needing attention). Every update ends with what, if anything, is waiting on the user.
