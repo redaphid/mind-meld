@@ -48,11 +48,29 @@ export async function discoverProjects(basePath: string): Promise<string[]> {
 // `<project>/<sessionId>/subagents/agent-*.jsonl` (nested further when agents
 // spawn agents) — a top-level-only walk silently missed every one of them.
 // On one machine that was 161 of 193 session files invisible to sync (#29).
-export async function discoverSessionFiles(projectPath: string): Promise<string[]> {
+//
+// Failures are returned, not just logged: a directory that cannot be read
+// must cost exactly that directory, be visible in stats.errors (and therefore
+// the exit code), and never silently shrink the walk.
+export interface DiscoveredSessions {
+  files: string[];
+  errors: string[];
+}
+
+export async function discoverSessionFiles(projectPath: string): Promise<DiscoveredSessions> {
   const files: string[] = [];
+  const errors: string[] = [];
 
   const walk = async (dir: string): Promise<void> => {
-    const entries = await readdir(dir, { withFileTypes: true });
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (e) {
+      // The projects tree is live while sync runs — subagent and workflow
+      // directories come and go. One unreadable directory loses only itself.
+      errors.push(`Failed to read directory ${dir}: ${e}`);
+      return;
+    }
     for (const entry of entries) {
       const fullPath = join(dir, entry.name);
       if (entry.isDirectory()) {
@@ -60,18 +78,20 @@ export async function discoverSessionFiles(projectPath: string): Promise<string[
       } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
         files.push(fullPath);
       }
-      // Symlinks are skipped: following them risks cycles, and Claude Code
-      // does not create them under projects/.
+      // Symlinks are deliberately not followed (Dirent.isDirectory/isFile are
+      // lstat-based, so a link fails both checks). Claude Code DOES create
+      // intra-tree symlinks between subagent transcripts; those targets are
+      // discovered once via their real path, and following the link would
+      // risk cycles and double-ingest. Known trade-off: a symlink whose
+      // target lives outside the walked tree is skipped, and that transcript
+      // stays invisible until discovery learns to follow file links with a
+      // resolved-path dedup.
     }
   };
 
-  try {
-    await walk(projectPath);
-  } catch (e) {
-    console.error(`Failed to discover sessions in ${projectPath}:`, e);
-  }
+  await walk(projectPath);
 
-  return files;
+  return { files, errors };
 }
 
 export type SessionSyncResult = {
@@ -287,10 +307,16 @@ export async function syncClaudeCode(options?: {
       stats.projectsProcessed++;
       let correctedFromCwd = false;
 
-      // Discover and process session files
-      const sessionFiles = await discoverSessionFiles(projectPath);
+      // Discover and process session files. Walk failures count as sync
+      // errors: an unreadable directory means files this run never saw, and
+      // that must reach the exit code, not just the console (#29).
+      const discovered = await discoverSessionFiles(projectPath);
+      for (const walkError of discovered.errors) {
+        console.error(walkError);
+        stats.errors.push(walkError);
+      }
 
-      for (const sessionFile of sessionFiles) {
+      for (const sessionFile of discovered.files) {
         try {
           const fileStat = await stat(sessionFile);
 
@@ -345,8 +371,13 @@ export async function syncClaudeCode(options?: {
             continue;
           }
 
-          // Correct project path from session cwd (decodeProjectPath is lossy with hyphens)
-          if (!correctedFromCwd && session.cwd) {
+          // Correct project path from session cwd (decodeProjectPath is lossy
+          // with hyphens). Agent sessions are never allowed to drive this:
+          // subagent transcripts carry their isolated worktree as cwd
+          // (.claude/worktrees/agent-*), and on incremental runs the freshest
+          // file — usually a subagent transcript — is often the only candidate,
+          // so one of them would rename the whole project row to agent-xxx.
+          if (!correctedFromCwd && session.cwd && !session.isAgent) {
             const cwdName = extractProjectName(session.cwd);
             if (session.cwd !== decodedPath) {
               projectId = await queries.upsertProject(

@@ -129,9 +129,13 @@ export async function verifyClaudeCode(options?: {
       continue;
     }
 
-    const sessionFiles = await discoverSessionFiles(projectPath);
+    // A walk failure means files this sweep never saw — that must be an
+    // error (and a nonzero exit), or verify could report a clean sweep while
+    // blind to part of a project.
+    const discovered = await discoverSessionFiles(projectPath);
+    result.errors.push(...discovered.errors);
 
-    for (const sessionFile of sessionFiles) {
+    for (const sessionFile of discovered.files) {
       try {
         const parsed = await parseClaudeSessionFile(sessionFile);
         if (!parsed) continue; // empty file: nothing to hold, nothing to verify
@@ -180,8 +184,11 @@ export async function verifyClaudeCode(options?: {
           continue;
         }
 
+        // Surplus rows are unrepairable by design: repair only clears the
+        // sync stamp, and a re-sync never deletes rows. Claiming to repair it
+        // would flap forever — report it as needs-a-human instead.
         let repaired = false;
-        if (options?.repair) {
+        if (options?.repair && drift.kind !== 'surplus-rows') {
           await repairSession(existing.id);
           result.repaired++;
           repaired = true;
@@ -233,6 +240,10 @@ export function formatVerifyReport(result: VerifyResult, repair: boolean): strin
         `\n  ${describeDrift(d.drift)}` +
         (d.repaired
           ? '\n  repaired: file_modified_at cleared, stats recomputed — next incremental sync reprocesses the file'
+          : '') +
+        (d.drift.kind === 'surplus-rows'
+          ? '\n  not repairable by --repair: a re-sync never deletes rows. A human has to decide' +
+            '\n  whether the file was truncated/rewritten (keep the rows) or the rows are wrong (delete them).'
           : '')
     );
   }
@@ -259,8 +270,10 @@ export function formatVerifyReport(result: VerifyResult, repair: boolean): strin
 
 // Exit contract: drift that was not repaired is a failure; drift that was
 // repaired is a handled condition; verification errors are always failures.
-export function verifyExitCode(result: VerifyResult, repaired: boolean): 0 | 1 {
+// Judged per session, so `--repair` cannot silence drift it could not fix
+// (surplus rows): those stay nonzero until a human resolves them.
+export function verifyExitCode(result: VerifyResult): 0 | 1 {
   if (result.errors.length > 0) return 1;
-  if (result.drifted.length > 0 && !repaired) return 1;
+  if (result.drifted.some((d) => !d.repaired)) return 1;
   return 0;
 }

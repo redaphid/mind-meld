@@ -137,7 +137,7 @@ program
 
       console.log(formatVerifyReport(result, Boolean(options.repair)).join('\n'));
 
-      const exitCode = verifyExitCode(result, Boolean(options.repair));
+      const exitCode = verifyExitCode(result);
       if (exitCode !== 0) process.exitCode = exitCode;
     } catch (e) {
       console.error('Verify failed:', e);

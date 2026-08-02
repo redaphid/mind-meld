@@ -147,26 +147,41 @@ export const startDbLogSink = (serviceName: string) => {
 }
 
 let handlersInstalled = false
-let exitFlushAttempts = 0
-const MAX_EXIT_FLUSH_ATTEMPTS = 3
+let exitFlushFailures = 0 // consecutive FAILED flushes on the exit path
+const MAX_EXIT_FLUSH_FAILURES = 3
 
 // One beforeExit cycle: flush if there is anything left and we have not given
 // up. Exported for tests; the subtlety it guards is an infinite shutdown loop —
 // a failing flush schedules async work, the loop drains, beforeExit fires
 // again, forever. Seen live with a NUL-poisoned queue: the process printed its
-// summary and then never exited. Bounded attempts turn that into a bounded
-// delay and a visible report.
-export const exitFlush = (): Promise<void> => {
-  if (queue.length === 0) return Promise.resolve()
-  if (exitFlushAttempts >= MAX_EXIT_FLUSH_ATTEMPTS) {
+// summary and then never exited.
+//
+// The bound counts consecutive FAILURES, not cycles: a healthy shutdown that
+// legitimately needs several beforeExit rounds (lines trickling in during
+// teardown) must not discard its tail, and a cycle where another flush holds
+// the latch costs nothing — flushLogs no-ops without attempting a write.
+export const exitFlush = async (): Promise<void> => {
+  if (queue.length === 0) return
+  if (exitFlushFailures >= MAX_EXIT_FLUSH_FAILURES) {
     reportProblem(
-      `giving up on exit flush after ${MAX_EXIT_FLUSH_ATTEMPTS} attempts; ${queue.length} line(s) not persisted`
+      `giving up on exit flush after ${MAX_EXIT_FLUSH_FAILURES} consecutive failures; ${queue.length} line(s) not persisted`
     )
+    dropped += queue.length
     queue = []
-    return Promise.resolve()
+    return
   }
-  exitFlushAttempts++
-  return flushLogs()
+
+  const failuresBefore = failures
+  await flushLogs()
+
+  if (failures > failuresBefore) {
+    exitFlushFailures++
+  } else if (queue.length === 0) {
+    // Real progress — the database is reachable again; a later failure starts
+    // its own fresh countdown. (A latch collision lands in neither branch:
+    // no write was attempted, so nothing is learned and nothing is charged.)
+    exitFlushFailures = 0
+  }
 }
 
 // beforeExit still allows async work, so a short-lived process (the sync CLI)
@@ -194,7 +209,7 @@ export const __resetForTests = () => {
   failures = 0
   flushing = false
   lastPruneAt = 0
-  exitFlushAttempts = 0
+  exitFlushFailures = 0
   service = 'unknown'
   if (timer) {
     clearInterval(timer)

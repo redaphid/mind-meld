@@ -17,6 +17,11 @@ export interface FullSyncResult {
     skipped: number;
     quarantined: number;
   };
+  history: {
+    entries: number;
+    malformedLines: number;
+    invalidTimestamps: number;
+  };
   embeddings: {
     messagesEmbedded: number;
     sessionsUpdated: number;
@@ -49,6 +54,7 @@ export async function runFullSync(options?: {
     endTime: new Date(),
     durationMs: 0,
     claudeCode: { projectsProcessed: 0, sessionsProcessed: 0, messagesInserted: 0, skipped: 0, quarantined: 0 },
+    history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
     embeddings: { messagesEmbedded: 0, sessionsUpdated: 0 },
     errors: [],
   };
@@ -72,6 +78,25 @@ export async function runFullSync(options?: {
       const error = `Claude Code sync failed: ${e}`;
       console.error(error);
       errors.push(error);
+    }
+
+    // History (~/.claude/history.jsonl): parsed for its skip counters so a
+    // malformed prompt-history line is counted, never silently continued (#29).
+    try {
+      const history = await syncClaudeHistory();
+      result.history = {
+        entries: history.entriesInserted,
+        malformedLines: history.malformedLines,
+        invalidTimestamps: history.invalidTimestamps,
+      };
+    } catch (e) {
+      // No history file is a normal state (fresh machine, container without
+      // the mount) — anything else is a real failure and counts as one.
+      if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        const error = `Claude history sync failed: ${e}`;
+        console.error(error);
+        errors.push(error);
+      }
     }
   }
 

@@ -23,6 +23,10 @@ export function buildRunReport(result: FullSyncResult): RunReport {
       `${result.claudeCode.messagesInserted} messages ` +
       `(${result.claudeCode.skipped} skipped, ${result.claudeCode.quarantined} quarantined)`
   );
+  lines.push(
+    `  History: ${result.history.entries} entries ` +
+      `(${result.history.malformedLines} malformed, ${result.history.invalidTimestamps} unusable timestamps)`
+  );
   lines.push(`  Embeddings: ${result.embeddings.messagesEmbedded} embedded`);
 
   const quarantined = result.claudeCode.quarantined;

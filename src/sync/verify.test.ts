@@ -82,28 +82,40 @@ const verifyResult = (over: Partial<VerifyResult> = {}): VerifyResult => ({
 
 describe('verifyExitCode', () => {
   it('is zero when nothing drifted', () => {
-    expect(verifyExitCode(verifyResult({ matched: 10 }), false)).toBe(0);
+    expect(verifyExitCode(verifyResult({ matched: 10 }))).toBe(0);
   });
 
   // A conversation still being written is legitimately ahead of the DB; the
   // next incremental sync closes that gap. Only will_resync=false gaps alarm.
   it('is zero when the only gaps are sessions awaiting their next sync', () => {
-    expect(verifyExitCode(verifyResult({ matched: 7, pendingSync: 3 }), false)).toBe(0);
+    expect(verifyExitCode(verifyResult({ matched: 7, pendingSync: 3 }))).toBe(0);
   });
 
   // Unrepaired drift is the alarm this command exists to raise.
   it('is nonzero when drift was found and not repaired', () => {
-    expect(verifyExitCode(verifyResult({ drifted: [drifted()] }), false)).toBe(1);
+    expect(verifyExitCode(verifyResult({ drifted: [drifted()] }))).toBe(1);
   });
 
   it('is zero when drift was found and repaired', () => {
     expect(
-      verifyExitCode(verifyResult({ drifted: [drifted({ repaired: true })], repaired: 1 }), true)
+      verifyExitCode(verifyResult({ drifted: [drifted({ repaired: true })], repaired: 1 }))
     ).toBe(0);
   });
 
   it('is nonzero when verification itself errored, even under --repair', () => {
-    expect(verifyExitCode(verifyResult({ errors: ['Failed to verify /a.jsonl: EACCES'] }), true)).toBe(1);
+    expect(verifyExitCode(verifyResult({ errors: ['Failed to verify /a.jsonl: EACCES'] }))).toBe(1);
+  });
+
+  // --repair cannot delete rows, so surplus drift stays unrepaired and the
+  // exit code must say so — judged per session, not by the flag.
+  it('stays nonzero under --repair when surplus-rows drift remains unrepaired', () => {
+    const surplus = drifted({
+      drift: { kind: 'surplus-rows', surplus: 5 },
+      counts: counts({ stored: 105, counted: 105 }),
+      repaired: false,
+    });
+    const fixable = drifted({ repaired: true });
+    expect(verifyExitCode(verifyResult({ drifted: [surplus, fixable], repaired: 1 }))).toBe(1);
   });
 });
 
@@ -125,6 +137,22 @@ describe('formatVerifyReport', () => {
       false
     ).join('\n');
     expect(text).toContain(longPath);
+  });
+
+  it('tells the operator surplus rows need a human, not another --repair', () => {
+    const text = formatVerifyReport(
+      verifyResult({
+        drifted: [
+          drifted({
+            drift: { kind: 'surplus-rows', surplus: 5 },
+            counts: counts({ stored: 105, counted: 105 }),
+          }),
+        ],
+      }),
+      true
+    ).join('\n');
+    expect(text).toContain('not repairable by --repair');
+    expect(text).toContain('A human has to decide');
   });
 
   it('notes the repair on repaired sessions', () => {

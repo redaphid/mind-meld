@@ -13,6 +13,7 @@ const result = (over: Partial<FullSyncResult> = {}): FullSyncResult => ({
     skipped: 96,
     quarantined: 0,
   },
+  history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
   embeddings: { messagesEmbedded: 100, sessionsUpdated: 5 },
   errors: [],
   ...over,
@@ -66,6 +67,15 @@ describe('buildRunReport summary', () => {
     expect(text).toContain('7 skipped');
     expect(text).toContain('2 quarantined');
     expect(text).toContain('sync_quarantine');
+  });
+
+  // The history parser's skip counters must reach the operator, not just a
+  // warn inside the sync — this is where they surface.
+  it('carries the history skip counters', () => {
+    const text = buildRunReport(
+      result({ history: { entries: 40, malformedLines: 2, invalidTimestamps: 1 } })
+    ).lines.join('\n');
+    expect(text).toContain('History: 40 entries (2 malformed, 1 unusable timestamps)');
   });
 
   // Errors were previously only visible as a count in logs nobody read; the
