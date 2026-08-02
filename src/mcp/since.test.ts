@@ -54,6 +54,16 @@ describe('parseSinceDate', () => {
     it('parses a 10-digit epoch as seconds', () => {
       expect(parseSinceDate('1700000000')!.toISOString()).toBe('2023-11-14T22:13:20.000Z')
     })
+
+    it('parses a 13-digit epoch as milliseconds', () => {
+      expect(parseSinceDate('1700000000000')!.toISOString()).toBe('2023-11-14T22:13:20.000Z')
+    })
+  })
+
+  describe('when given only whitespace', () => {
+    it('throws a TypeError instead of inventing a date', () => {
+      expect(() => parseSinceDate('   ')).toThrow(TypeError)
+    })
   })
 
   describe('when the value cannot be parsed', () => {

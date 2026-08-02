@@ -28,6 +28,11 @@ const message = (over: Partial<SessionMessage> = {}): SessionMessage => ({
 })
 
 describe('toSearchHit', () => {
+  it('maps a missing project path to null', () => {
+    const dto = toSearchHit(hit({ project_path: null as unknown as string }))
+    expect(dto.projectPath).toBeNull()
+  })
+
   it('maps a whole-session hit to a null cursor', () => {
     expect(toSearchHit(hit())).toEqual({
       sessionId: 42,
@@ -153,5 +158,21 @@ describe('toMessage', () => {
   it('coerces a string id to a number', () => {
     const dto = toMessage(message({ id: '7' as unknown as number }))
     expect(dto.id).toBe(7)
+  })
+
+  // Depending on the pg type parser config, timestamps can arrive as strings.
+  it('normalises a string timestamp to ISO', () => {
+    const dto = toMessage(message({ timestamp: '2026-01-01T00:00:00Z' as unknown as Date }))
+    expect(dto.timestamp).toBe('2026-01-01T00:00:00.000Z')
+  })
+
+  it('maps a missing timestamp to null rather than an invalid date', () => {
+    const dto = toMessage(message({ timestamp: null as unknown as Date }))
+    expect(dto.timestamp).toBeNull()
+  })
+
+  it('maps a missing sequence number to null', () => {
+    const dto = toMessage(message({ sequence_num: null as unknown as number }))
+    expect(dto.sequenceNum).toBeNull()
   })
 })

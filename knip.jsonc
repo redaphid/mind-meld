@@ -15,7 +15,11 @@
     "scripts/quality/*.ts",
     // Ad-hoc investigation scripts, run manually with tsx. Kept scanned so
     // the deps/exports they use are not falsely reported as unused.
-    "scripts/test/*.ts"
+    "scripts/test/*.ts",
+    // The ui container's entry point, launched only by Dockerfile.ui's CMD
+    // ("npx tsx src/ui/server.ts") — nothing in package.json references it,
+    // so knip cannot discover it on its own.
+    "src/ui/server.ts"
   ],
   "project": ["src/**/*.ts", "scripts/**/*.{ts,mjs}"]
 }

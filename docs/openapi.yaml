@@ -20,7 +20,12 @@ info:
       `/api/projects`, `/api/sessions`, `/api/messages`), and ingest
       (`/api/ingest`) for sources Mindmeld does not sync itself.
     * **UI** — `/`, the browser app in `public/`, which is built on the REST
-      endpoints below and nothing else.
+      endpoints below and nothing else. The UI also ships as its own container
+      (the `ui` compose service): a static server for `public/` that
+      reverse-proxies `/mcp`, `/api`, `/status`, `/health`, `/logs`, and
+      `/openapi.yaml` to this server. Public hostnames (the Cloudflare tunnel)
+      point at the `ui` service; this server keeps serving `/` too, so it
+      stays fully usable standalone.
 
     ### No truncation
 
@@ -40,6 +45,13 @@ info:
     reachable by anyone who can resolve it: put an access policy in front.
     `/api/ingest` writes to the index unauthenticated, so anything that can
     reach the port can write to your brain.
+
+    The `ui` service enforces the same Host-header allowlist (same
+    `ALLOWED_HOSTS` variable) before proxying, because it rewrites the Host
+    header on the way upstream — without its own check it would reopen the
+    DNS-rebinding hole this allowlist exists to close. It adds no
+    authentication: exposing `ui` through a tunnel exposes exactly the same
+    unauthenticated surface, including `/api/ingest`.
 
   license:
     name: See repository

@@ -18,3 +18,9 @@ services:
       context: .
       dockerfile: Dockerfile.http
     image: mindmeld-mcp:dev
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    image: mindmeld-ui:dev

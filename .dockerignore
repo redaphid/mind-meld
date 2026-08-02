@@ -2,3 +2,7 @@ node_modules
 dist
 .git
 *.log
+# Never bake local secrets into an image — every Dockerfile here uses COPY . .
+.env
+.env.*
+!.env.example

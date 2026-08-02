@@ -44,10 +44,18 @@ monitoring sees failures instead of an eternal exit 0.
 
 ## Web UI
 
-The browser app lives in `public/` and is served at `/` by the same process as
-the MCP endpoint (port 3847). No build step: Preact and htm are vendored under
-`public/vendor/` and loaded through an import map, so what is committed is what
-runs — edit a file, reload the page.
+The browser app lives in `public/`. It runs as its own container: the `ui`
+compose service (`Dockerfile.ui`, image `mindmeld-ui`, host port 3848) serves
+`public/` at `/` and reverse-proxies the API surface (`/mcp`, `/api`,
+`/status`, `/health`, `/logs`, `/openapi.yaml`) to the `mcp` service — the
+Cloudflare tunnel's public hostname (mindmeld.hypnodroid.com) points at
+`http://ui:3000`, one ingress rule, every path works. The `mcp` service (port
+3847) still serves the same files at `/` as a fallback, so it stays fully
+usable standalone and the tunnel keeps working during migration either way.
+
+No build step: Preact and htm are vendored under `public/vendor/` and loaded
+through an import map, so what is committed is what runs — edit a file, reload
+the page.
 
 - Views: status, search (vector / full-text / hybrid), browse, session reader,
   logs, quarantine.
@@ -55,9 +63,10 @@ runs — edit a file, reload the page.
   when the tunnel drops. Bump `VERSION` in `public/sw.js` when shell files change.
 - Icons are generated, not hand-drawn: `pnpm run icons`.
 
-Reaching it through the Cloudflare tunnel requires that hostname in
-`ALLOWED_HOSTS` (comma-separated, added to the localhost defaults). There is no
-authentication — see the trust-model note in `docs/openapi.yaml`.
+Reaching either service through the Cloudflare tunnel requires that hostname in
+`ALLOWED_HOSTS` (comma-separated, added to the localhost defaults; both `ui`
+and `mcp` read the same variable). There is no authentication — see the
+trust-model note in `docs/openapi.yaml`.
 
 ## When sync cannot process a record
 
