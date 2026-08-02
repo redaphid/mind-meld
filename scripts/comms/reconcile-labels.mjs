@@ -18,8 +18,10 @@
  * A PR "references" issue N when its body carries a closing keyword for #N
  * (closes/fixes/resolves/implements) or its head branch ends in -N; a bare
  * prose "#N" mention does not count. Exit codes: 0 clean/fixed/fail-open, 1 drift found in dry-run.
- * Writes high-water marks to .claude/coordinator-state.json (gitignored) so
- * coordinator cycles never re-read whole comment histories.
+ * Writes high-water marks to .coord-state.json (gitignored) so coordinator
+ * cycles need not re-read whole comment histories. That file is a cache only:
+ * every rule above is derived from GitHub, so the reconciler behaves
+ * identically on a machine that has never run it.
  */
 import { tryGhJson, tryRun, isAgentMarked, warn, readState, writeState } from './lib.mjs';
 

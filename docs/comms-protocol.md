@@ -1,15 +1,25 @@
----
-name: comms
-description: The operator↔agent communication protocol for this repo - read receipts, PR progress comments, OWNER-comment honoring, truthful labels, coordinator channel etiquette. Load at the start of any coordinator cycle or implementation-agent task, and before opening or flipping a PR.
----
-
 # Comms protocol (operator ↔ agents)
+
+The full operator↔agent communication protocol for this repo: read receipts,
+PR progress comments, honoring OWNER comments, truthful labels, coordinator
+channel etiquette. Read it at the start of any coordinator cycle or
+implementation task, and again before opening or flipping a PR.
 
 Everything in this repo posts under one GitHub account, and the operator
 supervises from the GitHub mobile app. That works only if every agent follows
-this protocol exactly. Enforcement hooks exist (`.claude/hooks/`), but they
+this protocol exactly. Enforcement scripts exist (`scripts/comms/`), but they
 are a backstop — the protocol is the contract. `AGENTS.md` at the repo root is
-the tool-agnostic statement of the same rules.
+the short form; this document is the long form with the commands.
+
+**This document is deliberately provider-agnostic.** It is a plain Markdown
+file under `docs/`, with no vendor frontmatter and no vendor-specific loading
+mechanism, because the rules are project policy that binds *any* agent runtime
+working here — not configuration for one vendor's tool. The same goes for the
+enforcement logic: `scripts/comms/*.mjs` are plain node scripts runnable by a
+human, by CI, or by any runtime that can spawn a process. A vendor directory
+such as `.claude/` may contain only a thin adapter that *points at* these
+files. `src/__tests__/comms-hooks.test.ts` asserts that rule so it cannot
+silently erode.
 
 ## 1. Read receipts — always, immediately
 
@@ -44,15 +54,16 @@ This is the operator's only signal that a message was seen. Never skip it.
 
 - Open a **draft PR immediately after the first push**.
 - Post a PR comment at **every red→green cycle**: what just went green, what
-  is next. The `Stop` hook blocks a session that tries to end with pushes
-  newer than the last PR comment.
+  is next. `scripts/comms/stop-pr-progress.mjs`, wired as a session-stop hook,
+  blocks a session that tries to end with pushes newer than the last PR
+  comment.
 - Post issue comments at start, implementation-done, and PR-open.
 
 ## 5. Labels tell the truth — always
 
 - `in-progress`: only while an agent is actively working.
 - `in-review`: from the moment a PR is ready for review. Flip it yourself at
-  `gh pr create` time (the PostToolUse hook will remind you):
+  `gh pr create` time (`scripts/comms/post-pr-create.mjs` will remind you):
   `gh issue edit {n} --add-label in-review --remove-label in-progress`
 - `waiting-on-user` / `needs-human`: work is done-or-blocked pending the
   operator. Cleared the moment the operator responds.
@@ -79,8 +90,26 @@ Redacted summaries go public; full detail goes in a local file on the host.
 
 ## 8. Context economy — don't re-read histories
 
-High-water marks live in `.claude/coordinator-state.json` (gitignored):
+High-water marks live in `.coord-state.json` at the repo root (gitignored):
 last-seen comment id per issue, last-reviewed SHA per PR, last reconcile
-time. Read it first, fetch only what is newer, update it after acting. For
-long-horizon recall ("when did we decide X?"), search mindmeld itself — the
-MCP `search` tool indexes every past session.
+time. Read it first, fetch only what is newer, update it after acting.
+
+It is a **cache, never a source of truth.** `scripts/coord/` (the handoff
+toolchain, issue #78) derives coordination state from GitHub so that a fresh
+session on a clean machine is immediately current; this file must never
+weaken that. Deleting it may cost an extra API call and can never change a
+decision.
+
+For long-horizon recall ("when did we decide X?"), search mindmeld itself —
+the MCP `search` tool indexes every past session.
+
+## 9. Where this lives
+
+| Concern | Location | Why |
+| --- | --- | --- |
+| Short-form rules, auto-read by agents | `AGENTS.md` (root) | Cross-vendor convention |
+| Full protocol with commands | `docs/comms-protocol.md` | Plain doc, no vendor loader |
+| Enforcement logic | `scripts/comms/*.mjs` | Plain node; any runtime, CI, or human can run it |
+| Coordinator lifecycle (handoff, heartbeat, derived state) | `scripts/coord/*.sh` | Owned by issue #78; not duplicated here |
+| Cycle cache | `.coord-state.json` (gitignored) | Cache only |
+| Vendor adapter | `.claude/settings.json` | Points at `scripts/comms/`; contains no logic |

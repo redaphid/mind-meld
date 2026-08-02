@@ -1,5 +1,10 @@
 /**
- * Shared helpers for the comms-protocol hooks. Plain node, zero dependencies.
+ * Shared helpers for the comms-protocol scripts. Plain node, zero dependencies.
+ *
+ * Provider-agnostic by construction: nothing here imports or assumes a
+ * specific agent runtime. The only vendor-shaped surface is that hook entry
+ * points read a JSON document on stdin — a convention any runtime can produce,
+ * and one these scripts tolerate the absence of (empty stdin parses to `{}`).
  *
  * Design rule (issue #75): every hook FAILS OPEN. A gh/git/network failure
  * must never brick the session — warn on stderr and behave as if there was
@@ -9,7 +14,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-/** Read the hook's stdin (Claude Code passes hook input as one JSON doc). */
+/** Read the hook's stdin (runtimes pass hook input as one JSON doc). */
 export const readStdinJson = () => {
   try {
     const raw = readFileSync(0, 'utf8');
@@ -71,11 +76,17 @@ export const warn = (message) => {
   process.stderr.write(`comms-hook warning: ${message}\n`);
 };
 
-const STATE_PATH = '.claude/coordinator-state.json';
+const STATE_PATH = '.coord-state.json';
 
 /**
  * Persistent cycle state (high-water marks) so coordinator cycles never
  * re-read whole histories. Gitignored; local to each checkout.
+ *
+ * This is a CACHE, never a source of truth. `scripts/coord/` (issue #78)
+ * derives coordination state from GitHub precisely so a fresh session with no
+ * local files is fully current, and that property must survive: every rule in
+ * the reconciler is computable from GitHub alone, and deleting this file may
+ * cost an extra API call but can never change a decision.
  * Shape: { issues: { "<n>": { lastSeenCommentId } },
  *          prs: { "<n>": { lastReviewedSha } }, lastReconcileAt }
  */

@@ -31,7 +31,7 @@ logs/
 /2.1.*
 
 # Coordinator cycle state (local high-water marks, see docs/coordinator-workflow.md)
-.claude/coordinator-state.json
+.coord-state.json
 
 # Temporary files
 tmp/

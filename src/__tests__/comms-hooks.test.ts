@@ -1,7 +1,12 @@
 /**
- * Tests for the comms-protocol enforcement hooks (.claude/hooks/*.mjs).
+ * Tests for the comms-protocol enforcement scripts (scripts/comms/*.mjs).
  *
- * The hooks are plain-node scripts that shell out to `gh` and `git`. They are
+ * These live outside `.claude/` on purpose: the protocol is project policy,
+ * not vendor configuration, so the logic must be runnable by any agent
+ * runtime (or a human, or CI) with plain `node`. A Claude-specific
+ * `.claude/settings.json` merely POINTS at them; see docs/comms-protocol.md.
+ *
+ * The scripts shell out to `gh` and `git`. They are
  * tested black-box: each test spawns the real script with a stubbed `gh` on
  * PATH (driven by a per-test responses.json) inside a throwaway git repo, and
  * asserts on exit code / stdout / stderr. Every hook must FAIL OPEN: any gh or
@@ -15,7 +20,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const HOOKS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../.claude/hooks');
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const HOOKS_DIR = join(REPO_ROOT, 'scripts/comms');
 
 interface GhResponse {
   /** All substrings must appear in the space-joined argv for this entry to match. */
@@ -361,13 +367,13 @@ describe('reconcile-labels script', () => {
     expect(edits[0].join(' ')).toContain('--remove-label needs-human');
   });
 
-  it('writes high-water marks to .claude/coordinator-state.json', async () => {
+  it('writes high-water marks to a provider-agnostic .coord-state.json', async () => {
     sandbox.setResponses([
       ...listResponses([issue(18, ['needs-human'])], []),
       comments(18, [{ association: 'OWNER', body: 'go', id: 999 }]),
     ]);
     await sandbox.run(SCRIPT, undefined);
-    const statePath = join(sandbox.repoDir, '.claude/coordinator-state.json');
+    const statePath = join(sandbox.repoDir, '.coord-state.json');
     expect(existsSync(statePath)).toBe(true);
     const state = JSON.parse(readFileSync(statePath, 'utf8')) as {
       lastReconcileAt: string;
@@ -382,5 +388,50 @@ describe('reconcile-labels script', () => {
     const result = await sandbox.run(SCRIPT, undefined);
     expect(result.code).toBe(0);
     expect(result.stderr).toContain('warning');
+  });
+});
+
+/**
+ * The comms protocol is project policy, not vendor configuration. It must stay
+ * usable by any agent runtime, so `.claude/` may hold only thin adapters that
+ * point at the provider-agnostic sources. These are executable statements of
+ * that rule: a future change that quietly moves substance back under a
+ * vendor directory fails here rather than in review.
+ */
+describe('provider-agnostic layout', () => {
+  it('keeps the protocol document outside any vendor directory', () => {
+    expect(existsSync(join(REPO_ROOT, 'docs/comms-protocol.md'))).toBe(true);
+    expect(existsSync(join(REPO_ROOT, 'AGENTS.md'))).toBe(true);
+  });
+
+  it('keeps every enforcement script outside .claude/', () => {
+    for (const script of ['lib.mjs', 'stop-pr-progress.mjs', 'post-pr-create.mjs', 'reconcile-labels.mjs']) {
+      expect(existsSync(join(REPO_ROOT, 'scripts/comms', script))).toBe(true);
+      expect(existsSync(join(REPO_ROOT, '.claude/hooks', script))).toBe(false);
+    }
+    expect(existsSync(join(REPO_ROOT, '.claude/skills/comms/SKILL.md'))).toBe(false);
+  });
+
+  it('runs the reconciler from its provider-agnostic path', () => {
+    const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>;
+    };
+    expect(pkg.scripts['reconcile:labels']).toBe('node scripts/comms/reconcile-labels.mjs');
+  });
+
+  it('lets .claude/settings.json only point at provider-agnostic scripts', () => {
+    const raw = readFileSync(join(REPO_ROOT, '.claude/settings.json'), 'utf8');
+    const settings = JSON.parse(raw) as {
+      hooks: Record<string, { hooks: { command: string }[] }[]>;
+    };
+    const commands = Object.values(settings.hooks)
+      .flat()
+      .flatMap((entry) => entry.hooks.map((h) => h.command));
+    const commsCommands = commands.filter((c) => c.includes('comms') || c.includes('pr-'));
+    expect(commsCommands.length).toBeGreaterThan(0);
+    for (const command of commsCommands) {
+      expect(command).toContain('scripts/comms/');
+      expect(command).not.toContain('.claude/hooks');
+    }
   });
 });
