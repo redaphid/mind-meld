@@ -1,0 +1,10 @@
+# Shell scripts must keep LF endings. Checked out with CRLF on Windows and then
+# run under Linux, WSL, or a container, bash fails with "bad interpreter".
+*.sh text eol=lf
+scripts/mm text eol=lf
+
+# SQL is piped into psql inside a container.
+*.sql text eol=lf
+
+# PowerShell is Windows-side; leave it to the platform default.
+*.ps1 text
