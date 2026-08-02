@@ -130,10 +130,14 @@ describe('ingestConversation', () => {
     expect(queriesMock.updateSessionStats).toHaveBeenCalledWith(11)
   })
 
-  it('passes the sender machine through, and null when unknown', async () => {
-    await ingestConversation(payload({ dataClass: 'meetings', machine: 'laptop' }))
-    expect(queriesMock.upsertProject).toHaveBeenCalledWith(5, 'C01', '', '#platform-team', 'laptop')
+  it('passes the sender machine and OS through, and null when unknown', async () => {
+    await ingestConversation(payload({ dataClass: 'meetings', machine: 'laptop', os: 'wsl' }))
+    expect(queriesMock.upsertProject).toHaveBeenCalledWith(5, 'C01', '', '#platform-team', 'laptop', 'wsl')
+    expect(queriesMock.upsertSession).toHaveBeenCalledWith(expect.objectContaining({ os: 'wsl' }))
+    // A relay that does not know the sender's OS must record null, not this
+    // server's own OS — the thread did not come from here (#33).
     await ingestConversation(payload({ dataClass: 'meetings' }))
-    expect(queriesMock.upsertProject).toHaveBeenLastCalledWith(5, 'C01', '', '#platform-team', null)
+    expect(queriesMock.upsertProject).toHaveBeenLastCalledWith(5, 'C01', '', '#platform-team', null, null)
+    expect(queriesMock.upsertSession).toHaveBeenLastCalledWith(expect.objectContaining({ os: null }))
   })
 })

@@ -147,9 +147,27 @@ pnpm run sync:embeddings
 
 | File | Use |
 | --- | --- |
-| `docker-compose.yml` | Default. Pulls published GHCR images. No `sync` service |
+| `docker-compose.yml` | Default. Pulls published GHCR images. No `sync` service. Requires `WSL_CLAUDE_PATH` and `MACHINE_NAME_WSL` in `.env` — see below |
 | `docker-compose.local.yml` | Builds from source, includes a containerized `sync`, requires explicit `DATA_DIR`/`POSTGRES_PASSWORD`/paths (it uses `${VAR:?}`, so it fails fast rather than defaulting) |
 | `docker-compose.dev.yml` | Overlay that builds the images instead of pulling: `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build` |
+
+### `sync-wsl` requires configuration, by design
+
+`docker-compose.yml`'s `sync-wsl` service mounts a WSL distro's Claude Code
+home. Both `WSL_CLAUDE_PATH` and `MACHINE_NAME_WSL` use the `${VAR:?message}`
+form, so `docker compose up` **stops with that message** if either is unset.
+
+That is deliberate, and it is not a style preference. Docker *creates* a
+missing bind-mount source directory and mounts it empty: the sync would then
+walk zero projects, log nothing alarming, and exit 0 — an index that is
+quietly dead for weeks. A defaulted `MACHINE_NAME` is worse still, because it
+stamps new rows with a name none of the existing rows carry, silently splitting
+one machine into two under `/logs/<machine>`. A container that refuses to start
+is a five-second fix; neither of those is.
+
+Compose interpolates the whole file, so this applies even if you never intend
+to run `sync-wsl`. If you have no WSL distro to index, set them to anything —
+or delete the service.
 
 > The dev overlay still declares a `sync` service that the base file no longer
 > has. Compose will happily create it from the overlay alone — with no
