@@ -98,6 +98,25 @@ describe('session upserts and lookups', () => {
     expect(lastCall()[1][14]).toBe(false)
   })
 
+  // Every subagent transcript already has a session row by the time linkage
+  // ships (#48), so the linkage only ever arrives on the conflict path. An
+  // INSERT-only parent_session_id would compute the parent, pass it, and
+  // silently throw it away on every re-sync.
+  it('upsertSession writes parent_session_id on the conflict path too', async () => {
+    poolQuery.mockResolvedValue({ rows: [{ id: 9 }], rowCount: 1 })
+    await queries.upsertSession({
+      projectId: 1,
+      externalId: 'agent-abc',
+      isAgent: true,
+      parentSessionId: 42,
+    })
+    const [sql, params] = lastCall()
+    expect(params[4]).toBe(42)
+    // COALESCE, not a bare assignment: a run that cannot resolve the parent
+    // yet must never clear a link an earlier run established.
+    expect(sql).toContain('parent_session_id = COALESCE($5, sessions.parent_session_id)')
+  })
+
   it('getSessionByExternalId / global variant return null when absent', async () => {
     poolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
     expect(await queries.getSessionByExternalId(1, 'x')).toBeNull()
