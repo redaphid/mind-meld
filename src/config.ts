@@ -91,6 +91,13 @@ export const config = {
     timeoutMs: getEnvInt("OLLAMA_TIMEOUT_MS", 120000), // 2 minutes
     maxRetries: getEnvInt("OLLAMA_MAX_RETRIES", 3),
     retryDelayMs: getEnvInt("OLLAMA_RETRY_DELAY_MS", 5000), // 5 seconds between retries
+    // Ceiling on how long a single 503 Retry-After may park a request. A GPU
+    // gate in front of Ollama can legitimately ask for its whole cooldown
+    // (ollama-proxy defaults to 900s), and obeying that verbatim would stall a
+    // sync run for a quarter of an hour per attempt with no way to interrupt
+    // it. Clamping keeps the backoff honest — we still wait, just in bounded
+    // steps, and the next attempt re-reads a fresh Retry-After.
+    retryMaxDelayMs: getEnvInt("OLLAMA_RETRY_MAX_DELAY_MS", 60000), // 1 minute
     // Max requests crossing the SSH tunnel to that host at once. The tunnel — not the
     // GPU — is the bottleneck: one request is ~4-6s, but concurrent ones saturate
     // it and each balloons to ~30s. Serialize (1) by default; raise only if Ollama

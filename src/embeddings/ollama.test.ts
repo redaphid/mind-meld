@@ -3,7 +3,9 @@ import {
   isRecoverableEmbedError,
   isOversizeEmbedError,
   isNaNEmbedError,
+  retryAfterMs,
 } from "./ollama.js";
+import { config } from "../config.js";
 
 // Oversize and NaN are both recoverable but need opposite rewrites — summarize to
 // shed tokens vs. rephrase to change wording at the same length. Confusing the two
@@ -111,5 +113,50 @@ describe("isRecoverableEmbedError", () => {
         error: undefined,
       }),
     ).toBe(true);
+  });
+});
+
+// A GPU gate in front of Ollama answers 503 + Retry-After while something else
+// holds the VRAM. Getting this wrong is not a cosmetic bug: too short and the
+// sync busy-loops against a closed gate, too long and one refusal parks a run
+// for the gate's entire cooldown.
+describe("retryAfterMs", () => {
+  const { retryDelayMs, retryMaxDelayMs } = config.ollama;
+
+  describe("when the header is delta-seconds", () => {
+    it("waits that long", () => {
+      expect(retryAfterMs("30")).toBe(30_000);
+    });
+
+    it("clamps a cooldown-length wait to the ceiling", () => {
+      // ollama-proxy asks for its full 900s cooldown on a cold start.
+      expect(retryAfterMs("900")).toBe(retryMaxDelayMs);
+    });
+
+    it("treats zero as unusable rather than retrying instantly", () => {
+      expect(retryAfterMs("0")).toBe(retryDelayMs);
+    });
+  });
+
+  describe("when the header is an HTTP-date", () => {
+    it("waits until that moment", () => {
+      const at = new Date(Date.now() + 20_000).toUTCString();
+      // Whole-second resolution in the header, so allow a second of slack.
+      expect(retryAfterMs(at)).toBeGreaterThan(18_000);
+      expect(retryAfterMs(at)).toBeLessThanOrEqual(20_000);
+    });
+
+    it("falls back when the date has already passed", () => {
+      const at = new Date(Date.now() - 60_000).toUTCString();
+      expect(retryAfterMs(at)).toBe(retryDelayMs);
+    });
+  });
+
+  describe("when the header is absent or unparseable", () => {
+    it("falls back to the ordinary retry delay", () => {
+      expect(retryAfterMs(null)).toBe(retryDelayMs);
+      expect(retryAfterMs("")).toBe(retryDelayMs);
+      expect(retryAfterMs("soon")).toBe(retryDelayMs);
+    });
   });
 });

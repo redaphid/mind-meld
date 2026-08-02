@@ -1033,6 +1033,63 @@ paths:
                         error:
                           type: string
 
+  /api/sync:
+    post:
+      tags: [Monitoring]
+      operationId: startSyncRun
+      summary: Run an ingestion pass now
+      description: |
+        Embeds the messages that are already indexed but have no vector yet, then
+        rebuilds the session and project aggregates derived from them — the same
+        work the sync workers do on their interval, on demand instead of on a
+        timer. This is the half of the pipeline that talks to Ollama, so it is
+        what to press after changing where Ollama lives.
+
+        It does **not** rescan transcript files. That half belongs to the sync
+        workers, which are the containers holding the read-only transcript
+        mounts; this server has none.
+
+        Returns as soon as the run is accepted, never when it finishes: a drain
+        takes minutes. Poll `GET /api/sync` for progress. Only one run exists at
+        a time — a request while one is in flight is answered `409` with that
+        run's state, which is a report, not a failure.
+      responses:
+        '202':
+          description: A run was started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncRunResponse'
+        '409':
+          description: A run was already in flight; its state is returned unchanged.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SyncRunResponse'
+
+    get:
+      tags: [Monitoring]
+      operationId: getSyncRun
+      summary: State of the manual ingestion run
+      description: |
+        The current run if one is in flight, otherwise the last one to finish.
+        `running` false with a null `startedAt` means none has been triggered
+        since this server started — the state is in memory, not the database.
+      responses:
+        '200':
+          description: Current or most recent run.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, run]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  run:
+                    $ref: '#/components/schemas/SyncRun'
+
   /mcp:
     post:
       tags: [MCP]
@@ -1472,6 +1529,53 @@ components:
           description: |
             The source's STORED class — for an existing source this may differ
             from the `dataClass` sent, since ingest never reclassifies.
+
+    SyncRun:
+      type: object
+      required:
+        [running, startedAt, finishedAt, messagesEmbedded, sessionsUpdated, durationMs, error]
+      properties:
+        running:
+          type: boolean
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null when no run has been triggered since this server started.
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null while running.
+        messagesEmbedded:
+          type: integer
+          description: Counted on completion; `0` while a run is still in flight.
+        sessionsUpdated:
+          type: integer
+        durationMs:
+          type: integer
+          nullable: true
+        error:
+          type: string
+          nullable: true
+          description: |
+            Why the last run stopped, verbatim. A GPU gate in front of Ollama
+            refusing the work reads as its own 503 explanation here.
+
+    SyncRunResponse:
+      type: object
+      required: [status, started, run, message]
+      properties:
+        status:
+          type: string
+          const: ok
+        started:
+          type: boolean
+          description: False when a run was already in flight, alongside `409`.
+        message:
+          type: string
+        run:
+          $ref: '#/components/schemas/SyncRun'
 
     ValidationError:
       type: object

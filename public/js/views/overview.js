@@ -2,11 +2,106 @@
 // is one glance: totals, how far behind the embedding pipeline is, which
 // machines are feeding the index, and any sync error worth acting on.
 
-import { html } from 'preact'
-import { useApi } from '../api.js'
+import { html, useState, useEffect } from 'preact'
+import { useApi, apiGet } from '../api.js'
 import { navigate } from '../router.js'
 import { Card, Stat, Spinner, ErrorBox, Pill, Bar } from '../ui.js'
 import { fmtNum, fmtExact, timeAgo, sourceLabel, pct } from '../util.js'
+
+// POST /api/sync answers 202 when it starts a run and 409 when one was already
+// in flight — neither is a failure, and both carry the run's state, so this
+// only treats an explicit error body as one.
+const requestRun = async () => {
+  const res = await fetch('/api/sync', { method: 'POST', headers: { accept: 'application/json' } })
+  const body = await res.json()
+  if (body.status === 'error') throw new Error(body.error)
+  return body
+}
+
+const runSummary = run => {
+  if (run.error) return null
+  const seconds = run.durationMs != null ? Math.max(1, Math.round(run.durationMs / 1000)) : null
+  const parts = [
+    `embedded ${fmtNum(run.messagesEmbedded)} message${run.messagesEmbedded === 1 ? '' : 's'}`,
+    `updated ${fmtNum(run.sessionsUpdated)} session${run.sessionsUpdated === 1 ? '' : 's'}`,
+  ]
+  return `${parts.join(', ')}${seconds ? ` in ${seconds}s` : ''}`
+}
+
+// Drains pending embeddings on demand instead of waiting out the sync interval.
+// The run is detached server-side and takes minutes, so this polls rather than
+// holding a request open, and it picks up a run someone else started too.
+const IngestionRunner = ({ onFinished }) => {
+  const [run, setRun] = useState(null)
+  const [error, setError] = useState(null)
+  const [pressing, setPressing] = useState(false)
+
+  useEffect(() => {
+    apiGet('/api/sync')
+      .then(body => setRun(body.run))
+      .catch(() => {}) // an older server without this route just shows the button
+  }, [])
+
+  useEffect(() => {
+    if (!run?.running) return
+    let live = true
+    const id = setInterval(async () => {
+      try {
+        const body = await apiGet('/api/sync')
+        if (!live) return
+        setRun(body.run)
+        if (!body.run.running) onFinished?.()
+      } catch (e) {
+        if (live) setError(e.message)
+      }
+    }, 2000)
+    return () => {
+      live = false
+      clearInterval(id)
+    }
+  }, [run?.running])
+
+  const start = async () => {
+    setError(null)
+    setPressing(true)
+    try {
+      setRun((await requestRun()).run)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setPressing(false)
+    }
+  }
+
+  const running = !!run?.running
+
+  return html`
+    <div style="margin-top:12px">
+      <button class="btn sm primary" disabled=${running || pressing} onClick=${start}>
+        ${running ? 'Ingesting…' : 'Run ingestion now'}
+      </button>
+      ${running &&
+      html`<span class="faint" style="margin-left:10px;font-size:13px">
+        started ${timeAgo(run.startedAt)} — embedding pending messages
+      </span>`}
+      ${!running &&
+      run?.finishedAt &&
+      !run.error &&
+      html`<span class="faint" style="margin-left:10px;font-size:13px">
+        last run ${timeAgo(run.finishedAt)}: ${runSummary(run)}
+      </span>`}
+      ${!running &&
+      run?.error &&
+      html`<div class="mono" style="color:var(--red);margin-top:8px;overflow-wrap:anywhere">
+        last run failed: ${run.error}
+      </div>`}
+      ${error &&
+      html`<div class="mono" style="color:var(--red);margin-top:8px;overflow-wrap:anywhere">
+        ${error}
+      </div>`}
+    </div>
+  `
+}
 
 const Sparkline = ({ activity }) => {
   const peak = Math.max(1, ...activity.map(d => d.sessions))
@@ -80,6 +175,7 @@ export const OverviewView = () => {
           ${fmtNum(pending.sessions ?? 0)} sessions pending
         <//>
       </div>
+      <${IngestionRunner} onFinished=${status.reload} />
     <//>
 
     ${(s?.quarantined ?? 0) > 0 &&

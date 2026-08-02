@@ -3,6 +3,25 @@ import { config } from "../config.js";
 import { shrinkBySummarizing, SUMMARIZE_MODEL } from "./summarize.js";
 import { withOllamaGate } from "./ollama-gate.js";
 
+// How long to wait before re-sending a request the upstream refused with 503.
+// Parses Retry-After, which RFC 9110 allows to be either delta-seconds or an
+// HTTP-date, and clamps the result to retryMaxDelayMs. A missing, malformed, or
+// already-elapsed header falls back to the ordinary retry delay rather than
+// retrying instantly — a hot loop against a closed gate is the failure mode
+// this whole path exists to prevent.
+export const retryAfterMs = (header: string | null): number => {
+  const { retryDelayMs, retryMaxDelayMs } = config.ollama;
+  if (!header) return retryDelayMs;
+
+  const seconds = Number(header);
+  const ms = Number.isFinite(seconds)
+    ? seconds * 1000
+    : Date.parse(header) - Date.now();
+
+  if (!Number.isFinite(ms) || ms <= 0) return retryDelayMs;
+  return Math.min(ms, retryMaxDelayMs);
+};
+
 // Fetch wrapper with timeout and retry for transient failures
 const fetchWithRetry: typeof fetch = async (input, init) => {
   const { timeoutMs, maxRetries, retryDelayMs } = config.ollama;
@@ -21,6 +40,31 @@ const fetchWithRetry: typeof fetch = async (input, init) => {
           signal: AbortSignal.timeout(timeoutMs),
         }),
       );
+
+      // A GPU gate in front of Ollama (ollama-proxy) refuses GPU-heavy work
+      // with 503 + Retry-After while a game or ComfyUI holds VRAM. fetch()
+      // does not throw on 503 — it resolves — so without this the response
+      // reaches the Ollama client, which turns it into a ResponseError the
+      // catch below does not recognise as transient. The run then dies and
+      // Docker's restart policy relaunches it straight back into the closed
+      // gate, hammering the proxy instead of waiting for it. The proxy queues
+      // nothing, so holding the request here is the caller's job.
+      //
+      // The final attempt deliberately returns the 503 rather than throwing:
+      // the body carries the proxy's own explanation of which condition is
+      // holding it, and letting the Ollama client surface that verbatim is far
+      // more useful than an error we invent here.
+      if (response.status === 503 && attempt < maxRetries) {
+        const waitMs = retryAfterMs(response.headers.get("retry-after"));
+        // Nothing reads this body, and an undrained one keeps the socket open.
+        await response.body?.cancel().catch(() => {});
+        console.log(
+          `${label}: upstream returned 503 (attempt ${attempt}/${maxRetries}), waiting ${Math.round(waitMs / 1000)}s before retrying...`,
+        );
+        await new Promise((r) => setTimeout(r, waitMs));
+        continue;
+      }
+
       return response;
     } catch (error: any) {
       const isTimeout =

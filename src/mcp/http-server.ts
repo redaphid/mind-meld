@@ -16,6 +16,7 @@ import { IngestPayloadSchema, ingestConversation, MissingDataClassError } from '
 import { getSessionDigest, getMessages, getMessageById } from './session.js'
 import { createMcpServer } from './tools.js'
 import { getSyncStatus } from '../sync/orchestrator.js'
+import { startSyncRun, getSyncRunState } from './sync-run.js'
 import { getCollectionStats } from '../db/chroma.js'
 import { config } from '../config.js'
 import { ensureEmbeddingModel } from '../embeddings/ollama.js'
@@ -624,6 +625,27 @@ app.post('/api/quarantine/retry', apiRoute('Quarantine retry', async (req, res) 
     limit: Math.min(intParam(req.body?.limit ?? req.query.limit, 100), 500),
   })
   res.json({ status: 'ok', ...result, pending: await countPending() })
+}))
+
+// Trigger an ingestion pass by hand rather than waiting out the sync interval.
+// 202, not 200: a drain takes minutes, so the run is detached and its progress
+// is read back from GET /api/sync. A press while one is already running is not
+// an error the caller made — 409 carries the running run's state so the UI can
+// just show it.
+app.post('/api/sync', apiRoute('Sync run', async (_req, res) => {
+  const { started, state } = startSyncRun()
+  res.status(started ? 202 : 409).json({
+    status: 'ok',
+    started,
+    run: state,
+    message: started
+      ? 'Ingestion run started — embedding pending messages.'
+      : 'An ingestion run is already in flight.',
+  })
+}))
+
+app.get('/api/sync', apiRoute('Sync run state', async (_req, res) => {
+  res.json({ status: 'ok', run: getSyncRunState() })
 }))
 
 app.post('/api/ingest', async (req: any, res: any) => {
