@@ -48,7 +48,7 @@ The browser app lives in `public/`. It runs as its own container: the `ui`
 compose service (`Dockerfile.ui`, image `mindmeld-ui`, host port 3848) serves
 `public/` at `/` and reverse-proxies the API surface (`/mcp`, `/api`,
 `/status`, `/health`, `/logs`, `/openapi.yaml`) to the `mcp` service — the
-Cloudflare tunnel's public hostname (mindmeld.hypnodroid.com) points at
+Cloudflare tunnel's public hostname (e.g. mindmeld.example.com) points at
 `http://ui:3000`, one ingress rule, every path works. The `mcp` service (port
 3847) still serves the same files at `/` as a fallback, so it stays fully
 usable standalone and the tunnel keeps working during migration either way.
@@ -122,7 +122,7 @@ pnpm run compute:centroids
   query: "storefronts implementation",
   likeSession: ["104057:1.5"],
   unlikeSession: ["briefing-session:0.5"],
-  cwd: "/Users/you/Projects/sibi/rza"
+  cwd: "/Users/you/Projects/acme/storefronts"
 }
 ```
 

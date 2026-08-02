@@ -5,7 +5,7 @@
 // Run against live postgres/chroma/ollama:
 //   POSTGRES_HOST=localhost POSTGRES_PORT=5433 \
 //   CHROMA_HOST=localhost CHROMA_PORT=8001 \
-//   OLLAMA_URL=http://soul.local:11434 \
+//   OLLAMA_URL=http://ollama-host.local:11434 \
 //   pnpm tsx scripts/backfill-session-chunks.ts
 
 import { query, closePool } from "../src/db/postgres.js";
