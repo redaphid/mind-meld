@@ -238,7 +238,11 @@ const app = express()
 app.use(hostHeaderValidation(ALLOWED_HOSTS))
 app.use(express.json({ limit: '10mb' }))
 
-// The browser UI. Served at the root so a phone only has to open the host.
+// The browser UI. The dedicated `ui` service (src/ui/server.ts, its own
+// container) is the front door for the public hostname; this copy stays so the
+// API service remains fully standalone — opening localhost:3847 in a browser
+// still works, and the domain keeps serving whether the tunnel ingress points
+// at `ui` or (legacy) here.
 // The app shell and the service worker are revalidated every load — a stale
 // shell would pin the UI to an old API contract; hashed-free static assets are
 // small enough that no-cache costs little.

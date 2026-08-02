@@ -144,6 +144,32 @@ services:
     ports:
       - "${MCP_HTTP_PORT:-3847}:3000"
 
+  # The browser UI as its own container. Serves public/ at the root and
+  # reverse-proxies the API surface (/mcp, /api, /status, /health, /logs,
+  # /openapi.yaml) to the mcp service — so the Cloudflare tunnel's public
+  # hostname (mindmeld.hypnodroid.com) points at http://ui:3000 with a single
+  # ingress rule and every path keeps working. The mcp service remains fully
+  # standalone on ${MCP_HTTP_PORT:-3847} for MCP clients.
+  ui:
+    image: ghcr.io/redaphid/mindmeld-ui:latest
+    container_name: mindmeld-ui
+    restart: unless-stopped
+    depends_on:
+      - mcp
+    environment:
+      UI_PORT: 3000
+      UPSTREAM_URL: http://mcp:3000
+      # Same contract as the mcp service: comma-separated hostnames added to
+      # the localhost defaults. The tunnel hostname must be listed here.
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+    ports:
+      - "${UI_HTTP_PORT:-3848}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   # Optional: Cloudflare tunnel for remote access
   cloudflared:
     image: cloudflare/cloudflared:latest
@@ -151,6 +177,7 @@ services:
     restart: unless-stopped
     depends_on:
       - mcp
+      - ui
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
     profiles:
       - tunnel

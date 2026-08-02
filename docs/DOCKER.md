@@ -43,6 +43,7 @@ Pulls the published GHCR images and starts:
 | `mindmeld-postgres` | `mindmeld-postgres` | 5433 → 5432 | Metadata + full-text search |
 | `mindmeld-chroma` | `chromadb/chroma` | 8001 → 8000 | Vector collections |
 | `mindmeld-mcp` | `mindmeld-mcp` | 3847 → 3000 | MCP + REST API; **applies migrations on startup** |
+| `mindmeld-ui` | `mindmeld-ui` | 3848 → 3000 | Browser UI; reverse-proxies API paths to `mcp` — point tunnel hostnames here |
 | `mindmeld-centroids` | `mindmeld-centroids` | — | Recomputes session/project centroids every 7h |
 | `mindmeld-warmups` | `mindmeld-warmups` | — | Flags warmup/automated sessions every 6h |
 | `mindmeld-cloudflared` | `cloudflare/cloudflared` | — | Optional; `--profile tunnel` only |
