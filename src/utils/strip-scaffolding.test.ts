@@ -87,6 +87,71 @@ describe('stripScaffolding: leaves real conversation alone', () => {
   })
 })
 
+describe('stripScaffolding: nesting, fences, and attributes (issue #37, review F5/F6)', () => {
+  it('keeps a payload nested inside an unwrap tag', () => {
+    // The interior of <command-args> is what the user typed. If they typed the
+    // literal text of a reminder — quoting the harness, as this very PR's
+    // description does — it is content, not scaffolding, and deleting it is
+    // exactly the silent loss the no-truncation policy exists to prevent.
+    const raw = '<command-args><system-reminder>PAYLOAD</system-reminder></command-args>'
+    expect(stripScaffolding(raw)).toContain('PAYLOAD')
+    expect(isScaffoldingOnly(raw)).toBe(false)
+  })
+
+  it('keeps command output that follows a nested tag', () => {
+    const raw =
+      '<local-command-stdout>output <system-reminder>rest</system-reminder> tail</local-command-stdout>'
+    const out = stripScaffolding(raw)
+    expect(out).toContain('output')
+    expect(out).toContain('tail')
+  })
+
+  it('leaves a system-reminder quoted inside a fenced code block alone', () => {
+    const raw =
+      'here is the shape the parser strips:\n\n' +
+      '```xml\n<system-reminder>hook text</system-reminder>\n```\n\n' +
+      'and that is why.'
+    expect(stripScaffolding(raw)).toBe(raw)
+  })
+
+  it('still strips a reminder outside the fence in the same message', () => {
+    const raw =
+      '<system-reminder>injected</system-reminder>\n' +
+      'real question\n\n```\n<system-reminder>quoted</system-reminder>\n```'
+    const out = stripScaffolding(raw)
+    expect(out).toBe('real question\n\n```\n<system-reminder>quoted</system-reminder>\n```')
+  })
+
+  it('keeps a command-message that is not a duplicate of the command name', () => {
+    // "always a duplicate" is an assumption enforced nowhere upstream. When it
+    // holds, drop it; when it does not, the text is the only copy there is.
+    const raw =
+      '<command-message>deploy the staging cluster now</command-message>\n' +
+      '<command-name>/gm</command-name>'
+    expect(stripScaffolding(raw)).toContain('deploy the staging cluster now')
+  })
+
+  it('still drops a command-message that duplicates the command name', () => {
+    const raw = '<command-message>vj</command-message>\n<command-name>/vj</command-name>'
+    expect(stripScaffolding(raw)).toBe('/vj')
+  })
+
+  it('matches tags that carry attributes', () => {
+    // The transcript format is not ours to control; an added attribute must not
+    // silently turn scaffolding back into indexed content.
+    const raw = 'before\n<system-reminder priority="high">machine noise</system-reminder>\nafter'
+    expect(stripScaffolding(raw)).toBe('before\nafter')
+  })
+
+  it('leaves an unclosed tag and everything after it untouched', () => {
+    // 7 live messages have an unclosed <system-reminder>. Dropping to end-of-text
+    // would delete whatever real content follows, so they stay polluted on
+    // purpose — a known, documented gap rather than a guess.
+    const raw = 'real content\n<system-reminder>never closed\nmore real content'
+    expect(stripScaffolding(raw)).toBe(raw)
+  })
+})
+
 describe('isScaffoldingOnly', () => {
   it('flags a message that was nothing but a command wrapper', () => {
     expect(
