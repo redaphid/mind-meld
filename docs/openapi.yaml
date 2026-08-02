@@ -301,7 +301,9 @@ paths:
             (`coding`, `personal`, `meetings`, …; a project can override its
             source's class). Defaults to `coding` only, so SMS threads and
             meeting transcripts stay out of a coding agent's results. `*`
-            disables the filter.
+            disables the filter. Values are case-insensitive; a value not in
+            the live vocabulary is a `400` naming the valid classes rather
+            than a silent empty result.
           schema:
             type: array
             items:
@@ -1319,11 +1321,13 @@ components:
           type: string
           maxLength: 32
           description: |
-            Classification for the source (`coding`, `personal`, `meetings`, …;
-            open vocabulary, lowercase). Omitted, a new source defaults to
-            `personal` — fail closed, invisible to the default search until
-            classified — and an existing source keeps its current class. When
-            given, it reclassifies the source.
+            Classification stamped on the source when it is first created
+            (`coding`, `personal`, `meetings`, …; open vocabulary, lowercase).
+            Omitted, a new source defaults to `personal` — fail closed,
+            invisible to the default search until classified. An existing
+            source's class is never changed through ingest: this endpoint is
+            unauthenticated, and reclassification would silently move data
+            across the class boundary.
           examples: [meetings]
         project:
           type: object

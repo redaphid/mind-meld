@@ -29,6 +29,16 @@ const SOURCES = [
   ['android', 'Android'],
 ]
 
+// The browser is the human's window, so unlike the MCP surface (which
+// defaults to coding-only to keep SMS threads out of coding agents' results)
+// the UI searches everything unless the human narrows it.
+const DATA_CLASSES = [
+  ['*', 'All classes'],
+  ['coding', 'Coding'],
+  ['personal', 'Personal'],
+  ['meetings', 'Meetings'],
+]
+
 export const SearchView = () => {
   const { query } = useRoute()
   const [draft, setDraft] = useState(query.q ?? '')
@@ -47,6 +57,7 @@ export const SearchView = () => {
     source: query.source ?? '',
     since: query.since ?? '',
     includeAutomated: query.includeAutomated === '1' ? '1' : '',
+    dataClass: query.dataClass ?? '*',
   }
 
   const { data, error, loading, reload } = useApi(submitted ? '/api/search' : null, params, params)
@@ -105,6 +116,9 @@ export const SearchView = () => {
       <select value=${params.source} onChange=${e => setOpt('source', e.target.value)}>
         ${SOURCES.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
       </select>
+      <select value=${params.dataClass} onChange=${e => setOpt('dataClass', e.target.value)}>
+        ${DATA_CLASSES.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
+      </select>
       <button class="btn sm" type="button" onClick=${() => setShowOpts(s => !s)}>
         ${showOpts ? 'Less' : 'More'}
       </button>
@@ -144,6 +158,8 @@ export const SearchView = () => {
         <span>${data.count} result${data.count === 1 ? '' : 's'}</span>
         <${Pill}>${MODES.find(([v]) => v === params.mode)?.[1]}<//>
         ${params.source && html`<${Pill}>${sourceLabel(params.source)}<//>`}
+        ${params.dataClass !== '*' &&
+        html`<${Pill}>${DATA_CLASSES.find(([v]) => v === params.dataClass)?.[1] ?? params.dataClass}<//>`}
       </div>
       ${data.results.length === 0
         ? html`<${Empty}

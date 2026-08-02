@@ -12,7 +12,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool, queries } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
-import { search, formatSearchResults, findProjectsByPath } from './search.js'
+import { search, formatSearchResults, findProjectsByPath, UnknownDataClassError } from './search.js'
 import { sinceSchema } from './since.js'
 import {
   getSessionDigest,
@@ -676,18 +676,29 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
           .map(s => s.trim())
           .filter(Boolean)
 
-  const results = await search({
-    query: q,
-    negativeQuery: typeof req.query.not === 'string' ? req.query.not : undefined,
-    mode: mode && ['semantic', 'text', 'hybrid'].includes(mode) ? mode : 'hybrid',
-    limit: Math.min(intParam(req.query.limit, 20), 100),
-    source: typeof req.query.source === 'string' ? req.query.source : undefined,
-    since: typeof req.query.since === 'string' ? req.query.since : undefined,
-    cwd,
-    projectOnly: boolParam(req.query.projectOnly),
-    includeAutomated: boolParam(req.query.includeAutomated),
-    dataClass: dataClass?.length ? dataClass : undefined,
-  })
+  let results
+  try {
+    results = await search({
+      query: q,
+      negativeQuery: typeof req.query.not === 'string' ? req.query.not : undefined,
+      mode: mode && ['semantic', 'text', 'hybrid'].includes(mode) ? mode : 'hybrid',
+      limit: Math.min(intParam(req.query.limit, 20), 100),
+      source: typeof req.query.source === 'string' ? req.query.source : undefined,
+      since: typeof req.query.since === 'string' ? req.query.since : undefined,
+      cwd,
+      projectOnly: boolParam(req.query.projectOnly),
+      includeAutomated: boolParam(req.query.includeAutomated),
+      dataClass: dataClass?.length ? dataClass : undefined,
+    })
+  } catch (error) {
+    // A typo'd class is a caller mistake, not a server fault — 400, with the
+    // valid vocabulary in the message.
+    if (error instanceof UnknownDataClassError) {
+      res.status(400).json({ status: 'error', error: error.message })
+      return
+    }
+    throw error
+  }
 
   const projectIds = cwd ? (await findProjectsByPath(cwd)).map(p => p.id) : []
 

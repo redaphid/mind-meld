@@ -55,7 +55,7 @@ by centroid.
 | `projectOnly` | boolean | `false` | Restrict to the `cwd` project instead of just boosting it |
 | `since` | string | — | Time floor. See [formats](#since-formats) |
 | `source` | string | — | `claude_code`, `android`, or any ingested source key. Naming a source bypasses the default `dataClass` filter |
-| `dataClass` | string[] | `["coding"]` | Data classes to search. Every source carries a class (`coding`, `personal`, `meetings`, …; projects can override). `["*"]` searches everything; `["coding","personal"]` widens |
+| `dataClass` | string[] | `["coding"]` | Data classes to search. Every source carries a class (`coding`, `personal`, `meetings`, …; projects can override). `["*"]` searches everything; `["coding","personal"]` widens. Case-insensitive; an unknown value is rejected with the valid vocabulary |
 | `likeSession` / `unlikeSession` | string[] | — | Weighted session centroids |
 | `likeProject` / `unlikeProject` | string[] | — | Weighted project centroids |
 | `includeAutomated` | boolean | `false` | Include non-interactive sessions (monitoring jobs, health checks, huddles). *stdio server only* |

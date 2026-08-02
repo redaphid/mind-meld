@@ -105,14 +105,17 @@ export const queries = {
   },
 
   // A brand-new source lands as 'personal' unless the caller classifies it —
-  // fail closed: unclassified data stays invisible to the default search. An
-  // explicit dataClass also reclassifies an existing source; omitted, the
-  // existing classification is preserved.
+  // fail closed: unclassified data stays invisible to the default search.
+  // dataClass stamps NEW sources only. On conflict data_class is deliberately
+  // NOT updated: /api/ingest is unauthenticated, and letting it reclassify an
+  // existing source (android → coding) would defeat the class filter in one
+  // POST. Reclassification, if ever wanted, needs its own deliberate, logged
+  // endpoint.
   getOrCreateSource: async (name: string, displayName?: string, dataClass?: string) => {
     const result = await query<{ id: number; name: string; data_class: string }>(
       `INSERT INTO sources (name, display_name, data_class)
        VALUES ($1, $2, COALESCE($3, 'personal'))
-       ON CONFLICT (name) DO UPDATE SET data_class = COALESCE($3, sources.data_class)
+       ON CONFLICT (name) DO UPDATE SET name = $1
        RETURNING id, name, data_class`,
       [name, displayName ?? name, dataClass ?? null]
     );

@@ -86,6 +86,17 @@ describe('resolveDataClasses', () => {
     expect(resolveDataClasses({ source: 'android' })).toBeNull()
   })
 
+  it('normalizes case and whitespace', () => {
+    expect(resolveDataClasses({ dataClass: [' Coding ', 'PERSONAL'] })).toEqual([
+      'coding',
+      'personal',
+    ])
+  })
+
+  it('treats blank entries as absent', () => {
+    expect(resolveDataClasses({ dataClass: ['', '   '] })).toEqual(['coding'])
+  })
+
   it('still ANDs an explicit dataClass with an explicit source', () => {
     expect(resolveDataClasses({ source: 'android', dataClass: ['personal'] })).toEqual(['personal'])
   })
@@ -327,6 +338,41 @@ describe('search parameter arms', () => {
       mode: 'semantic',
     })
     expect(results.map((r) => r.session_id)).toEqual([2])
+  })
+})
+
+describe('dataClass validation', () => {
+  const withKnownClasses = () => {
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (typeof sql === 'string' && sql.includes('DISTINCT data_class'))
+        return rows({ data_class: 'coding' }, { data_class: 'meetings' }, { data_class: 'personal' })
+      if (typeof sql === 'string' && sql.includes('s.id = $1')) {
+        const row = fixtures[params?.[0] as number]
+        return row ? rows(row) : rows()
+      }
+      return rows()
+    })
+  }
+
+  it('rejects an unknown class, naming the valid vocabulary', async () => {
+    withKnownClasses()
+    await expect(search({ query: 'x', mode: 'text', dataClass: ['codign'] })).rejects.toThrow(
+      'Unknown dataClass value(s): codign. Valid values: coding, meetings, personal, or "*" for everything.'
+    )
+  })
+
+  it('accepts a miscased class after normalization instead of returning nothing', async () => {
+    withKnownClasses()
+    await search({ query: 'x', mode: 'text', dataClass: [' Coding '] })
+    const ftsCall = query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('ranked_messages')
+    )
+    expect(ftsCall![1]).toContainEqual(['coding'])
+  })
+
+  it('skips validation while the vocabulary is empty (pre-migration)', async () => {
+    query.mockResolvedValue(rows())
+    await expect(search({ query: 'x', mode: 'text' })).resolves.toEqual([])
   })
 })
 

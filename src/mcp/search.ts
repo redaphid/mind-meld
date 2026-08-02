@@ -38,13 +38,50 @@ export type SearchParams = {
 // - An explicit source already names exactly what the caller wants, so it
 //   bypasses the fail-closed default (an explicit dataClass still ANDs with it).
 // - Otherwise the default: coding data only.
+// Values are trimmed and lowercased — the vocabulary is lowercase, and a
+// miscased value should match rather than silently return nothing.
 export const resolveDataClasses = (
   params: Pick<SearchParams, 'dataClass' | 'source'>
 ): string[] | null => {
-  if (params.dataClass && params.dataClass.length > 0)
-    return params.dataClass.includes('*') ? null : params.dataClass
+  const cleaned = (params.dataClass ?? [])
+    .map((c) => c.trim().toLowerCase())
+    .filter((c) => c.length > 0)
+  if (cleaned.length > 0) return cleaned.includes('*') ? null : cleaned
   if (params.source) return null
   return ['coding']
+}
+
+// A dataClass value nobody has ever classified anything under would silently
+// return zero results; name the valid vocabulary instead.
+export class UnknownDataClassError extends Error {
+  constructor(unknown: string[], known: string[]) {
+    super(
+      `Unknown dataClass value(s): ${unknown.join(', ')}. Valid values: ${known.join(', ')}, or "*" for everything.`
+    )
+    this.name = 'UnknownDataClassError'
+  }
+}
+
+// Every class in use: source classifications plus project overrides.
+const listKnownDataClasses = async (): Promise<string[]> => {
+  const result = await query<{ data_class: string }>(
+    `SELECT DISTINCT data_class FROM (
+       SELECT data_class FROM sources
+       UNION
+       SELECT data_class FROM projects WHERE data_class IS NOT NULL
+     ) classes
+     ORDER BY data_class`
+  )
+  return result.rows.map((r) => r.data_class)
+}
+
+const assertKnownDataClasses = async (dataClasses: string[]) => {
+  const known = await listKnownDataClasses()
+  // An empty vocabulary means the migration hasn't classified anything yet;
+  // rejecting the default ["coding"] then would make search unusable.
+  if (known.length === 0) return
+  const unknown = dataClasses.filter((c) => !known.includes(c))
+  if (unknown.length > 0) throw new UnknownDataClassError(unknown, known)
 }
 
 export type MatchedTier = 'session' | 'chunk' | 'message'
@@ -263,6 +300,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
   const projectIds = matchingProjects.map((p) => p.id)
   const sinceDate = parseSinceDate(params.since)
   const dataClasses = resolveDataClasses(params)
+  if (dataClasses) await assertKnownDataClasses(dataClasses)
   // Chroma knows nothing about data classes, so an active class filter can
   // starve the semantic arms (~70% of sessions may be filtered out after the
   // fetch). Over-fetch harder when a filter is on to compensate.
