@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest'
-import { parseClaudeLine } from './claude-messages.js'
+import { describe, it, expect, afterAll } from 'vitest'
+import { mkdtemp, writeFile, rm } from 'fs/promises'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { parseClaudeLine, parseHistoryFile } from './claude-messages.js'
 
 const line = (over: Record<string, unknown> = {}) =>
   JSON.stringify({
@@ -126,5 +129,60 @@ describe('parseClaudeLine: UTF-16LE console output (issue #20)', () => {
     expect(message.contentText).toBe('WSL version: 2.6.1.0\nstray and  half')
     expect(metadata.gitBranch).toBe('main')
     expect(JSON.stringify(message.contentJson)).not.toContain('\\u0000')
+  })
+})
+
+const dirs: string[] = []
+
+async function historyFile(lines: string[]): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'mindmeld-history-'))
+  dirs.push(dir)
+  const path = join(dir, 'history.jsonl')
+  await writeFile(path, lines.join('\n') + '\n')
+  return path
+}
+
+afterAll(async () => {
+  await Promise.all(dirs.map((d) => rm(d, { recursive: true, force: true })))
+})
+
+const historyEntry = (display: string) =>
+  JSON.stringify({ display, timestamp: 1754006400000, project: '/home/u/p' })
+
+describe('parseHistoryFile', () => {
+  it('parses well-formed entries with zero skip counts', async () => {
+    const path = await historyFile([historyEntry('one'), historyEntry('two')])
+    const result = await parseHistoryFile(path)
+    expect(result.entries.map((e) => e.display)).toEqual(['one', 'two'])
+    expect(result.malformedLines).toBe(0)
+    expect(result.invalidTimestamps).toBe(0)
+  })
+
+  // The #29 fix: these lines were previously `continue`d with no trace at all.
+  it('counts malformed lines instead of dropping them silently', async () => {
+    const path = await historyFile([historyEntry('kept'), '{"broken', 'not json at all'])
+    const result = await parseHistoryFile(path)
+    expect(result.entries).toHaveLength(1)
+    expect(result.malformedLines).toBe(2)
+  })
+
+  it('counts entries whose timestamp is unusable', async () => {
+    const path = await historyFile([
+      historyEntry('kept'),
+      JSON.stringify({ display: 'no time', project: '/p' }),
+      JSON.stringify({ display: 'year 3000', timestamp: 32503680000000, project: '/p' }),
+    ])
+    const result = await parseHistoryFile(path)
+    expect(result.entries).toHaveLength(1)
+    expect(result.invalidTimestamps).toBe(2)
+    expect(result.malformedLines).toBe(0)
+  })
+
+  it('ignores blank lines entirely — they are not data', async () => {
+    const path = await historyFile([historyEntry('kept'), '', '   '])
+    const result = await parseHistoryFile(path)
+    expect(result.entries).toHaveLength(1)
+    expect(result.malformedLines).toBe(0)
+    expect(result.invalidTimestamps).toBe(0)
   })
 })

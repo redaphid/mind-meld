@@ -27,6 +27,7 @@
     "sync": "tsx src/index.ts sync",
     "sync:claude": "tsx src/index.ts sync --source claude_code",
     "sync:embeddings": "tsx src/index.ts embeddings",
+    "verify": "tsx src/index.ts verify",
     "compute:centroids": "tsx scripts/compute-centroids.ts",
     "mark:warmups": "tsx scripts/mark-warmups.ts",
     "quarantine": "tsx scripts/retry-quarantine.ts",

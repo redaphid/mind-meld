@@ -14,6 +14,8 @@ export interface FullSyncResult {
     projectsProcessed: number;
     sessionsProcessed: number;
     messagesInserted: number;
+    skipped: number;
+    quarantined: number;
   };
   embeddings: {
     messagesEmbedded: number;
@@ -46,7 +48,7 @@ export async function runFullSync(options?: {
     startTime,
     endTime: new Date(),
     durationMs: 0,
-    claudeCode: { projectsProcessed: 0, sessionsProcessed: 0, messagesInserted: 0 },
+    claudeCode: { projectsProcessed: 0, sessionsProcessed: 0, messagesInserted: 0, skipped: 0, quarantined: 0 },
     embeddings: { messagesEmbedded: 0, sessionsUpdated: 0 },
     errors: [],
   };
@@ -62,6 +64,8 @@ export async function runFullSync(options?: {
         projectsProcessed: claudeStats.projectsProcessed,
         sessionsProcessed: claudeStats.sessionsProcessed,
         messagesInserted: claudeStats.messagesInserted,
+        skipped: claudeStats.skipped,
+        quarantined: claudeStats.quarantined,
       };
       errors.push(...claudeStats.errors);
     } catch (e) {
@@ -103,16 +107,9 @@ export async function runFullSync(options?: {
   result.durationMs = endTime.getTime() - startTime.getTime();
   result.errors = errors;
 
-  console.log('\n' + '='.repeat(60));
-  console.log('Sync Summary:');
-  console.log(`  Duration: ${(result.durationMs / 1000).toFixed(1)}s`);
-  console.log(`  Claude Code: ${result.claudeCode.sessionsProcessed} sessions, ${result.claudeCode.messagesInserted} messages`);
-  console.log(`  Embeddings: ${result.embeddings.messagesEmbedded} embedded`);
-  if (errors.length > 0) {
-    console.log(`  Errors: ${errors.length}`);
-  }
-  console.log('='.repeat(60));
-
+  // The per-run summary (and the exit-code verdict derived from it) lives in
+  // buildRunReport; the CLI prints it so the report and the exit code cannot
+  // drift apart.
   return result;
 }
 

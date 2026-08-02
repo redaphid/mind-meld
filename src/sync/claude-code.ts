@@ -23,7 +23,7 @@ export interface SyncStats {
 }
 
 // Discover all Claude Code project directories
-async function discoverProjects(basePath: string): Promise<string[]> {
+export async function discoverProjects(basePath: string): Promise<string[]> {
   const projectsDir = join(basePath, 'projects');
   const projects: string[] = [];
 
@@ -44,7 +44,7 @@ async function discoverProjects(basePath: string): Promise<string[]> {
 }
 
 // Discover session files in a project directory
-async function discoverSessionFiles(projectPath: string): Promise<string[]> {
+export async function discoverSessionFiles(projectPath: string): Promise<string[]> {
   const files: string[] = [];
 
   try {
@@ -386,7 +386,11 @@ export async function syncClaudeCode(options?: {
 }
 
 // Sync history.jsonl
-export async function syncClaudeHistory(): Promise<{ entriesInserted: number }> {
+export async function syncClaudeHistory(): Promise<{
+  entriesInserted: number;
+  malformedLines: number;
+  invalidTimestamps: number;
+}> {
   const basePath = config.sources.claudeCode.path;
   const historyPath = join(basePath, 'history.jsonl');
 
@@ -395,10 +399,15 @@ export async function syncClaudeHistory(): Promise<{ entriesInserted: number }> 
     throw new Error('Claude Code source not found');
   }
 
-  const entries = await parseHistoryFile(historyPath);
+  const { entries, malformedLines, invalidTimestamps } = await parseHistoryFile(historyPath);
   console.log(`Parsed ${entries.length} history entries`);
+  if (malformedLines > 0 || invalidTimestamps > 0) {
+    console.warn(
+      `History file ${historyPath}: skipped ${malformedLines} malformed line(s) and ${invalidTimestamps} entr(ies) with unusable timestamps`
+    );
+  }
 
   // TODO: Insert history entries into database
   // For now, just return count
-  return { entriesInserted: entries.length };
+  return { entriesInserted: entries.length, malformedLines, invalidTimestamps };
 }

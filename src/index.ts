@@ -4,6 +4,8 @@ import 'dotenv/config';
 import { execFileSync } from 'node:child_process';
 import { program } from 'commander';
 import { runFullSync, getSyncStatus } from './sync/orchestrator.js';
+import { buildRunReport } from './sync/run-report.js';
+import { verifyClaudeCode, formatVerifyReport, verifyExitCode } from './sync/verify.js';
 import { syncClaudeCode } from './sync/claude-code.js';
 import { generatePendingEmbeddings, updateAggregateEmbeddings } from './embeddings/batch.js';
 import { closePool, query } from './db/postgres.js';
@@ -86,14 +88,50 @@ program
       console.log('DEBUG: options.skipEmbeddings =', options.skipEmbeddings);
       console.log('DEBUG: computed incremental =', incremental);
 
-      await runFullSync({
+      const result = await runFullSync({
         incremental,
         skipEmbeddings: options.skipEmbeddings,
         sources,
       });
+
+      // A run that recorded errors must exit nonzero, or the container loop
+      // around this command reports a data-dropping run as a success (#29).
+      // process.exitCode (not process.exit) so the pool still closes cleanly.
+      const report = buildRunReport(result);
+      console.log('\n' + report.lines.join('\n'));
+      if (report.exitCode !== 0) {
+        console.error(`Sync finished with ${result.errors.length} error(s); exiting nonzero.`);
+        process.exitCode = report.exitCode;
+      }
     } catch (e) {
       console.error('Sync failed:', e);
-      process.exit(1);
+      process.exitCode = 1;
+    } finally {
+      await closePool();
+    }
+  });
+
+program
+  .command('verify')
+  .description(
+    'Compare each Claude Code session file on disk against the database and report drift'
+  )
+  .option('--repair', 'Clear the sync stamp on drifted sessions so the next incremental sync reprocesses them, and recompute their stats')
+  .option('-p, --project <filter>', 'Only verify projects whose decoded path contains this string')
+  .action(async (options) => {
+    try {
+      const result = await verifyClaudeCode({
+        repair: options.repair,
+        projectFilter: options.project,
+      });
+
+      console.log(formatVerifyReport(result, Boolean(options.repair)).join('\n'));
+
+      const exitCode = verifyExitCode(result, Boolean(options.repair));
+      if (exitCode !== 0) process.exitCode = exitCode;
+    } catch (e) {
+      console.error('Verify failed:', e);
+      process.exitCode = 1;
     } finally {
       await closePool();
     }
