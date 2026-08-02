@@ -139,6 +139,17 @@ describe('resolveProjectPath', () => {
     })
   })
 
+  it('only case-folds a /mnt cwd for a host that is Windows-backed', () => {
+    const input = { dirName: '-mnt-d-Data', cwd: '/mnt/d/data' }
+    expect(resolveProjectPath({ ...input, windowsHost: true })).toEqual({
+      path: '/mnt/d/data',
+      verified: true,
+    })
+    // Same inputs on a plain Linux host: a different directory, so the row
+    // keeps its honest raw name instead of being renamed to its neighbour.
+    expect(resolveProjectPath(input)).toEqual({ path: '-mnt-d-Data', verified: false })
+  })
+
   it('falls back to the raw dir name when there is no cwd — never decodes', () => {
     expect(resolveProjectPath({ dirName: 'D--mechs-win-setup' })).toEqual({
       path: 'D--mechs-win-setup',

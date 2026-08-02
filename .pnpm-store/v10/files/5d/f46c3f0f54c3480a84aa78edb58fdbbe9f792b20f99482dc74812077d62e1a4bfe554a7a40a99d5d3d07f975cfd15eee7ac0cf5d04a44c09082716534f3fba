@@ -1,0 +1,284 @@
+import * as chrono from "../src/";
+import { testSingleCase } from "./test_util";
+
+test("Test - Using reference with timezone", function () {
+    testSingleCase(
+        chrono,
+        "Friday at 4pm",
+        {
+            instant: new Date("Wed Jun 09 2021 07:00:00 GMT-0500 (CDT)"),
+            timezone: "CDT",
+        },
+        (result) => {
+            expect(result).toBeDate(new Date("Fri Jun 11 2021 16:00:00 GMT-0500 (CDT)"));
+            expect(result).toBeDate(new Date("Sat Jun 12 2021 06:00:00 GMT+0900 (JST)"));
+        }
+    );
+    testSingleCase(
+        chrono,
+        "1am",
+        {
+            instant: new Date("Wed May 26 2022 01:57:00 GMT-0500 (CDT)"),
+            timezone: "CDT",
+        },
+        (result) => {
+            expect(result.start.get("year")).toBe(2022);
+            expect(result.start.get("month")).toBe(5);
+            expect(result.start.get("day")).toBe(26);
+            expect(result.start.get("hour")).toBe(1);
+        }
+    );
+});
+
+test("Test - Using reference with missing/default timezone", function () {
+    const INPUT = "Friday at 4pm";
+    const REF_INSTANT = new Date(2021, 6 - 1, 9, 7, 0, 0);
+    const EXPECTED_INSTANT = new Date(2021, 6 - 1, 11, 16, 0, 0);
+
+    testSingleCase(chrono, INPUT, REF_INSTANT, (result) => {
+        expect(result).toBeDate(EXPECTED_INSTANT);
+    });
+
+    testSingleCase(chrono, INPUT, { instant: REF_INSTANT }, (result) => {
+        expect(result).toBeDate(EXPECTED_INSTANT);
+    });
+
+    testSingleCase(chrono, INPUT, { instant: REF_INSTANT, timezone: null }, (result) => {
+        expect(result).toBeDate(EXPECTED_INSTANT);
+    });
+
+    testSingleCase(chrono, INPUT, { instant: REF_INSTANT, timezone: "" }, (result) => {
+        expect(result).toBeDate(EXPECTED_INSTANT);
+    });
+});
+
+test("Test - Using reference instance with different timezone", function () {
+    // Sun Jun 06 2021 19:00:00 GMT+0900 (JST)
+    // Sun Jun 06 2021 11:00:00 GMT+0100 (BST)
+    const refInstant = new Date("Sun Jun 06 2021 19:00:00 GMT+0900 (JST)");
+
+    // "At 4pm tomorrow" at "Sun Jun 06 2021 11:00:00 (BST)"
+    testSingleCase(chrono, "At 4pm tomorrow", { instant: refInstant, timezone: "BST" }, (result) => {
+        const expectedInstant = new Date("Mon Jun 07 2021 16:00:00 GMT+0100 (BST)");
+        expect(result).toBeDate(expectedInstant);
+    });
+
+    // "At 4pm tomorrow" at "Sun Jun 06 2021 19:00:00 (JST)"
+    testSingleCase(chrono, "At 4pm tomorrow", { instant: refInstant, timezone: "JST" }, (result) => {
+        const expectedInstant = new Date("Mon Jun 07 2021 16:00:00 GMT+0900 (JST)");
+        expect(result).toBeDate(expectedInstant);
+    });
+});
+
+test("Test - Using reference instance with custom timezones", function () {
+    // Sun Jun 06 2021 19:00:00 GMT+0900 (JST)
+    // Sun Jun 06 2021 11:00:00 GMT+0100 (BST)
+    const refInstant = new Date("Sun Jun 06 2021 19:00:00 GMT+0900 (JST)");
+
+    // Fictional timezones
+    const timezones = {
+        "JJJ": 540, // JJJ => GMT+0900 JST
+        "BBB": 60, // BBB => GMT+0100 BST
+    };
+
+    // "At 4pm tomorrow" at "Sun Jun 06 2021 11:00:00 (BBB = BST)"
+    testSingleCase(
+        chrono,
+        "At 4pm tomorrow",
+        { instant: refInstant, timezone: "BBB" },
+        { timezones: timezones },
+        (result) => {
+            const expectedInstant = new Date("Mon Jun 07 2021 16:00:00 GMT+0100 (BST)");
+            expect(result).toBeDate(expectedInstant);
+        }
+    );
+
+    // "At 4pm tomorrow" at "Sun Jun 06 2021 19:00:00 (JJJ = JST)"
+    testSingleCase(
+        chrono,
+        "At 4pm tomorrow",
+        { instant: refInstant, timezone: "JJJ" },
+        { timezones: timezones },
+        (result) => {
+            const expectedInstant = new Date("Mon Jun 07 2021 16:00:00 GMT+0900 (JST)");
+            expect(result).toBeDate(expectedInstant);
+        }
+    );
+});
+
+test("Test - Timezone difference on reference date #2", function () {
+    const refInstant = new Date("2024-02-21T10:00:00+1300");
+
+    testSingleCase(chrono, "yesterday 18:00", { instant: refInstant, timezone: 780 }, (result) => {
+        // expect(result.start.get("year")).toBe(2024);
+        // expect(result.start.get("month")).toBe(2);
+        // expect(result.start.get("day")).toBe(20);
+        // expect(result).toBeDate(new Date("2024-02-20T18:00:00+1300"));
+    });
+});
+
+test("Test - Timezone difference on written date", function () {
+    // Sun Jun 06 2021 19:00:00 GMT+0900 (JST)
+    // Sun Jun 06 2021 11:00:00 GMT+0100 (BST)
+    const refInstant = new Date("Sun Jun 06 2021 19:00:00 GMT+0900 (JST)");
+
+    testSingleCase(chrono, "Sun Jun 06 2021 19:00:00", { timezone: "JST" }, (result) => {
+        expect(result).toBeDate(refInstant);
+    });
+
+    testSingleCase(chrono, "Sun Jun 06 2021 11:00:00", { timezone: "BST" }, (result) => {
+        expect(result).toBeDate(refInstant);
+    });
+
+    testSingleCase(chrono, "Sun Jun 06 2021 11:00:00", { timezone: 60 }, (result) => {
+        expect(result).toBeDate(refInstant);
+    });
+});
+
+test("Test - Precise [now] mentioned", function () {
+    const refDate = new Date("Sat Mar 13 2021 14:22:14 GMT+0900 (Japan Standard Time)");
+
+    testSingleCase(chrono, "now", refDate, (result) => {
+        expect(result).toBeDate(refDate);
+    });
+
+    testSingleCase(chrono, "now", { instant: refDate }, (result) => {
+        expect(result).toBeDate(refDate);
+    });
+
+    testSingleCase(chrono, "now", { instant: refDate, timezone: 540 }, (result) => {
+        expect(result).toBeDate(refDate);
+    });
+
+    testSingleCase(chrono, "now", { instant: refDate, timezone: "JST" }, (result) => {
+        expect(result).toBeDate(refDate);
+    });
+
+    testSingleCase(chrono, "now", { instant: refDate, timezone: -300 }, (result) => {
+        expect(result).toBeDate(refDate);
+    });
+});
+
+test("Test - Precise date/time mentioned", function () {
+    const text = "Sat Mar 13 2021 14:22:14 GMT+0900";
+    const refDate = new Date();
+
+    testSingleCase(chrono, text, refDate, (result, text) => {
+        expect(result).toBeDate(new Date(text));
+    });
+
+    testSingleCase(chrono, text, { instant: refDate }, (result) => {
+        expect(result).toBeDate(new Date(text));
+    });
+
+    testSingleCase(chrono, text, { instant: refDate, timezone: 540 }, (result) => {
+        expect(result).toBeDate(new Date(text));
+    });
+
+    testSingleCase(chrono, text, { instant: refDate, timezone: "JST" }, (result) => {
+        expect(result).toBeDate(new Date(text));
+    });
+
+    testSingleCase(chrono, text, { instant: refDate, timezone: -300 }, (result) => {
+        expect(result).toBeDate(new Date(text));
+    });
+});
+
+test("Test - Minimize diff because of local timezone (pre-1900)", () => {
+    // Because of Local mean time (LMT), the local/system timezone my work differently before 1900
+    // For example:
+    //  - Shanghai LMT in 1900 was +08:05:43
+    // We expect Chrono to parse this within a few hours precision
+
+    testSingleCase(chrono, "1900-01-01T00:00:00-00:00", (result) => {
+        const expectedDate = new Date("1900-01-01T00:00:00-00:00");
+        const differenceMinutes = Math.abs(result.date().getTime() - expectedDate.getTime()) / (1000 * 60);
+        expect(differenceMinutes).toBeLessThanOrEqual(60);
+    });
+
+    testSingleCase(chrono, "1900-01-01T00:00:00-01:00", (result) => {
+        const expectedDate = new Date("1900-01-01T00:00:00-01:00");
+        const differenceMinutes = Math.abs(result.date().getTime() - expectedDate.getTime()) / (1000 * 60);
+        expect(differenceMinutes).toBeLessThanOrEqual(60 * 2);
+    });
+
+    testSingleCase(chrono, "1900-01-01T00:00:00+08:00", (result) => {
+        const expectedDate = new Date("1900-01-01T00:00:00+08:00");
+        const differenceMinutes = Math.abs(result.date().getTime() - expectedDate.getTime()) / (1000 * 60);
+        expect(differenceMinutes).toBeLessThanOrEqual(60 * 2);
+    });
+
+    testSingleCase(chrono, "1900-01-01T00:00", { timezone: "JST" }, (result) => {
+        const expectedDate = new Date("1900-01-01T00:00:00+08:00");
+        const differenceMinutes = Math.abs(result.date().getTime() - expectedDate.getTime()) / (1000 * 60);
+        expect(differenceMinutes).toBeLessThanOrEqual(60 * 2);
+    });
+});
+
+test("Test - Timezone DST transitions", function () {
+    // CT (Central Time) transitions:
+    // - DST starts: 2nd Sunday of March at 2am
+    // - DST ends: 1st Sunday of November at 2am
+    testSingleCase(chrono, "2022-03-12 23:00 CT", (result, text) => {
+        // Before DST transition, expected: -360
+        expect(result.text).toBe(text);
+        expect(result.start.get("hour")).toBe(23);
+        expect(result.start.get("timezoneOffset")).toBe(-6 * 60);
+    });
+    testSingleCase(chrono, "2022-03-13 23:00 CT", (result, text) => {
+        // Within DST, expect -300 minutes
+        expect(result.text).toBe(text);
+        expect(result.start.get("hour")).toBe(23);
+        expect(result.start.get("timezoneOffset")).toBe(-5 * 60);
+    });
+    testSingleCase(chrono, "2022-11-06 23:00 CT", (result, text) => {
+        // After DST transition, expected: -360
+        expect(result.text).toBe(text);
+        expect(result.start.get("hour")).toBe(23);
+        expect(result.start.get("timezoneOffset")).toBe(-6 * 60);
+    });
+
+    // MT (Mountain Time) transitions:
+    // - DST starts: 2nd Sunday of March at 2am
+    // - DST ends: 1st Sunday of November at 2am
+    testSingleCase(chrono, "2022-03-12 23:00 MT", (result, text) => {
+        // Before DST transition, expected: -420
+        expect(result.text).toBe(text);
+        expect(result.start.get("hour")).toBe(23);
+        expect(result.start.get("timezoneOffset")).toBe(-7 * 60);
+    });
+    testSingleCase(chrono, "2022-03-13 23:00 MT", (result, text) => {
+        // Within DST, expected: -360
+        expect(result.text).toBe(text);
+        expect(result.start.get("hour")).toBe(23);
+        expect(result.start.get("timezoneOffset")).toBe(-6 * 60);
+    });
+    testSingleCase(chrono, "2022-11-06 23:00 MT", (result, text) => {
+        // After DST transition, expected: -420
+        expect(result.text).toBe(text);
+        expect(result.start.get("hour")).toBe(23);
+        expect(result.start.get("timezoneOffset")).toBe(-7 * 60);
+    });
+
+    // PT (Pacific Time) transitions:
+    // - DST starts: 2nd Sunday of March at 2am
+    // - DST ends: 1st Sunday of November at 2am
+    testSingleCase(chrono, "2022-03-12 23:00 PT", (result, text) => {
+        // Before DST transition, expected: -480
+        expect(result.text).toBe(text);
+        expect(result.start.get("hour")).toBe(23);
+        expect(result.start.get("timezoneOffset")).toBe(-8 * 60);
+    });
+    testSingleCase(chrono, "2022-03-13 23:00 PT", (result, text) => {
+        // Within DST, expected: -420
+        expect(result.text).toBe(text);
+        expect(result.start.get("hour")).toBe(23);
+        expect(result.start.get("timezoneOffset")).toBe(-7 * 60);
+    });
+    testSingleCase(chrono, "2022-11-06 23:00 PT", (result, text) => {
+        // After DST transition, expected: -480
+        expect(result.text).toBe(text);
+        expect(result.start.get("hour")).toBe(23);
+        expect(result.start.get("timezoneOffset")).toBe(-8 * 60);
+    });
+});

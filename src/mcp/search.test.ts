@@ -392,6 +392,27 @@ describe('findProjectsByPath', () => {
     expect(underLower).toEqual([])
   })
 
+  it('handles roots and non-path pseudo-projects without inventing ancestors', async () => {
+    query.mockResolvedValue(rows())
+    await findProjectsByPath('D:/')
+    const [exact, exactLower, , underLower] = query.mock.calls[0][1] as string[][]
+    expect(exactLower).toEqual(['d:/'])
+    expect(exact).toEqual(['/mnt/d', '/mnt', '/'])
+    expect(underLower).toEqual(['D:/%'])
+
+    query.mockClear()
+    await findProjectsByPath('phone')
+    const [pseudoExact, , pseudoUnder] = query.mock.calls[0][1] as string[][]
+    expect(pseudoExact).toEqual(['phone'])
+    expect(pseudoUnder).toEqual(['phone/%'])
+  })
+
+  it('returns nothing for an empty cwd rather than matching everything', async () => {
+    query.mockClear()
+    expect(await findProjectsByPath('  ')).toEqual([])
+    expect(query).not.toHaveBeenCalled()
+  })
+
   it('escapes LIKE wildcards that are legal path characters', async () => {
     query.mockResolvedValue(rows())
     await findProjectsByPath('/p/50%_off/sub')

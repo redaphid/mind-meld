@@ -190,6 +190,11 @@ beforeAll(async () => {
   await db.query(`UPDATE projects SET data_class = 'coding' WHERE external_id = '-mnt-d-tools-comfy'`)
 
   await psqlFile(SCRATCH_DB, join(INIT_DB, '019-canonical-project-paths.sql'))
+
+  // Everything after 019, so the runtime write path below meets the same
+  // schema production does (020 adds the os column upsertProject stamps).
+  const rest = (await readdir(INIT_DB)).filter((f) => f.endsWith('.sql') && f > '019z').sort()
+  for (const f of rest) await psqlFile(SCRATCH_DB, join(INIT_DB, f))
 }, 120_000)
 
 afterAll(async () => {
@@ -298,6 +303,22 @@ describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
       `SELECT data_class FROM projects WHERE external_id = 'D--tools-comfy'`
     )
     expect(survivor.rows[0].data_class).toBe('coding')
+  })
+
+  // Migration 020 (the operator's OS directive on #33). It seeds only what is
+  // a fact — a `D:` path can have come from nowhere but Windows — and leaves
+  // everything else honestly unreported rather than guessing.
+  it('records the operating system where it is provable, and NULL where it is not', async () => {
+    const rows = await db.query(
+      `SELECT external_id, os FROM projects
+       WHERE external_id IN ('D--tools-comfy', '-mnt-d-Data', '-home-alice-Projects-app')
+       ORDER BY external_id`
+    )
+    expect(rows.rows).toEqual([
+      { external_id: '-home-alice-Projects-app', os: null },
+      { external_id: '-mnt-d-Data', os: null }, // could be WSL or Linux — never guessed
+      { external_id: 'D--tools-comfy', os: 'win32' },
+    ])
   })
 
   it('turns empty pseudo-paths into NULL without touching the project', async () => {

@@ -18,6 +18,7 @@ vi.mock('pg', () => ({
 }))
 
 const { queries, transaction, closePool } = await import('./postgres.js')
+const { config } = await import('../config.js')
 
 beforeEach(() => {
   poolQuery.mockReset()
@@ -212,14 +213,18 @@ describe('upsertProject path decisions', () => {
     existing?: Array<{ id: number }>
     candidates?: Array<{ id: number; path: string | null }>
     upsertId?: number
-  }) =>
-    poolQuery.mockImplementation(async (sql: string) => {
+  }) => {
+    // Recorded calls are inspected by callMatching, so arranging a second
+    // scenario inside one test must start from a clean slate.
+    poolQuery.mockClear()
+    return poolQuery.mockImplementation(async (sql: string) => {
       if (sql.includes('SELECT id FROM projects WHERE source_id'))
         return { rows: opts.existing ?? [], rowCount: (opts.existing ?? []).length }
       if (sql.includes("path LIKE '%/%'"))
         return { rows: opts.candidates ?? [], rowCount: (opts.candidates ?? []).length }
       return { rows: [{ id: opts.upsertId ?? 42 }], rowCount: 1 }
     })
+  }
 
   const callMatching = (fragment: string) =>
     poolQuery.mock.calls.find(([sql]) => (sql as string).includes(fragment))
@@ -241,6 +246,44 @@ describe('upsertProject path decisions', () => {
     expect(callMatching('INSERT INTO projects')).toBeUndefined()
     // Adoption still records that the project was seen.
     expect(callMatching('UPDATE projects SET machine')).toBeDefined()
+  })
+
+  // Operator directive on #33: "have the mcp send to the api automatically the
+  // operating system there thread/message came from". Automatically means the
+  // caller never passes it — the write layer stamps it, exactly like the path
+  // normalization it sits next to.
+  it('stamps the running host OS with no caller involvement', async () => {
+    arrange({})
+    await queries.upsertProject(1, 'D--x', 'D:/x', 'x')
+    const insert = callMatching('INSERT INTO projects')
+    const params = insert![1] as unknown[]
+    expect(typeof params[5]).toBe('string')
+    expect(params[5]).toBe(config.os)
+    expect(insert![0]).toContain('COALESCE($6, projects.os)')
+  })
+
+  it('lets a relay report the sender OS, and null when it is unknown', async () => {
+    arrange({})
+    await queries.upsertProject(1, 'D--x', 'D:/x', 'x', 'other-host', 'darwin')
+    expect((callMatching('INSERT INTO projects')![1] as unknown[])[5]).toBe('darwin')
+    arrange({})
+    await queries.upsertProject(1, 'D--x', 'D:/x', 'x', null, null)
+    expect((callMatching('INSERT INTO projects')![1] as unknown[])[5]).toBeNull()
+  })
+
+  // This is what the OS field is FOR: /mnt/<letter> is a Windows drive under
+  // WSL and an ordinary case-sensitive mount anywhere else, and adopting the
+  // wrong row files a second project's sessions under the first permanently.
+  it('uses the reported OS to decide whether a /mnt row is the same directory', async () => {
+    arrange({ candidates: [{ id: 9, path: '/mnt/d/Data' }] })
+    const linuxId = await queries.upsertProject(1, '-mnt-d-data', '/mnt/d/data', 'data', 'host', 'linux')
+    expect(linuxId).toBe(42) // a new row: two directories on a Linux host
+    expect(callMatching('INSERT INTO projects')).toBeDefined()
+
+    arrange({ candidates: [{ id: 9, path: '/mnt/d/Data' }] })
+    const wslId = await queries.upsertProject(1, '-mnt-d-data', '/mnt/d/data', 'data', 'host', 'wsl')
+    expect(wslId).toBe(9) // one directory seen through drvfs
+    expect(callMatching('INSERT INTO projects')).toBeUndefined()
   })
 
   it('skips the adoption lookup entirely when the row already exists', async () => {

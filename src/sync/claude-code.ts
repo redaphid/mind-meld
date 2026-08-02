@@ -10,7 +10,7 @@ import {
   parseHistoryFile,
   type ParsedSession,
 } from '../parsers/claude-messages.js';
-import { resolveProjectPath } from '../utils/project-path.js';
+import { resolveProjectPath, isWindowsHostOs } from '../utils/project-path.js';
 
 export interface SyncStats {
   projectsProcessed: number;
@@ -397,6 +397,11 @@ export async function syncClaudeCode(options?: {
             const resolved = resolveProjectPath({
               dirName: projectDirName,
               cwd: session.cwd,
+              // A cwd may only verify a directory name case-insensitively
+              // where the filesystem is case-insensitive. This process knows
+              // its own OS, so on WSL a `/mnt/<letter>` cwd gets that
+              // leniency and on any other Linux host it correctly does not.
+              windowsHost: isWindowsHostOs(config.os),
             });
             if (resolved.verified) {
               projectId = await queries.upsertProject(

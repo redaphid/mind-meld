@@ -1329,6 +1329,26 @@ components:
             unauthenticated, and reclassification would silently move data
             across the class boundary.
           examples: [meetings]
+        machine:
+          type: string
+          maxLength: 64
+          description: |
+            The sending computer. Omitted means "unknown" and is recorded as
+            null — never relabelled as the machine running this server, which
+            did not produce the conversation.
+          examples: [studio-laptop]
+        os:
+          type: string
+          maxLength: 32
+          description: |
+            The sending computer's operating system: `win32`, `wsl`, `linux`,
+            `darwin`, … `wsl` is distinct from `linux` on purpose — WSL
+            reports itself as Linux while its `/mnt/<letter>` mounts are
+            Windows drives on a case-insensitive filesystem, and that is the
+            fact that decides whether two project paths differing only in case
+            are one directory or two. Omitted is recorded as null: an unknown
+            OS is handled conservatively, a guessed one would not be.
+          examples: [wsl]
         project:
           type: object
           required: [externalId, name]

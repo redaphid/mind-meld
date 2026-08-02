@@ -1,0 +1,14 @@
+import parseArgs from '../../util/parse-args.js';
+import { expandScript } from '../util.js';
+export const resolve = (_binary, args, options) => {
+    const { fromArgs, manifest } = options;
+    const parsed = parseArgs(args, { '--': true });
+    const [command, script] = parsed._;
+    const _childArgs = parsed['--'] && parsed['--'].length > 0 ? fromArgs(parsed['--'], { knownBinsOnly: true }) : [];
+    if (command === 'exec')
+        return _childArgs;
+    if (command === 'run' && manifest.scriptNames.has(script)) {
+        return expandScript(script, parsed['--'] ?? [], manifest.scripts, options) ?? _childArgs;
+    }
+    return [];
+};
