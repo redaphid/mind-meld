@@ -78,7 +78,7 @@ program
     try {
       // An unknown --source used to silently sync nothing and exit 0 — the
       // same invisible-failure class as #29. Reject it loudly instead.
-      const KNOWN_SOURCES = ['claude_code', 'cursor'] as const;
+      const KNOWN_SOURCES = ['claude_code'] as const;
       if (options.source && !KNOWN_SOURCES.includes(options.source)) {
         console.error(
           `Unknown source "${options.source}". Valid sources: ${KNOWN_SOURCES.join(', ')}`

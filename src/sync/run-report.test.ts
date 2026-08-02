@@ -13,7 +13,6 @@ const result = (over: Partial<FullSyncResult> = {}): FullSyncResult => ({
     skipped: 96,
     quarantined: 0,
   },
-  cursor: { conversationsProcessed: 2, messagesInserted: 18, skipped: 41 },
   embeddings: { messagesEmbedded: 100, sessionsUpdated: 5 },
   errors: [],
   ...over,
