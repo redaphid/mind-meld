@@ -27,13 +27,13 @@ describe('readStoredLogs', () => {
   })
 
   it('numbers placeholders correctly when filters are combined', async () => {
-    await readStoredLogs({ limit: 25, offset: 50, machine: 'survivor', level: 'error' })
+    await readStoredLogs({ limit: 25, offset: 50, machine: 'wsl-box', level: 'error' })
 
     const sql = sqlOf(0)
     expect(sql).toContain('machine = $1')
     expect(sql).toContain('level = $2')
     expect(sql).toContain('LIMIT $3 OFFSET $4')
-    expect(paramsOf(0)).toEqual(['survivor', 'error', 25, 50])
+    expect(paramsOf(0)).toEqual(['wsl-box', 'error', 25, 50])
   })
 
   it('wraps a contains filter in wildcards for a substring match', async () => {
@@ -66,11 +66,11 @@ describe('readStoredLogs', () => {
 
 describe('countStoredLogs', () => {
   it('applies the same filters as the page query, without limit or offset', async () => {
-    await countStoredLogs({ limit: 10, offset: 0, machine: 'soul' })
+    await countStoredLogs({ limit: 10, offset: 0, machine: 'gpu-host' })
 
     expect(sqlOf(0)).toContain('COUNT(*)')
     expect(sqlOf(0)).toContain('machine = $1')
-    expect(paramsOf(0)).toEqual(['soul'])
+    expect(paramsOf(0)).toEqual(['gpu-host'])
   })
 
   it('coerces the count string to a number', async () => {

@@ -1,7 +1,7 @@
 -- Migration: Record which computer indexed each project
 -- Multiple machines sync into this one database, but nothing recorded which.
--- Path shape is not enough: the WSL distro and the laptop both use
--- /home/hypnodroid, so they are indistinguishable after the fact. Going forward
+-- Path shape is not enough: the WSL distro and the laptop both use the same
+-- /home/<user> prefix, so they are indistinguishable after the fact. Going forward
 -- each sync process stamps its own MACHINE_NAME; this column is where it lands.
 
 DO $$
@@ -24,9 +24,9 @@ BEGIN
     WHERE machine IS NULL
       AND source_id IN (SELECT id FROM sources WHERE name = 'android');
 
-    -- Deliberately NOT backfilled: /home/% projects. Both 'survivor' (the WSL
-    -- distro) and 'soul' (the laptop) use that prefix, so any guess would be
-    -- wrong for one of them and would look authoritative. They stay NULL and
+    -- Deliberately NOT backfilled: /home/% projects. Both the WSL distro and
+    -- the laptop use that prefix, so any guess would be wrong for one of them
+    -- and would look authoritative. They stay NULL and
     -- report as 'unknown' until their next sync stamps them correctly.
   END IF;
 END $$;

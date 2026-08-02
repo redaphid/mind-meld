@@ -7,7 +7,7 @@ describe('classifyAutomated', () => {
   })
 
   it('flags curiosity curator sessions', () => {
-    expect(classifyAutomated('You are a curiosity curator helping @hypnodroid discover discussions.')).toBeTruthy()
+    expect(classifyAutomated('You are a curiosity curator helping @someone discover discussions.')).toBeTruthy()
   })
 
   it('flags MCP availability checker sessions', () => {

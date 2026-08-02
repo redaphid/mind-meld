@@ -7,7 +7,7 @@ const main = async () => {
   console.log("Generating embedding for 'storefronts app'...")
   const response = await ollama.embed({
     model: "bge-m3",
-    input: "storefronts app sibi application development"
+    input: "storefronts app application development"
   })
   const queryEmbedding = response.embeddings[0]
 
