@@ -4,26 +4,59 @@ import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 
-// Nothing here executes a tool — we only inspect the advertised surface — but
-// importing the tool module pulls in the db layer, so it is stubbed.
+// The tools are exercised for real against stubbed data access, so the
+// handlers themselves are covered — not just the schemas they advertise.
+const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
 vi.mock('../db/postgres.js', () => ({
-  query: vi.fn(async () => ({ rows: [], rowCount: 0 })),
+  query: (...args: unknown[]) => query(...(args as [])),
   closePool: vi.fn(),
   queries: {},
 }))
 
+const doSearch = vi.fn(async () => [])
+vi.mock('./search.js', () => ({
+  search: (...args: unknown[]) => doSearch(...(args as [])),
+  formatSearchResults: () => 'SEARCH RESULTS',
+  findProjectsByPath: async () => [{ id: 7, name: 'proj' }],
+}))
+
+const digest = vi.fn(async () => ({ title: 'a session' }))
+vi.mock('./session.js', () => ({
+  getSessionDigest: (...args: unknown[]) => digest(...(args as [])),
+  getMessages: async () => ({ messages: [] }),
+  getMessageById: async () => ({ id: 1 }),
+  getChunk: async () => ({ index: 0 }),
+  formatDigest: () => 'DIGEST',
+  formatMessages: () => 'MESSAGES',
+  formatMessage: () => 'MESSAGE',
+  formatChunk: () => 'CHUNK',
+}))
+
+vi.mock('./health.js', () => ({
+  getHealth: async () => ({ coverage: 1 }),
+  formatHealth: () => 'HEALTH',
+}))
+
 const { createMcpServer } = await import('./tools.js')
 
-// Ask the server what it advertises the same way a real client does, over an
-// in-memory transport. This asserts the wire-level surface, not our internals.
-const advertisedTools = async () => {
+// Talk to the server exactly as a real client does, over an in-memory
+// transport. This asserts the wire-level surface, not our internals.
+const connect = async () => {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   const client = new Client({ name: 'parity-test', version: '0.0.0' })
   await Promise.all([createMcpServer().connect(serverTransport), client.connect(clientTransport)])
+  return client
+}
+
+const advertisedTools = async () => {
+  const client = await connect()
   const { tools } = await client.listTools()
   await client.close()
   return tools
 }
+
+const text = (result: unknown) =>
+  ((result as { content: { text: string }[] }).content[0]?.text ?? '')
 
 const src = (file: string) =>
   readFile(fileURLToPath(new URL(file, import.meta.url)), 'utf8')
@@ -66,6 +99,97 @@ describe('shared MCP tool surface', () => {
     expect(search).toContain('cursor')
     expect(search).toContain('getMessages')
     expect(search.length).toBeGreaterThan(500)
+  })
+})
+
+// Advertising a tool is not the same as it working. These call every tool the
+// way a client would, so the three that HTTP could not reach are proven to
+// actually run — not merely to appear in listTools.
+describe('every advertised tool executes', () => {
+  it('runs search, and passes includeAutomated through to the search layer', async () => {
+    const client = await connect()
+    const result = await client.callTool({
+      name: 'search',
+      arguments: { query: 'anything', includeAutomated: true },
+    })
+    expect(text(result)).toBe('SEARCH RESULTS')
+    expect(doSearch).toHaveBeenCalledWith(expect.objectContaining({ includeAutomated: true }))
+    await client.close()
+  })
+
+  it('runs health', async () => {
+    const client = await connect()
+    expect(text(await client.callTool({ name: 'health', arguments: {} }))).toBe('HEALTH')
+    await client.close()
+  })
+
+  it('runs getSessionTranscript, resolving by search term rather than id', async () => {
+    const client = await connect()
+    const result = await client.callTool({
+      name: 'getSessionTranscript',
+      arguments: { searchTerm: 'some title' },
+    })
+    expect(text(result)).toBe('DIGEST')
+    expect(digest).toHaveBeenCalledWith({ searchTerm: 'some title' })
+    await client.close()
+  })
+
+  it('reports a missing session as an error rather than an empty digest', async () => {
+    digest.mockResolvedValueOnce(null as never)
+    const client = await connect()
+    const result = await client.callTool({
+      name: 'getSessionTranscript',
+      arguments: { searchTerm: 'nope' },
+    })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('No session found matching: nope')
+    await client.close()
+  })
+
+  it('runs the remaining read tools', async () => {
+    const client = await connect()
+    const calls: [string, Record<string, unknown>, string][] = [
+      ['getSession', { sessionId: 1 }, 'DIGEST'],
+      ['getMessages', { sessionId: 1 }, 'MESSAGES'],
+      ['getMessage', { id: 1 }, 'MESSAGE'],
+      ['getChunk', { sessionId: 1, chunkIndex: 0 }, 'CHUNK'],
+    ]
+    for (const [name, args, expected] of calls)
+      expect(text(await client.callTool({ name, arguments: args })), name).toBe(expected)
+
+    expect(text(await client.callTool({ name: 'stats', arguments: {} }))).toContain(
+      'Mindmeld Statistics'
+    )
+    await client.close()
+  })
+
+  it('soft-deletes on reportUselessSession, and says so when there was nothing to delete', async () => {
+    const client = await connect()
+
+    query.mockResolvedValueOnce({ rows: [{ id: 5 }], rowCount: 1 } as never)
+    expect(
+      text(await client.callTool({ name: 'reportUselessSession', arguments: { sessionId: 5 } }))
+    ).toBe('Session 5 soft-deleted.')
+
+    // rowCount 0 — already deleted, or never existed.
+    expect(
+      text(await client.callTool({ name: 'reportUselessSession', arguments: { sessionId: 6 } }))
+    ).toContain('not found or already deleted')
+    await client.close()
+  })
+
+  it('offers the context prompt on both transports, not just stdio', async () => {
+    const client = await connect()
+    const { prompts } = await client.listPrompts()
+    expect(prompts.map(p => p.name)).toContain('context')
+
+    query.mockResolvedValueOnce({
+      rows: [{ id: 1, title: 'T', project_name: 'proj', started_at: new Date(), message_count: 3 }],
+      rowCount: 1,
+    } as never)
+    const prompt = await client.getPrompt({ name: 'context', arguments: { cwd: '/w/proj' } })
+    expect((prompt.messages[0].content as { text: string }).text).toContain('Previous Conversations')
+    await client.close()
   })
 })
 
