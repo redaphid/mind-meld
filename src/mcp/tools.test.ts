@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -14,18 +14,22 @@ vi.mock('../db/postgres.js', () => ({
 }))
 
 const doSearch = vi.fn(async () => [])
+const findProjectsByPath = vi.fn(async () => [{ id: 7, name: 'proj' }])
 vi.mock('./search.js', () => ({
   search: (...args: unknown[]) => doSearch(...(args as [])),
   formatSearchResults: () => 'SEARCH RESULTS',
-  findProjectsByPath: async () => [{ id: 7, name: 'proj' }],
+  findProjectsByPath: (...args: unknown[]) => findProjectsByPath(...(args as [])),
 }))
 
 const digest = vi.fn(async () => ({ title: 'a session' }))
+const messages = vi.fn(async () => ({ messages: [] }))
+const messageById = vi.fn(async () => ({ id: 1 }))
+const chunk = vi.fn(async () => ({ index: 0 }))
 vi.mock('./session.js', () => ({
   getSessionDigest: (...args: unknown[]) => digest(...(args as [])),
-  getMessages: async () => ({ messages: [] }),
-  getMessageById: async () => ({ id: 1 }),
-  getChunk: async () => ({ index: 0 }),
+  getMessages: (...args: unknown[]) => messages(...(args as [])),
+  getMessageById: (...args: unknown[]) => messageById(...(args as [])),
+  getChunk: (...args: unknown[]) => chunk(...(args as [])),
   formatDigest: () => 'DIGEST',
   formatMessages: () => 'MESSAGES',
   formatMessage: () => 'MESSAGE',
@@ -57,6 +61,11 @@ const advertisedTools = async () => {
 
 const text = (result: unknown) =>
   ((result as { content: { text: string }[] }).content[0]?.text ?? '')
+
+// Call history only — the default implementations above must survive.
+beforeEach(() => {
+  vi.clearAllMocks()
+})
 
 const src = (file: string) =>
   readFile(fileURLToPath(new URL(file, import.meta.url)), 'utf8')
@@ -157,9 +166,30 @@ describe('every advertised tool executes', () => {
     for (const [name, args, expected] of calls)
       expect(text(await client.callTool({ name, arguments: args })), name).toBe(expected)
 
-    expect(text(await client.callTool({ name: 'stats', arguments: {} }))).toContain(
-      'Mindmeld Statistics'
-    )
+    await client.close()
+  })
+
+  it('aggregates stats by source, by data class, and by project', async () => {
+    // Two sources sharing a data class, so the per-class rollup has something
+    // to actually add up.
+    query
+      .mockResolvedValueOnce({
+        rows: [
+          { source_name: 'claude_code', data_class: 'coding', project_count: 4, session_count: 10, message_count: 900 },
+          { source_name: 'slack', data_class: 'coding', project_count: 1, session_count: 5, message_count: 80 },
+        ],
+        rowCount: 2,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [{ name: 'mind-meld', session_count: 7, message_count: 500 }],
+        rowCount: 1,
+      } as never)
+
+    const client = await connect()
+    const out = text(await client.callTool({ name: 'stats', arguments: {} }))
+    expect(out).toContain('**claude_code** (coding): 4 projects, 10 sessions, 900 messages')
+    expect(out).toContain('**coding:** 15 sessions')
+    expect(out).toContain('- **mind-meld:** 7 sessions, 500 messages')
     await client.close()
   })
 
@@ -178,17 +208,80 @@ describe('every advertised tool executes', () => {
     await client.close()
   })
 
+  it('only resolves cwd to projects when a cwd was given', async () => {
+    const client = await connect()
+
+    await client.callTool({ name: 'search', arguments: { query: 'x' } })
+    expect(findProjectsByPath).not.toHaveBeenCalled()
+
+    await client.callTool({ name: 'search', arguments: { query: 'x', cwd: '/w/proj' } })
+    expect(findProjectsByPath).toHaveBeenCalledWith('/w/proj')
+    await client.close()
+  })
+
+  it('says so, rather than failing, when a lookup finds nothing', async () => {
+    digest.mockResolvedValueOnce(null as never)
+    messages.mockResolvedValueOnce(null as never)
+    messageById.mockResolvedValueOnce(null as never)
+    chunk.mockResolvedValueOnce(null as never)
+
+    const client = await connect()
+    const misses: [string, Record<string, unknown>, string][] = [
+      ['getSession', { sessionId: 1 }, 'Session not found.'],
+      ['getMessages', { sessionId: 1 }, 'No messages found.'],
+      ['getMessage', { id: 1 }, 'Message not found.'],
+      ['getChunk', { sessionId: 1, chunkIndex: 0 }, 'Chunk not found.'],
+    ]
+    for (const [name, args, expected] of misses)
+      expect(text(await client.callTool({ name, arguments: args })), name).toBe(expected)
+    await client.close()
+  })
+
+  it('logs the reason when reportUselessSession is given one', async () => {
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {})
+    query.mockResolvedValueOnce({ rows: [{ id: 9 }], rowCount: 1 } as never)
+
+    const client = await connect()
+    await client.callTool({
+      name: 'reportUselessSession',
+      arguments: { sessionId: 9, reason: 'automated monitoring noise' },
+    })
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('automated monitoring noise'))
+    stderr.mockRestore()
+    await client.close()
+  })
+
+  it('tells the context prompt apart from a project with no history', async () => {
+    findProjectsByPath.mockResolvedValueOnce([])
+    const client = await connect()
+    const prompt = await client.getPrompt({ name: 'context', arguments: { cwd: '/w/new' } })
+    expect((prompt.messages[0].content as { text: string }).text).toContain(
+      'This appears to be a new project'
+    )
+    await client.close()
+  })
+
   it('offers the context prompt on both transports, not just stdio', async () => {
     const client = await connect()
     const { prompts } = await client.listPrompts()
     expect(prompts.map(p => p.name)).toContain('context')
 
     query.mockResolvedValueOnce({
-      rows: [{ id: 1, title: 'T', project_name: 'proj', started_at: new Date(), message_count: 3 }],
-      rowCount: 1,
+      rows: [
+        { id: 1, title: 'T', project_name: 'proj', started_at: new Date(), message_count: 3 },
+        // An untitled session must still render a line, not a blank.
+        { id: 2, title: null, project_name: 'proj', started_at: new Date(), message_count: 1 },
+      ],
+      rowCount: 2,
     } as never)
-    const prompt = await client.getPrompt({ name: 'context', arguments: { cwd: '/w/proj' } })
-    expect((prompt.messages[0].content as { text: string }).text).toContain('Previous Conversations')
+    const prompt = await client.getPrompt({
+      name: 'context',
+      arguments: { cwd: '/w/proj', task: 'wiring up the parity fix' },
+    })
+    const body = (prompt.messages[0].content as { text: string }).text
+    expect(body).toContain('Previous Conversations')
+    expect(body).toContain('wiring up the parity fix')
+    expect(body).toContain('Untitled')
     await client.close()
   })
 })
