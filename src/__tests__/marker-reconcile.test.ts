@@ -16,8 +16,17 @@ const ROBOT = '\u{1F916}';
 describe('machineAuthorship: signals that a body was written by a machine', () => {
   it.each([
     ['a Claude Code footer', 'looks fine\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)'],
-    ['a cycle report', 'Cycle 3 green: added the reconciler. 24 tests passing, type-check clean.\n\nNext: docs.'],
-    ['a green-gates report', 'All 364 tests pass, type-check clean, `pnpm run quality` OK — both ratchets held.'],
+    [
+      'a cycle report',
+      'Cycle 3 green: added the reconciler, with the signal table split into conclusive and stylistic tiers.\n\n' +
+        '24 tests passing, type-check clean.\n\nNext: the docs, then a live dry run over the last fifty threads.',
+    ],
+    [
+      'a green-gates report',
+      'Rebased onto main and re-ran everything after the parser change.\n\n' +
+        'All 364 tests pass, type-check clean, `pnpm run quality` OK — both ratchets held and the baselines are untouched.\n\n' +
+        'Next: the verification transcript.',
+    ],
     ['a review verdict', '## Review\n\n**Verdict: request changes**\n\n### S1 — the parser drops data\n\nSee line 40.'],
     ['a structured status report', '## Summary\n\n- item one\n- item two\n\n## Testing\n\n```\npnpm test\n```\n\n## Next steps\n\nmore'],
   ])('flags %s', (_label, body) => {
@@ -102,6 +111,34 @@ describe('machineAuthorship: it must never put words in the operator’s mouth',
     expect(conclusive.conclusive).toBe(true);
   });
 
+  it.each([
+    ['verdict: this is not what I asked for'],
+    ['why do 3 tests pass locally but not in CI?'],
+    ['is type-check clean?'],
+    ['make sure 24 tests passing before you merge'],
+    ['next: answer the question I actually asked'],
+    ['ready for review? it looks half done'],
+    ['## why\n\nbecause I said so'],
+    ['cycle 3 green? it is not green on my machine'],
+  ])('does not even REPORT a realistic operator one-liner: %s', (body) => {
+    // Reported-but-not-fixed is still wrong: anything reading `isMachine` sees
+    // the operator classified as a machine. A single keyword in one short line
+    // is a question about a report, never a report.
+    const r = rec.machineAuthorship(body);
+    expect(r.isMachine).toBe(false);
+    expect(r.conclusive).toBe(false);
+  });
+
+  it('requires more than one weak singleton signal to report', () => {
+    // One weight-3 phrase alone used to clear the threshold on its own.
+    const single = rec.machineAuthorship(
+      'The verdict here depends on what you meant by the second requirement, which I read ' +
+        'differently from you, and I would rather settle that before either of us writes code. ' +
+        'Say which reading you intended and I will follow it.',
+    );
+    expect(single.conclusive).toBe(false);
+  });
+
   it('treats a generated footer as machine evidence regardless of length', () => {
     // A footer is emitted by tooling, not a phrase a person types, so length
     // adds nothing — unlike the gate phrases, which the operator can use in a
@@ -157,7 +194,13 @@ describe('findViolations', () => {
   it('finds unmarked machine comments', () => {
     const found = rec.findViolations(
       [
-        c({ id: 1, body: 'Cycle 2 green: 15 tests passing, type-check clean.\n\nNext: the docs.' }),
+        c({
+          id: 1,
+          body:
+            'Cycle 2 green: the guard now intercepts every gh comment path, including the api ones and\n' +
+            'the review bodies, and resolves heredocs.\n\n' +
+            '15 tests passing, type-check clean.\n\nNext: the reconciler, then the docs.',
+        }),
         c({ id: 2, body: 'sounds good' }),
       ],
       owner,

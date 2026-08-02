@@ -32,15 +32,17 @@ describe('classifyComment: coordinator', () => {
     expect(c.generation).toBe('v11');
   });
 
-  it('accepts the generation-less form documented in AGENTS.md', () => {
-    // Docs and habit both produce `🤖 **Coordinator:**`. Rejecting it would
-    // block the coordinator mid-cycle over a detail only the handoff protocol
-    // needs, so it is valid — the generation is recorded when it is there.
+  it('does not let an unbound coordinator marker close the operator’s loop', () => {
+    // `🤖 **Coordinator:**` names no generation, so nothing ties it to the
+    // active channel — it is the cheapest possible forgery of the one marker
+    // that marks the operator answered. It stays machine-authored, but it
+    // cannot answer for anyone.
     const c = marker.classifyComment(`${ROBOT} **Coordinator:** answered`);
     expect(c.actor).toBe('coordinator');
-    expect(c.valid).toBe(true);
-    expect(c.isCoordinatorReply).toBe(true);
-    expect(c.generation).toBe(null);
+    expect(c.isMachine).toBe(true);
+    expect(c.isCoordinatorReply).toBe(false);
+    expect(c.valid).toBe(false);
+    expect(c.reason).toMatch(/generation/i);
   });
 
   it('matches the marker produced by coord_marker() in scripts/coord/lib.sh', () => {
@@ -173,6 +175,26 @@ describe('classifyComment: infrastructure markers', () => {
     expect(c.actor).toBe('infra');
     expect(c.isCoordinatorReply).toBe(false);
   });
+
+  it('still requires a name — a review is an agent speaking (#79)', () => {
+    // Otherwise 🔎/📋/⏱ is a one-character way around the name requirement.
+    const unnamed = marker.classifyComment('\u{1F50E} **Adversarial review:** verdict');
+    expect(unnamed.isMachine).toBe(true);
+    expect(unnamed.valid).toBe(false);
+    expect(unnamed.reason).toMatch(/name/i);
+
+    const named = marker.classifyComment('\u{1F50E} **Adversarial review (Cass):** verdict');
+    expect(named.valid).toBe(true);
+    expect(named.name).toBe('Cass');
+    expect(named.isCoordinatorReply).toBe(false);
+  });
+
+  it('does not require a name of a tooling comment with no author at all', () => {
+    // The heartbeat is written by a script, not by an agent with a name.
+    const c = marker.classifyComment('<!-- coord-heartbeat -->\nalive');
+    expect(c.isMachine).toBe(true);
+    expect(c.valid).toBe(true);
+  });
 });
 
 describe('classifyComment: unmarked and degenerate bodies', () => {
@@ -192,9 +214,12 @@ describe('classifyComment: unmarked and degenerate bodies', () => {
     expect(marker.classifyComment(body).isMachine).toBe(false);
   });
 
-  it('treats a bare robot emoji with no role as machine but invalid, and never as a coordinator reply', () => {
-    const c = marker.classifyComment(`${ROBOT} something happened`);
-    expect(c.isMachine).toBe(true);
+  it('does not let a bare robot emoji silence the operator’s own thread', () => {
+    // The operator opening a message with 🤖 (quoting the protocol, or just
+    // being playful) must not read as a machine and vanish from the inbox.
+    // Over-reporting a thread costs a glance; under-reporting costs an answer.
+    const c = marker.classifyComment(`${ROBOT} why is this marker thing so complicated`);
+    expect(c.isMachine).toBe(false);
     expect(c.valid).toBe(false);
     expect(c.isCoordinatorReply).toBe(false);
   });

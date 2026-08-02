@@ -9,9 +9,22 @@ decorative.
 ## The markers
 
 ```
-🤖 **Agent (Mira):**        an implementation/review agent, named
-🤖 **Coordinator v2:**      the coordinator of generation v2
+🤖 **Agent (Mira):**                    an implementation/review agent, named
+🔎 **Adversarial review (Cass):**       a review agent — tooling emoji, still named
+🤖 **Coordinator v2:**                  the coordinator of generation v2
 ```
+
+The **generation is required** on a coordinator marker. It is the only marker
+that means "the operator has been answered", so it must be bound to something:
+a bare `🤖 **Coordinator:**` is tied to no channel, and would otherwise be the
+cheapest way for a nameless agent to claim the one authority that closes the
+operator's loop. `comment.mjs` checks the generation against the channel
+actually carrying `coordinator-active`, and refuses when it cannot verify it.
+
+A bare `🤖` with no role is **not** treated as machine-authored. The operator
+can open a message with one, and reading it as a machine would silence his own
+thread — over-reporting a thread costs a glance, under-reporting costs him an
+answer. The guard still rejects it, because an agent must say which agent it is.
 
 An agent **names itself** — a short human first name, announced in its first
 comment and used in every comment after (#79). The name is how the operator
@@ -98,3 +111,28 @@ Findings print the signals that produced them, because a `--fix` nobody can
 audit should not be run. Repairs only ever *prepend*, they say out loud that
 the marker was added retroactively, and they sign as an agent — never as the
 coordinator, since that would re-bury the very messages this exists to surface.
+
+### Why `--fix` is hard to trigger on purpose
+
+Stamping one of the operator's comments as machine-authored would misattribute
+his words and teach every downstream tool to ignore them — worse than the bug
+this tool fixes. So the bar is deliberately high, and four independent things
+must all hold:
+
+1. **Own voice only.** Quoted lines, fenced blocks and inline code are stripped
+   before anything is scored. The operator pasting an agent's report back to
+   complain about it is the likeliest way this goes wrong, and it used to score
+   higher than the report did.
+2. **Machine-specific evidence.** Signals are split: *conclusive* ones are
+   things only a machine says about its own work (a generated footer, a cycle
+   log, a gate result, a graded verdict). Headings, fences, checklists and
+   length are *stylistic* — they can flag a comment for a human to read, but
+   never authorise an edit. Structure is not authorship.
+3. **Not terse.** "is type-check clean?" is a question about a report, not a
+   report. Nothing short is ever reported or fixed; a generated footer is the
+   one exception, being an artifact rather than a phrase anyone types.
+4. **More than one signal.** A lone keyword in a human paragraph is a
+   coincidence, not evidence.
+
+Anything that clears the first bar but not the rest is listed under *"READ
+THESE YOURSELF, they could be the operator"* and left untouched.

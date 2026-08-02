@@ -112,8 +112,23 @@ function segments(tokens) {
 
 const isGh = (t) => t?.text === 'gh' || /[/\\]gh(\.exe)?$/.test(t?.text ?? '');
 
+// Wrappers and prefixes that ordinary commands wear: `env VAR=x gh ...`,
+// `VAR=x gh ...`, `command gh ...`, `xargs -I{} gh ...`. These are idioms, not
+// evasions, so the guard has to see through them or it only stops the careful.
+const PREFIX_WORDS = new Set(['env', 'command', 'nohup', 'time', 'sudo', 'xargs', 'nice', 'stdbuf']);
+const isPrefixToken = (t) =>
+  PREFIX_WORDS.has(t.text) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t.text) || t.text.startsWith('-');
+
+/** Drop wrapper words so the segment starts at `gh`, if it ever does. */
+function unwrap(seg) {
+  let i = 0;
+  while (i < seg.length && !isGh(seg[i]) && isPrefixToken(seg[i])) i++;
+  return i < seg.length && isGh(seg[i]) ? seg.slice(i) : seg;
+}
+
 /** Which comment-posting shape, if any, is this segment? */
-export function commentKind(seg) {
+export function commentKind(rawSeg) {
+  const seg = unwrap(rawSeg);
   if (!isGh(seg[0])) return null;
   const [, a, b] = seg.map((t) => t.text);
   if ((a === 'issue' || a === 'pr') && b === 'comment') return 'comment';
@@ -122,8 +137,12 @@ export function commentKind(seg) {
     // Any argument can be the path (`--method PATCH` sits between `api` and it),
     // so look for the endpoint shape rather than guessing by position.
     const hasBody = seg.some((t) => /^body=/.test(t.text));
+    // `--input file.json` and `--input -` carry the body where we cannot see
+    // it. That is an ordinary way to post a long comment, so it must be
+    // checked (and, being unreadable, refused) rather than waved through.
+    const hasInput = seg.some((t) => t.text === '--input' || t.text.startsWith('--input='));
     const posts = seg.some((t) => /^[^-].*\/(comments|reviews)(\/[^/]*)?$/.test(t.text));
-    if (hasBody && posts) return 'api';
+    if ((hasBody || hasInput) && posts) return 'api';
   }
   return null;
 }
@@ -167,8 +186,13 @@ export function resolveBody(seg, kind) {
     try {
       return { body: readFileSync(fromFile, 'utf8') };
     } catch {
-      // Our problem, not the agent's: allow, but say so.
-      return { error: `could not read --body-file ${fromFile}` };
+      // Fail CLOSED. The hook runs from the project directory while worktree
+      // agents pass paths relative to their own cwd, so an unreadable body file
+      // is the ordinary case rather than a rare one — treating it as our bug
+      // and allowing it would be a hole an agent walks through every day.
+      return {
+        unresolved: `the body file ${fromFile} could not be read from the hook's working directory`,
+      };
     }
   }
 
@@ -214,9 +238,10 @@ function blockMessage(reason, hint) {
 }
 
 export function checkCommand(command) {
-  for (const seg of segments(tokenize(command))) {
-    const kind = commentKind(seg);
+  for (const rawSeg of segments(tokenize(command))) {
+    const kind = commentKind(rawSeg);
     if (!kind) continue;
+    const seg = unwrap(rawSeg);
 
     const resolved = resolveBody(seg, kind);
     if (resolved.error) {
@@ -227,7 +252,7 @@ export function checkCommand(command) {
         decision: 'block',
         message: blockMessage(
           `this posts a GitHub comment but the marker guard could not read the body (${resolved.unresolved}).`,
-          'Inline the body with --body "🤖 **Agent (Name):** ..." so the marker is verifiable, or write it to a file and pass --body-file.',
+          'Inline the body with --body "🤖 **Agent (Name):** ..." so the marker is verifiable, or pass --body-file with an ABSOLUTE path (this hook runs from the project directory, not your worktree).',
         ),
       };
     }

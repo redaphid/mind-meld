@@ -163,9 +163,15 @@ describe('comment.mjs — the sanctioned way to post', () => {
     expect(r.stderr).toMatch(/name/i);
   });
 
-  it('posts as the coordinator when a generation is given', () => {
-    const r = run(COMMENT, ['--issue', '66', '--coordinator', 'v2', '--body', 'x', '--dry-run']);
-    expect(r.stdout).toContain(`${ROBOT} **Coordinator v2:** x`);
+  it('refuses to sign as the coordinator when the generation cannot be verified', () => {
+    // Signing as the coordinator is the one marker that marks the operator
+    // answered, so it must not be the cheap way around the name requirement.
+    // With no resolvable active channel, the answer is no.
+    const r = run(COMMENT, ['--issue', '66', '--coordinator', 'v2', '--body', 'x', '--dry-run'], '', {
+      PATH: '', // no gh on PATH: cannot verify
+    });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/verify|active channel/i);
   });
 
   it('emits a body that the guard would allow', () => {

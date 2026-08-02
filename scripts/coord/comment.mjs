@@ -28,6 +28,35 @@ const arg = (argv, flag) => {
   return i === -1 ? undefined : argv[i + 1];
 };
 
+/**
+ * The generation of the channel currently labelled `coordinator-active`, or
+ * null when it cannot be determined. Null means "refuse", not "assume yes".
+ */
+function activeGeneration() {
+  try {
+    const issue = spawnSync(
+      'gh',
+      ['issue', 'list', '--label', 'coordinator-active', '--state', 'open', '--json', 'number', '-q', '.[0].number'],
+      { encoding: 'utf8' },
+    );
+    const number = (issue.stdout ?? '').trim();
+    if (issue.status !== 0 || !number) return null;
+    const labels = spawnSync(
+      'gh',
+      ['issue', 'view', number, '--json', 'labels', '-q', '.labels[].name'],
+      { encoding: 'utf8' },
+    );
+    if (labels.status !== 0) return null;
+    const found = (labels.stdout ?? '')
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => /^coordinator-v\d+$/.test(l));
+    return found ? found.replace('coordinator-', '') : null;
+  } catch {
+    return null;
+  }
+}
+
 function main(argv) {
   const issue = arg(argv, '--issue');
   const pr = arg(argv, '--pr');
@@ -49,6 +78,25 @@ function main(argv) {
 
   let marker;
   if (generation) {
+    // The coordinator marker is the only one that marks the operator answered,
+    // so signing as the coordinator must not be the cheap way for a nameless
+    // agent to get past the name requirement. Bind it to the active channel:
+    // the generation must match the `coordinator-vN` label actually in force.
+    const active = activeGeneration();
+    if (active === null) {
+      process.stderr.write(
+        'comment: cannot verify the coordinator generation against the active channel.\n' +
+          'Post as yourself instead: COORD_AGENT_NAME=<name> ... --agent <name>\n',
+      );
+      return 2;
+    }
+    if (active !== generation) {
+      process.stderr.write(
+        `comment: refusing to sign as Coordinator ${generation} — the active channel is ${active}.\n` +
+          'Only the coordinator of the current generation can mark the operator answered.\n',
+      );
+      return 2;
+    }
     marker = markerFor({ role: 'coordinator', generation });
   } else {
     if (!name) {

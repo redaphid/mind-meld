@@ -113,14 +113,18 @@ export function classifyComment(body) {
         actor: 'coordinator',
         isMachine: true,
         // ONLY the coordinator's marker means "the operator has been answered".
-        isCoordinatorReply: true,
-        // The generation is only needed by the handoff protocol; blocking a
-        // coordinator mid-cycle over a missing `vN` would be enforcement for
-        // its own sake. AGENTS.md documents the bare form, so it is valid.
-        valid: true,
+        // A coordinator marker is the one thing that marks the operator
+        // answered, so it must be BOUND to something. Without a generation it
+        // is tied to nothing — the cheapest possible forgery, and the easiest
+        // way for a nameless agent to get past the name requirement. It stays
+        // machine-authored, but it cannot answer for anyone.
+        isCoordinatorReply: Boolean(generation),
+        valid: Boolean(generation),
         generation,
         marker,
-        reason: generation ? 'coordinator marker' : 'coordinator marker without a generation',
+        reason: generation
+          ? 'coordinator marker'
+          : 'coordinator marker without a generation — use 🤖 **Coordinator vN:**',
       });
     }
     if (g.agent) {
@@ -145,9 +149,14 @@ export function classifyComment(body) {
   // A robot emoji with no role at all: machine-authored, but it does not say
   // which machine, so it can never count as the coordinator answering.
   if (rest.startsWith(ROBOT)) {
+    // A robot emoji with no role says nothing about who is speaking, and the
+    // operator can open a message with one. Reading it as a machine would
+    // silence his own thread, so it is NOT machine-authored — over-reporting a
+    // thread costs a glance, under-reporting costs him an answer. The guard
+    // still rejects it, because an agent must say which agent it is.
     return result({
-      actor: 'agent',
-      isMachine: true,
+      actor: 'unknown',
+      isMachine: false,
       valid: false,
       marker: ROBOT,
       reason: 'robot marker without a role — use 🤖 **Agent (Name):** or 🤖 **Coordinator vN:**',
@@ -156,12 +165,22 @@ export function classifyComment(body) {
 
   const infra = INFRA_RE.exec(rest);
   if (infra) {
+    // Tooling emoji are still an agent speaking, so #79 applies: without a
+    // name, 🔎/📋/⏱ would be a one-character way around the name requirement.
+    const named = /\(\s*([^)\n]{1,40}?)\s*\)\s*:?\s*(?:\*\*|__)?\s*:?/.exec(
+      rest.slice(infra[0].length).split('\n')[0],
+    );
+    const name = named?.[1]?.trim() ?? '';
+    const ok = name.length > 0 && AGENT_NAME.test(name) && !PLACEHOLDER_NAMES.has(name.toLowerCase());
     return result({
       actor: 'infra',
       isMachine: true,
-      valid: true,
+      valid: ok,
+      name: ok ? name : null,
       marker: infra[0],
-      reason: 'automated tooling marker',
+      reason: ok
+        ? 'automated tooling marker'
+        : 'tooling marker is missing a name — use 🔎 **Adversarial review (YourName):**',
     });
   }
 

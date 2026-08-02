@@ -136,10 +136,14 @@ describe('gh-comment-guard: --body-file', () => {
     );
   });
 
-  it('fails OPEN when the file cannot be read — our bug must not wedge the session', () => {
-    const r = runGuard(`gh pr comment 90 --body-file /definitely/not/here.md`);
-    expect(r.code).toBe(0);
-    expect(r.stderr).toMatch(/could not/i);
+  it('fails CLOSED when the body file cannot be read', () => {
+    // The hook runs from the project dir, but worktree agents pass paths
+    // relative to their own cwd — so "unreadable" is the ordinary case, not a
+    // rare one, and failing open there is a hole an agent walks through daily.
+    const r = runGuard(`gh pr comment 90 --body-file ./cycle-3-report.md`);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toMatch(/could not read/i);
+    expect(r.stderr).toMatch(/absolute/i);
   });
 });
 
@@ -159,6 +163,34 @@ describe('gh-comment-guard: bodies it cannot resolve', () => {
     const r = runGuard(`gh pr comment 90 --body "$BODY"`);
     expect(r.code).toBe(2);
     expect(r.stderr).toMatch(/could not read the body|inline/i);
+  });
+});
+
+describe('gh-comment-guard: ordinary shell idioms are not a way around it', () => {
+  it.each([
+    ['env prefix', `env GH_TOKEN=x gh pr comment 90 --body "unmarked"`],
+    ['bare env', `env gh pr comment 90 --body "unmarked"`],
+    ['inline var assignment', `GH_REPO=o/r gh pr comment 90 --body "unmarked"`],
+    ['command prefix', `command gh pr comment 90 --body "unmarked"`],
+    ['xargs', `echo 90 | xargs -I{} gh pr comment {} --body "unmarked"`],
+  ])('still blocks an unmarked comment behind %s', (_label, cmd) => {
+    expect(allowed(cmd)).toBe(false);
+  });
+
+  it.each([
+    ['env prefix', `env GH_TOKEN=x gh pr comment 90 --body "${MARKED}"`],
+    ['xargs', `echo 90 | xargs -I{} gh pr comment {} --body "${MARKED}"`],
+  ])('still allows a marked comment behind %s', (_label, cmd) => {
+    expect(allowed(cmd)).toBe(true);
+  });
+
+  it('blocks gh api --input, whose body it cannot see', () => {
+    const r = runGuard(`gh api repos/o/r/issues/79/comments --input body.json`);
+    expect(r.code).toBe(2);
+  });
+
+  it('blocks a body piped in on stdin', () => {
+    expect(allowed(`cat body.md | gh pr comment 90 --body-file -`)).toBe(false);
   });
 });
 

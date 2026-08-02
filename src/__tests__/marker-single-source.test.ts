@@ -63,17 +63,65 @@ describe('the shared classifier is what inbox.sh uses', () => {
 });
 
 describe('an unmarked agent comment does not clear needs-human', () => {
-  it('is not treated as the operator responding', () => {
-    // reconcile-labels.mjs drops `needs-human` when the last OWNER comment is
-    // unmarked. An unmarked AGENT report would therefore clear a label meant to
-    // hold the thread for the operator — the same burial bug, different tool.
-    const agentReport =
-      'Cycle 3 green: 24 tests passing, type-check clean.\n\n## Next\n\nthe reconciler.';
-    expect(comms.isAgentMarked(agentReport)).toBe(false); // unmarked, as posted
-    // ...but the reconciler can now tell it apart from a two-line human reply.
-    return load('../../scripts/coord/marker-reconcile.mjs').then((rec) => {
-      expect(rec.machineAuthorship(agentReport).isMachine).toBe(true);
-      expect(rec.machineAuthorship('no, use the other one').isMachine).toBe(false);
-    });
+  // `needs-human` is how a thread is held for the operator's attention, so an
+  // agent's own report releasing that hold is the burial bug wearing a label.
+  // This asserts the behaviour of the script that actually makes the decision.
+  const AGENT_REPORT =
+    'Cycle 3 green: the reconciler now splits conclusive from stylistic signals, so structure alone\n' +
+    'can never trigger an edit.\n\n24 tests passing, type-check clean.\n\nNext: the docs.';
+
+  it('the rule in reconcile-labels.mjs consults machine authorship, not just the marker', () => {
+    const src = readFileSync(resolve(here, '../../scripts/comms/reconcile-labels.mjs'), 'utf8');
+    const rule = src.slice(src.indexOf("labels.includes('needs-human')"));
+    expect(rule).toMatch(/machineAuthorship\([^)]*\)\.isMachine/);
+  });
+
+  it('classifies an unmarked agent report as a machine, and a terse human reply as not', async () => {
+    const rec = await load('../../scripts/coord/marker-reconcile.mjs');
+    expect(comms.isAgentMarked(AGENT_REPORT)).toBe(false); // unmarked, as posted
+    expect(rec.machineAuthorship(AGENT_REPORT).isMachine).toBe(true);
+    expect(rec.machineAuthorship('no, use the other one').isMachine).toBe(false);
+    expect(rec.machineAuthorship('verdict: this is not what I asked for').isMachine).toBe(false);
+  });
+});
+
+describe('the single-source rule is an invariant, not a list of files', () => {
+  it('no script outside marker.mjs carries its own marker-matching regex', async () => {
+    // The first version of this test grepped three files by name, so adding a
+    // fourth definition passed. Scan everything instead.
+    const { globSync } = await import('node:fs');
+    const roots = ['../../scripts', '../../.claude'];
+    const files: string[] = [];
+    for (const root of roots) {
+      try {
+        files.push(
+          ...globSync('**/*.{mjs,sh,js,ts}', { cwd: resolve(here, root) }).map((f) =>
+            resolve(here, root, String(f)),
+          ),
+        );
+      } catch {
+        /* directory may not exist */
+      }
+    }
+    expect(files.length).toBeGreaterThan(5);
+
+    const ROBOT = '\u{1F916}';
+    const offenders: string[] = [];
+    for (const file of files) {
+      if (file.replace(/\\/g, '/').endsWith('scripts/coord/marker.mjs')) continue; // the one definition
+      const code = readFileSync(file, 'utf8')
+        .split('\n')
+        .filter((l) => !/^\s*(#|\*|\/\/|\/\*)/.test(l))
+        .join('\n');
+      // Any test of a body against a marker emoji, in any language.
+      if (
+        new RegExp(`(test|match|=~|startswith|startsWith|grep)[^\\n]{0,40}${ROBOT}`, 'u').test(code) ||
+        new RegExp(`${ROBOT}[^\\n]{0,20}\\|`, 'u').test(code) ||
+        /startswith\("\\u{0,1}1?F?916/.test(code)
+      ) {
+        offenders.push(file);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });

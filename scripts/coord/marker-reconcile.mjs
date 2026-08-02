@@ -121,11 +121,21 @@ export function machineAuthorship(body) {
 
   // A machine reporting on its own work is never terse. The operator asking
   // "is type-check clean?" hits a conclusive phrase in four words, so length
-  // is the difference between a report and a question about a report.
+  // is the difference between a report and a question about a report. This
+  // gates REPORTING too, not just fixing: anything reading `isMachine` would
+  // otherwise see the operator classified as a machine.
   const substantial = body.length >= SUBSTANTIAL || lines >= 4 || artifact;
-  if (conclusive && !substantial) {
+  if (!substantial) {
+    signals.push('too terse to be a machine report');
+    return { isMachine: false, conclusive: false, score, signals };
+  }
+
+  // One keyword is a coincidence; a report says several machine things at once.
+  // A lone weight-3 phrase in an otherwise human paragraph is not evidence.
+  const conclusiveHits = signals.filter((s) => s.endsWith('(conclusive)')).length;
+  if (conclusive && !artifact && conclusiveHits < 2 && score < 5) {
     conclusive = false;
-    signals.push('too terse to be a machine report — not auto-fixable');
+    signals.push('only one machine-specific signal — not auto-fixable');
   }
 
   return { isMachine: score >= THRESHOLD, conclusive, score, signals };

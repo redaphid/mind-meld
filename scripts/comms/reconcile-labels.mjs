@@ -23,7 +23,17 @@
  * every rule above is derived from GitHub, so the reconciler behaves
  * identically on a machine that has never run it.
  */
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tryGhJson, tryRun, isAgentMarked, warn, readState, writeState } from './lib.mjs';
+
+// Shape-based detection of machine writing, from the same toolchain that owns
+// the marker grammar. See docs/agent-authorship.md.
+const { machineAuthorship } = await import(
+  pathToFileURL(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../coord/marker-reconcile.mjs'),
+  ).href
+);
 
 const FIX = process.argv.includes('--fix');
 const STALE_HOURS = Number(process.env.RECONCILE_STALE_HOURS ?? 4);
@@ -66,7 +76,17 @@ for (const issue of issues) {
       if (last !== undefined) {
         state.issues[issue.number] = { ...state.issues[issue.number], lastSeenCommentId: last.id };
       }
-      if (last !== undefined && last.authorAssociation === 'OWNER' && !isAgentMarked(last.body)) {
+      // `needs-human` holds a thread for the operator's attention, so removing
+      // it on the strength of an UNMARKED comment means an agent's own report
+      // can release the hold — the burial bug wearing a label. An unmarked
+      // comment only counts as the operator when it does not also read as a
+      // machine report.
+      if (
+        last !== undefined &&
+        last.authorAssociation === 'OWNER' &&
+        !isAgentMarked(last.body) &&
+        !machineAuthorship(last.body).isMachine
+      ) {
         drifts.push({
           issue: issue.number,
           problem: 'labeled needs-human but the operator already responded (last comment is an unmarked OWNER comment)',
