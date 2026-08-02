@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import 'dotenv/config';
+import { execFileSync } from 'node:child_process';
 import { program } from 'commander';
 import { runFullSync, getSyncStatus } from './sync/orchestrator.js';
 import { syncClaudeCode } from './sync/claude-code.js';
@@ -14,6 +15,49 @@ program
   .name('mindmeld')
   .description('Unified conversation index for Claude Code and Cursor')
   .version('0.1.0');
+
+const SYNC_TIMER = 'mindmeld-sync.timer';
+const SYNC_SERVICE = 'mindmeld-sync.service';
+
+const systemctl = (args: string[], opts: { quiet?: boolean } = {}) =>
+  execFileSync('systemctl', ['--user', ...args], {
+    stdio: opts.quiet ? 'pipe' : 'inherit',
+  });
+
+const requireSyncTimer = () => {
+  try {
+    systemctl(['cat', SYNC_TIMER], { quiet: true });
+  } catch {
+    console.error(
+      `${SYNC_TIMER} is not installed on this machine (expected in ~/.config/systemd/user/).`
+    );
+    process.exit(1);
+  }
+};
+
+program
+  .command('start')
+  .description('Enable scheduled syncing (hourly systemd timer)')
+  .action(() => {
+    requireSyncTimer();
+    systemctl(['enable', '--now', SYNC_TIMER]);
+    console.log('Scheduled syncing enabled.');
+    systemctl(['list-timers', SYNC_TIMER, '--no-pager']);
+  });
+
+program
+  .command('stop')
+  .description('Disable scheduled syncing and stop any in-flight sync run')
+  .action(() => {
+    requireSyncTimer();
+    systemctl(['disable', '--now', SYNC_TIMER]);
+    try {
+      systemctl(['stop', SYNC_SERVICE], { quiet: true });
+    } catch {
+      // service wasn't running — nothing to stop
+    }
+    console.log('Scheduled syncing disabled.');
+  });
 
 program
   .command('sync')
