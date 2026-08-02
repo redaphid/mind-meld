@@ -383,7 +383,57 @@ describe('findProjectsByPath', () => {
     )
     const projects = await findProjectsByPath('/p/proj/sub')
     expect(projects).toEqual([{ id: 7, path: '/p/proj', name: 'proj', source_name: 'claude_code' }])
-    expect(query.mock.calls[0][1]).toEqual(['/p/proj/sub'])
+    // Ancestors are matched by exact equality, so no stored path is ever used
+    // as a LIKE pattern; only the descendant direction is a pattern.
+    const [exact, exactLower, under, underLower] = query.mock.calls[0][1] as string[][]
+    expect(exact).toEqual(['/p/proj/sub', '/p/proj', '/p', '/'])
+    expect(exactLower).toEqual([])
+    expect(under).toEqual(['/p/proj/sub/%'])
+    expect(underLower).toEqual([])
+  })
+
+  it('handles roots and non-path pseudo-projects without inventing ancestors', async () => {
+    query.mockResolvedValue(rows())
+    await findProjectsByPath('D:/')
+    const [exact, exactLower, , underLower] = query.mock.calls[0][1] as string[][]
+    expect(exactLower).toEqual(['d:/'])
+    expect(exact).toEqual(['/mnt/d', '/mnt', '/'])
+    expect(underLower).toEqual(['D:/%'])
+
+    query.mockClear()
+    await findProjectsByPath('phone')
+    const [pseudoExact, , pseudoUnder] = query.mock.calls[0][1] as string[][]
+    expect(pseudoExact).toEqual(['phone'])
+    expect(pseudoUnder).toEqual(['phone/%'])
+  })
+
+  it('returns nothing for an empty cwd rather than matching everything', async () => {
+    query.mockClear()
+    expect(await findProjectsByPath('  ')).toEqual([])
+    expect(query).not.toHaveBeenCalled()
+  })
+
+  it('escapes LIKE wildcards that are legal path characters', async () => {
+    query.mockResolvedValue(rows())
+    await findProjectsByPath('/p/50%_off/sub')
+    const [exact, , under] = query.mock.calls[0][1] as string[][]
+    expect(exact).toContain('/p/50%_off')
+    expect(under).toEqual([String.raw`/p/50\%\_off/sub/%`])
+  })
+
+  it('does not let a shorter project name match a longer directory', async () => {
+    // `D:/pro` used to match a cwd of `D:/projects` for want of a separator
+    // boundary. Neither the exact list nor the descendant pattern can now.
+    query.mockResolvedValue(rows())
+    await findProjectsByPath('D:/projects')
+    const [exact, exactLower, under, underLower] = query.mock.calls[0][1] as string[][]
+    expect(exactLower).not.toContain('d:/pro')
+    // The drive spelling is case-insensitive (the `D:` form proves it);
+    // the drvfs spelling is generated too but stays case-sensitive on its own.
+    expect(exactLower).toEqual(['d:/projects', 'd:/'])
+    expect(underLower).toEqual(['D:/projects/%'])
+    expect(exact).toEqual(['/mnt/d/projects', '/mnt/d', '/mnt', '/'])
+    expect(under).toEqual(['/mnt/d/projects/%'])
   })
 })
 

@@ -16,20 +16,8 @@ CHANNEL="$(active_channel)"
 [ -n "$CHANNEL" ] || { echo "no active channel (no issue labeled coordinator-active)" >&2; exit 1; }
 GEN="$(active_generation "$CHANNEL")"
 
-BODY="$HEARTBEAT_MARKER
-$(coord_marker "$GEN") heartbeat — last cycle $(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-$NOTE
-
-<sub>Edited in place each cycle so it never spams notifications. If this timestamp goes stale the deadman workflow will say so out loud.</sub>"
-
-ID="$(heartbeat_id "$CHANNEL" || true)"
-if [ -n "$ID" ]; then
-  gh api --method PATCH "repos/$GH_REPO/issues/comments/$ID" -f body="$BODY" --silent
-  echo "heartbeat updated on #$CHANNEL"
-else
-  gh issue comment "$CHANNEL" --repo "$GH_REPO" --body "$BODY"
-fi
+post_heartbeat "$CHANNEL" "$GEN" "$NOTE"
+echo "heartbeat recorded on #$CHANNEL"
 
 # Staleness is a per-cycle condition, not a permanent mark.
 gh issue edit "$CHANNEL" --repo "$GH_REPO" --remove-label coordinator-stale 2>/dev/null || true

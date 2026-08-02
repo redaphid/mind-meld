@@ -10,6 +10,7 @@ import {
   parseHistoryFile,
   type ParsedSession,
 } from '../parsers/claude-messages.js';
+import { resolveProjectPath, isWindowsHostOs } from '../utils/project-path.js';
 
 export interface SyncStats {
   projectsProcessed: number;
@@ -292,21 +293,31 @@ export async function syncClaudeCode(options?: {
 
   for (const projectPath of projectPaths) {
     const projectDirName = projectPath.split('/').pop()!;
-    const decodedPath = decodeProjectPath(projectDirName);
-    const projectName = extractProjectName(decodedPath);
+    // The decode is a lossy GUESS (hyphens and dots are ambiguous, #22) and is
+    // never stored as a path anymore — it survives only for the project
+    // filter and as a name guess until a cwd proves the real directory.
+    const decodedGuess = decodeProjectPath(projectDirName);
 
     // Filter if specified
-    if (options?.projectFilter && !decodedPath.includes(options.projectFilter)) {
+    if (
+      options?.projectFilter &&
+      !decodedGuess.includes(options.projectFilter) &&
+      !projectDirName.includes(options.projectFilter)
+    ) {
       continue;
     }
 
     try {
-      // Upsert project with decoded path as initial guess
+      // Upsert project. Until a session cwd verifies the real directory, the
+      // stored path is the raw directory name — an honest "unknown" instead
+      // of an invented decode. upsertProject never lets this raw fallback
+      // overwrite a previously verified path.
+      const initial = resolveProjectPath({ dirName: projectDirName });
       let projectId = await queries.upsertProject(
         source.id,
         projectDirName,
-        decodedPath,
-        projectName
+        initial.path,
+        extractProjectName(decodedGuess)
       );
 
       stats.projectsProcessed++;
@@ -376,23 +387,36 @@ export async function syncClaudeCode(options?: {
             continue;
           }
 
-          // Correct project path from session cwd (decodeProjectPath is lossy
-          // with hyphens). Agent sessions are never allowed to drive this:
-          // subagent transcripts carry their isolated worktree as cwd
+          // Correct project path from session cwd — the only lossless source
+          // (#22, #33). The cwd counts only when re-encoding it reproduces
+          // this project's directory name; a cwd that fails that check
+          // belongs to some other directory (a worktree's transcript can
+          // carry the parent repo as cwd) and must not rename this project.
+          // Agent sessions are never allowed to drive this: subagent
+          // transcripts carry their isolated worktree as cwd
           // (.claude/worktrees/agent-*), and on incremental runs the freshest
-          // file — usually a subagent transcript — is often the only candidate,
-          // so one of them would rename the whole project row to agent-xxx.
+          // file — usually a subagent transcript — is often the only
+          // candidate, so one of them would rename the whole project row to
+          // agent-xxx.
           if (!correctedFromCwd && session.cwd && !session.isAgent) {
-            const cwdName = extractProjectName(session.cwd);
-            if (session.cwd !== decodedPath) {
+            const resolved = resolveProjectPath({
+              dirName: projectDirName,
+              cwd: session.cwd,
+              // A cwd may only verify a directory name case-insensitively
+              // where the filesystem is case-insensitive. This process knows
+              // its own OS, so on WSL a `/mnt/<letter>` cwd gets that
+              // leniency and on any other Linux host it correctly does not.
+              windowsHost: isWindowsHostOs(config.os),
+            });
+            if (resolved.verified) {
               projectId = await queries.upsertProject(
                 source.id,
                 projectDirName,
-                session.cwd,
-                cwdName
+                resolved.path,
+                extractProjectName(resolved.path)
               );
+              correctedFromCwd = true;
             }
-            correctedFromCwd = true;
           }
 
           // Sync to database

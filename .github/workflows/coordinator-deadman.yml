@@ -28,26 +28,84 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          channel=$(gh issue list --label coordinator-active --state open --json number -q '.[0].number')
 
-          if [ -z "$channel" ]; then
-            echo "::warning::No issue carries coordinator-active — coordination is unowned."
+          # Every line below — including heredoc bodies and their terminators —
+          # sits at this block scalar's own indentation. A line less indented
+          # than the block terminates it and the parser then hits prose at the
+          # document root, which is how this workflow reached main as invalid
+          # YAML: installed, red on every push, and never once executed.
+
+          channels=$(gh issue list --label coordinator-active --state open --limit 100 --json number -q '.[].number')
+          count=$(printf '%s' "$channels" | grep -c . || true)
+          channel=$(printf '%s' "$channels" | head -1)
+
+          if [ "${count:-0}" -eq 0 ]; then
+            # This used to be a bare `::warning::` and exit 0. Nobody reads
+            # annotations on a green cron run, so the most severe state in the
+            # whole model — coordination completely unowned — was also the
+            # quietest thing the deadman could report. It now opens an issue.
+            # One open issue, not one per hour: the label is the guard.
+            existing=$(gh issue list --label coordinator-unowned --state open --limit 100 --json number -q '.[0].number')
+            if [ -n "$existing" ]; then
+              echo "Coordination is unowned; alarm already open as #$existing. Staying quiet."
+              exit 0
+            fi
+            echo "::error::No issue carries coordinator-active — coordination is unowned."
+            gh label create coordinator-unowned --color B60205 \
+              --description "Nobody currently owns coordination" 2>/dev/null || true
+            cat >/tmp/unowned.md <<'BODY'
+          🚨 **Deadman:** no open issue carries `coordinator-active`. **Nobody is coordinating**, and nothing will change that on its own.
+
+          Recovery needs neither a design conversation nor the previous coordinator's context — the state record is derived from GitHub:
+
+          ```
+          scripts/coord/state.sh
+          scripts/coord/handoff.sh --to vNEXT --reason "coordination unowned" --force
+          ```
+
+          `handoff.sh` closes this issue automatically once a channel is active again.
+          BODY
+            gh issue create --label coordinator-unowned \
+              --title "🚨 Coordination is unowned — no issue carries coordinator-active" \
+              --body-file /tmp/unowned.md
             exit 0
           fi
 
-          hb=$(gh api "repos/$GH_REPO/issues/$channel/comments" --paginate \
-                --jq '[.[] | select(.body | contains("<!-- coord-heartbeat -->"))] | last | .updated_at // empty')
+          if [ "$count" -gt 1 ]; then
+            # Reachable, not theoretical: handoff.sh creates the successor
+            # carrying the label and only then clears the predecessor's.
+            echo "::error::$count issues carry coordinator-active — coordination is ambiguous."
+            gh issue comment "$channel" --body "⏱️ **Deadman:** $count issues carry \`coordinator-active\` ($(echo "$channels" | tr '\n' ' ')). Coordination is **ambiguous** — more than one coordinator may believe it owns this. Clear the label from all but one."
+          fi
+
+          # `--slurp` (one array per page) rather than `--paginate --jq`, which
+          # evaluates the filter once per page and so returns one answer per
+          # page. `--slurp` cannot be combined with `--jq`, hence node — which
+          # also means the deadman and the coordinator scripts share one
+          # definition of what a heartbeat is.
+          hb=$(gh api "repos/$GH_REPO/issues/$channel/comments" --paginate --slurp \
+                | node scripts/coord/comments.mjs heartbeat | cut -f2)
 
           if [ -z "$hb" ]; then
-            echo "Channel #$channel has never recorded a heartbeat; nothing to compare yet."
-            exit 0
+            # A channel with no heartbeat at all used to exit 0, so a successor
+            # that opened its channel and immediately wedged was invisible
+            # forever — permanently silent, no threshold, no comment. handoff.sh
+            # now seeds the first heartbeat, so a channel still missing one is
+            # either pre-fix or stillborn; either way fall back to the channel's
+            # own age so it can go stale like anything else.
+            hb=$(gh issue view "$channel" --json createdAt -q .createdAt)
+            echo "Channel #$channel has never recorded a heartbeat; measuring from its creation ($hb)."
+            reason="has never recorded a single heartbeat since its channel was opened"
+          else
+            reason="has not recorded a heartbeat"
           fi
 
           age=$(( ( $(date -u +%s) - $(date -u -d "$hb" +%s) ) / 60 ))
-          echo "Heartbeat on #$channel is ${age}m old (threshold ${STALE_MINUTES}m)."
-          # An `if`, not `[ ... ] && exit 0`: under `set -e` that idiom exits
-          # nonzero when the condition is FALSE, so the job would have failed
-          # exactly when it detected a stall — the one case it exists for.
+          echo "Reference timestamp on #$channel is ${age}m old (threshold ${STALE_MINUTES}m)."
+          # An `if`, not `[ ... ] && exit 0` — purely for legibility. The `&&`
+          # form was NOT a bug: `[` is exempt from `set -e` as a non-final
+          # member of an `&&` list, so the stale branch was reachable. See the
+          # correction on PR #84.
           if [ "$age" -lt "$STALE_MINUTES" ]; then
             echo "Coordinator is alive."
             exit 0
@@ -59,18 +117,15 @@ jobs:
             exit 0
           fi
 
+          echo "::error::Coordinator on #$channel is stale by ${age}m."
           gh label create coordinator-stale --color B60205 \
             --description "Active coordinator has missed its heartbeat" 2>/dev/null || true
           gh issue edit "$channel" --add-label coordinator-stale
 
-          # Heredoc, not an inline --body: a multi-line string written inline
-          # puts its continuation lines at column 0, which breaks out of this
-          # YAML block scalar and makes the whole workflow fail to parse. That
-          # is exactly how this file died the first time.
           cat >/tmp/deadman.md <<EOF
-          ⏱️ **Deadman:** no coordinator heartbeat for ${age} minutes (threshold ${STALE_MINUTES}m). The active coordinator is unresponsive, wedged, or gone.
+          ⏱️ **Deadman:** the active coordinator $reason for ${age} minutes (threshold ${STALE_MINUTES}m). It is unresponsive, wedged, or gone.
 
-          Recovery does not route through the stalled session — state is derived from GitHub:
+          Recovery does not route through the stalled session — the state record is derived from GitHub:
 
           \`\`\`
           scripts/coord/state.sh
@@ -79,5 +134,4 @@ jobs:
 
           This posts once per stall; the label clears on the next heartbeat.
           EOF
-          sed -i 's/^          //' /tmp/deadman.md
           gh issue comment "$channel" --body-file /tmp/deadman.md
