@@ -10,6 +10,8 @@ const { enqueue, flushLogs, sinkStats, startDbLogSink, __resetForTests } = await
   './db-sink.js'
 )
 
+const NUL = String.fromCharCode(0)
+
 const entry = (over: Partial<{ message: string; level: string }> = {}) => ({
   seq: 0,
   timestamp: '2026-08-02T00:00:00.000Z',
@@ -39,6 +41,18 @@ describe('enqueue', () => {
     enqueue(entry())
     expect(query).not.toHaveBeenCalled()
     expect(sinkStats().pending).toBe(1)
+  })
+
+  // Postgres rejects U+0000 in text, and a rejected batch is retried forever:
+  // one poisoned line would wedge the sink and eventually cost every later
+  // line. The byte is escaped visibly at enqueue instead of eaten.
+  it('escapes NUL bytes so one poisoned line cannot wedge the whole sink', async () => {
+    enqueue(entry({ message: `saw wsl${NUL}--list${NUL} in a path` }))
+    await flushLogs()
+
+    const [, params] = query.mock.calls[0]
+    expect(params[3]).toEqual(['saw wsl\\u0000--list\\u0000 in a path'])
+    expect((params[3] as string[])[0]).not.toContain(NUL)
   })
 
   it('drops the oldest entries once the queue cap is exceeded', () => {

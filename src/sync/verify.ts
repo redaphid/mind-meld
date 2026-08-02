@@ -61,6 +61,11 @@ export interface VerifyResult {
   // Session files the DB has never seen. Not drift — the next sync will pick
   // them up — but reported so the summary accounts for every file.
   neverSynced: number;
+  // Sessions whose file changed since their last sync: the DB is legitimately
+  // behind and the next incremental run will reprocess them. Issue #21's
+  // dangerous case is exactly the opposite — `will_resync = false` — so only
+  // that case counts as drift.
+  pendingSync: number;
   drifted: SessionDriftReport[];
   repaired: number;
   errors: string[];
@@ -100,6 +105,7 @@ export async function verifyClaudeCode(options?: {
     filesChecked: 0,
     matched: 0,
     neverSynced: 0,
+    pendingSync: 0,
     drifted: [],
     repaired: 0,
     errors: [],
@@ -158,6 +164,19 @@ export async function verifyClaudeCode(options?: {
         const drift = assessSession(counts);
         if (drift.kind === 'none') {
           result.matched++;
+          continue;
+        }
+
+        // If the file changed since its last sync, the next incremental run
+        // will reprocess it and fix missing rows and stale stats alike —
+        // reporting that as drift would page someone for the normal case of a
+        // conversation still being written. Surplus rows are never fixed by a
+        // re-sync, so they stay drift regardless.
+        const willResync =
+          !existing.file_modified_at ||
+          existing.file_modified_at.getTime() !== parsed.fileModifiedAt.getTime();
+        if (willResync && drift.kind !== 'surplus-rows') {
+          result.pendingSync++;
           continue;
         }
 
@@ -223,6 +242,7 @@ export function formatVerifyReport(result: VerifyResult, repair: boolean): strin
   lines.push(`  Files checked: ${result.filesChecked}`);
   lines.push(`  Matched: ${result.matched}`);
   lines.push(`  Never synced (new files awaiting sync): ${result.neverSynced}`);
+  lines.push(`  Pending sync (file changed since last sync): ${result.pendingSync}`);
   lines.push(`  Drifted: ${result.drifted.length}`);
   if (repair) lines.push(`  Repaired: ${result.repaired}`);
   if (result.errors.length > 0) {

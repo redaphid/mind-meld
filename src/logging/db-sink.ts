@@ -46,7 +46,11 @@ export const enqueue = (entry: LogEntry) => {
     machine: config.machine,
     service,
     level: entry.level,
-    message: entry.message,
+    // Postgres text cannot hold U+0000, and one poisoned line wedges its whole
+    // batch: the flush fails, retries forever, and every later log line queues
+    // behind it until the cap starts dropping them. Escape visibly instead —
+    // the byte is shown, not silently eaten.
+    message: entry.message.replaceAll('\u0000', '\\u0000'),
     loggedAt: new Date(entry.timestamp),
   })
 

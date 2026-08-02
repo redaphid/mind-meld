@@ -73,6 +73,7 @@ const verifyResult = (over: Partial<VerifyResult> = {}): VerifyResult => ({
   filesChecked: 10,
   matched: 9,
   neverSynced: 0,
+  pendingSync: 0,
   drifted: [],
   repaired: 0,
   errors: [],
@@ -82,6 +83,12 @@ const verifyResult = (over: Partial<VerifyResult> = {}): VerifyResult => ({
 describe('verifyExitCode', () => {
   it('is zero when nothing drifted', () => {
     expect(verifyExitCode(verifyResult({ matched: 10 }), false)).toBe(0);
+  });
+
+  // A conversation still being written is legitimately ahead of the DB; the
+  // next incremental sync closes that gap. Only will_resync=false gaps alarm.
+  it('is zero when the only gaps are sessions awaiting their next sync', () => {
+    expect(verifyExitCode(verifyResult({ matched: 7, pendingSync: 3 }), false)).toBe(0);
   });
 
   // Unrepaired drift is the alarm this command exists to raise.
