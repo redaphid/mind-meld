@@ -1,8 +1,56 @@
+# Five of six Dockerfiles here are single-stage `COPY . .`, so whatever is not
+# excluded below ships in a layer of a PUBLIC GHCR image (issue #64). The scrub
+# cleaned the tree; the change that stops REpublication is this file — an image
+# has no business carrying docs, compose files, CI config or agent notes.
+#
+# This list applies to every Dockerfile in the context, so note two keeps:
+# init-db/ stays (Dockerfile.postgres copies it, and src/db/migrations.ts reads
+# it at runtime), and public/ stays (the ui and mcp services serve it).
+
+# Build output and installed dependencies — reinstalled inside the image.
 node_modules
 dist
-.git
-*.log
+out
+coverage
+
 # Never bake local secrets into an image — every Dockerfile here uses COPY . .
 .env
 .env.*
 !.env.example
+
+# Version control and CI.
+.git
+.gitignore
+.gitattributes
+.github
+.dockerignore
+
+# Docs, agent instructions, editor config: never read at runtime, and the
+# largest surface for a personal detail to ride along into a public layer.
+docs
+*.md
+.claude
+.vscode
+.idea
+
+# Deployment topology describes the operator's hosts, not the container's job.
+# The Dockerfile named by -f is always available to the build regardless.
+docker-compose*.yml
+Dockerfile*
+.env.example
+.mcp.json
+
+# Tests, fixtures and quality tooling. Not runtime code — and fixtures are
+# where transcript-shaped personal data most plausibly appears.
+**/*.test.ts
+src/__tests__
+quality
+vitest.config.ts
+knip.jsonc
+
+# Operator-side helper scripts, not container entrypoints.
+scripts
+*.sh
+
+# Logs
+*.log

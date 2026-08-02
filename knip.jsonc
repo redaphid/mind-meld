@@ -11,6 +11,11 @@
     // tsx/node entry point, so scan them all as entries.
     "scripts/*.ts",
     "scripts/*.mjs",
+    // Coordinator toolchain. These are standalone node entry points invoked by
+    // the sibling shell scripts (`node "$COORD_DIR/comments.mjs" …`) and by
+    // .github/workflows/coordinator-deadman.yml, so nothing knip can follow
+    // imports them — they are executed, not required.
+    "scripts/coord/*.mjs",
     // Ratchet checkers, run by CI and pnpm quality:*.
     "scripts/quality/*.ts",
     // Comms-protocol enforcement (issue #75). These are provider-agnostic
