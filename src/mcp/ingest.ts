@@ -28,6 +28,12 @@ export const IngestPayloadSchema = z.object({
   // The sending computer. Omitted means "unknown" — we record nothing rather
   // than mislabelling it as the machine running this server.
   machine: z.string().max(64).optional(),
+  // The sending computer's operating system (#33): `win32` | `wsl` | `linux`
+  // | `darwin` | … Same rule as `machine` — omitted means "unknown" and is
+  // recorded as null, because a relayed thread did not come from this
+  // server's OS. It is the fact that makes a `/mnt/<letter>` path comparison
+  // sound rather than assumed, so guessing it would be worse than lacking it.
+  os: z.string().max(32).optional(),
   project: z.object({
     externalId: z.string(),
     name: z.string(),
@@ -81,7 +87,8 @@ export const ingestConversation = async (payload: IngestPayload) => {
     payload.project.externalId,
     payload.project.path ?? '',
     payload.project.name,
-    payload.machine ?? null
+    payload.machine ?? null,
+    payload.os ?? null
   )
 
   const sessionId = await queries.upsertSession({
@@ -90,6 +97,7 @@ export const ingestConversation = async (payload: IngestPayload) => {
     title: payload.session.title,
     startedAt: payload.session.startedAt,
     endedAt: payload.session.endedAt,
+    os: payload.os ?? null,
   })
 
   let messagesInserted = 0

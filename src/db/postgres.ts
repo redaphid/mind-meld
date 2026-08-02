@@ -2,6 +2,7 @@ import pg from 'pg';
 import { config } from '../config.js';
 import { isAutomated } from '../embeddings/classify.js';
 import { normalizeText, normalizeDeep } from '../utils/text-encoding.js';
+import { canonicalizeProjectPath, findEquivalentIn, isWindowsHostOs } from '../utils/project-path.js';
 
 const { Pool } = pg;
 
@@ -123,26 +124,82 @@ export const queries = {
   },
 
   // Projects
-  // `machine` defaults to whoever is running this process, which is what every
-  // sync wants. Callers relaying someone else's data (/api/ingest) pass the
-  // sender's machine, or null when it is unknown — null preserves whatever was
-  // already recorded rather than overwriting a known origin with a guess.
+  // `machine` (which computer) and `os` (what it runs) both default to
+  // whoever is running this process, which is what every sync wants. Callers
+  // relaying someone else's data (/api/ingest) pass the sender's values, or
+  // null when unknown — null preserves whatever was already recorded rather
+  // than overwriting a known origin with a guess. Neither is ever asked of a
+  // caller: like path normalization, the origin stamp is automatic (#33).
+  //
+  // Path normalization is automatic and happens HERE, nowhere else (#33):
+  // every caller — sync, /api/ingest, MCP — gets the canonical form without
+  // knowing it exists. Two further rules keep the column trustworthy:
+  //
+  //  - No clobbering: a path equal to the raw external id is the honest
+  //    "unknown" fallback and only ever fills a NULL; it never overwrites a
+  //    real path learned from a session cwd. Real paths always win.
+  //  - No duplicates: when no row exists for this external id but an existing
+  //    row's path is an equivalent spelling of the same directory
+  //    (`D:\x` = `D:/x` = `/mnt/d/x`, Windows case-insensitively), that row is
+  //    adopted instead of inserting a twin. This is what keeps the 019 merge
+  //    merged: both encodings of a directory (`D--tools-comfy`,
+  //    `-mnt-d-tools-comfy`) keep resolving to the one surviving row. The
+  //    check-then-insert is not atomic, but sync is single-process; the worst
+  //    a lost race can produce is one duplicate row, never lost data.
   upsertProject: async (
     sourceId: number,
     externalId: string,
-    path: string,
+    path: string | null,
     name: string,
-    machine: string | null = config.machine
+    machine: string | null = config.machine,
+    os: string | null = config.os
   ) => {
+    const cleanExternalId = normalizeText(externalId);
+    const canonicalPath = clean(canonicalizeProjectPath(path));
+    const cleanOs = clean(os);
+
+    const existing = await query<{ id: number }>(
+      'SELECT id FROM projects WHERE source_id = $1 AND external_id = $2',
+      [sourceId, cleanExternalId]
+    );
+    if (existing.rows.length === 0) {
+      const candidates = await query<{ id: number; path: string | null }>(
+        "SELECT id, path FROM projects WHERE source_id = $1 AND path LIKE '%/%'",
+        [sourceId]
+      );
+      // The sender's OS is what makes a `/mnt/<letter>` comparison sound
+      // rather than assumed: those mounts are Windows drives under WSL and
+      // ordinary case-sensitive mounts anywhere else. Unreported OS means no
+      // case folding — the conservative side, where nothing is merged that
+      // might be two directories.
+      const adopted = findEquivalentIn(candidates.rows, cleanExternalId, canonicalPath, {
+        windowsHost: isWindowsHostOs(cleanOs),
+      });
+      if (adopted) {
+        await query(
+          `UPDATE projects SET machine = COALESCE($2, machine), os = COALESCE($3, os),
+                               last_synced_at = NOW()
+           WHERE id = $1`,
+          [adopted.id, clean(machine), cleanOs]
+        );
+        return adopted.id;
+      }
+    }
+
     const result = await query<{ id: number }>(
-      `INSERT INTO projects (source_id, external_id, path, name, machine, last_synced_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())
+      `INSERT INTO projects (source_id, external_id, path, name, machine, os, last_synced_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
        ON CONFLICT (source_id, external_id)
-       DO UPDATE SET path = $3, name = $4,
-                     machine = COALESCE($5, projects.machine),
-                     last_synced_at = NOW()
+       DO UPDATE SET
+         path = CASE WHEN $3::text IS NULL OR $3 = projects.external_id
+                     THEN COALESCE(projects.path, $3) ELSE $3 END,
+         name = CASE WHEN $3::text IS NULL OR $3 = projects.external_id
+                     THEN COALESCE(projects.name, $4) ELSE $4 END,
+         machine = COALESCE($5, projects.machine),
+         os = COALESCE($6, projects.os),
+         last_synced_at = NOW()
        RETURNING id`,
-      [sourceId, normalizeText(externalId), normalizeText(path), normalizeText(name), clean(machine)]
+      [sourceId, cleanExternalId, canonicalPath, normalizeText(name), clean(machine), cleanOs]
     );
     return result.rows[0].id;
   },
@@ -171,13 +228,17 @@ export const queries = {
     fileModifiedAt?: Date;
     startedAt?: Date;
     endedAt?: Date;
+    // Which OS this thread was recorded on (#33). Omit it and the running
+    // process stamps its own, so sync and MCP carry no burden; a relay that
+    // knows the sender's OS passes it, and null means honestly unknown.
+    os?: string | null;
   }) => {
     const result = await query<{ id: number }>(
       `INSERT INTO sessions (
         project_id, external_id, title, is_agent, parent_session_id, agent_id,
         claude_version, model_used, git_branch, cwd, raw_file_path, file_modified_at,
-        started_at, ended_at, is_automated, last_synced_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
+        started_at, ended_at, is_automated, os, last_synced_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
       ON CONFLICT (project_id, external_id)
       DO UPDATE SET
         title = COALESCE($3, sessions.title),
@@ -192,6 +253,7 @@ export const queries = {
         started_at = COALESCE($13, sessions.started_at),
         ended_at = COALESCE($14, sessions.ended_at),
         is_automated = $15,
+        os = COALESCE($16, sessions.os),
         last_synced_at = NOW()
       RETURNING id`,
       [
@@ -210,6 +272,7 @@ export const queries = {
         params.startedAt ?? null,
         params.endedAt ?? null,
         isAutomated(clean(params.title)),
+        params.os === undefined ? clean(config.os) : clean(params.os),
       ]
     );
     return result.rows[0].id;

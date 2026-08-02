@@ -420,10 +420,30 @@ describe('syncClaudeCode cwd correction', () => {
 
     await syncClaudeCode()
 
-    // Only the initial upsert from the decoded directory name — the agent's
-    // worktree cwd must never reach upsertProject.
+    // Only the initial upsert — the agent's worktree cwd must never reach
+    // upsertProject. The stored path is the raw directory name (an honest
+    // "unknown"), never the lossy decode (#33).
     expect(upsertProject).toHaveBeenCalledTimes(1)
-    expect(upsertProject).toHaveBeenCalledWith(1, '-home-u-proj', '/home/u/proj', 'proj')
+    expect(upsertProject).toHaveBeenCalledWith(1, '-home-u-proj', '-home-u-proj', 'proj')
+  })
+
+  // A transcript can carry a cwd that is NOT this project's directory — a
+  // worktree's transcript recording the parent repo, for instance. Re-encoding
+  // the cwd must reproduce the directory name before it may rename the row.
+  it('ignores a cwd that does not re-encode to the project directory name', async () => {
+    const { base, project } = await claudeBase('-home-u-proj--claude-worktrees-agent-x')
+    await writeFile(join(project, 'sess-1.jsonl'), transcriptLine({ cwd: '/home/u/proj' }) + '\n')
+    ;(config.sources.claudeCode as { path: string }).path = base
+
+    await syncClaudeCode()
+
+    expect(upsertProject).toHaveBeenCalledTimes(1)
+    expect(upsertProject).toHaveBeenCalledWith(
+      1,
+      '-home-u-proj--claude-worktrees-agent-x',
+      '-home-u-proj--claude-worktrees-agent-x',
+      'x'
+    )
   })
 
   it('still corrects the project path from a main session cwd', async () => {

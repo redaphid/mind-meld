@@ -18,6 +18,7 @@ vi.mock('pg', () => ({
 }))
 
 const { queries, transaction, closePool } = await import('./postgres.js')
+const { config } = await import('../config.js')
 
 beforeEach(() => {
   poolQuery.mockReset()
@@ -252,5 +253,129 @@ describe('transaction', () => {
 
   it('closePool tears the pool down', async () => {
     await expect(closePool()).resolves.toBeUndefined()
+  })
+})
+
+// upsertProject decision paths (#33): canonicalization happens INSIDE the
+// query layer ("don't make it a burden — do it automatically"), the raw-name
+// fallback can never clobber a learned path, and a missing external_id adopts
+// an equivalent existing row instead of inserting a twin. The same behavior
+// is proven against a real Postgres in migration-019.test.ts when one is
+// reachable; this suite pins the mechanics deterministically, CI included.
+describe('upsertProject path decisions', () => {
+  const arrange = (opts: {
+    existing?: Array<{ id: number }>
+    candidates?: Array<{ id: number; path: string | null }>
+    upsertId?: number
+  }) => {
+    // Recorded calls are inspected by callMatching, so arranging a second
+    // scenario inside one test must start from a clean slate.
+    poolQuery.mockClear()
+    return poolQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT id FROM projects WHERE source_id'))
+        return { rows: opts.existing ?? [], rowCount: (opts.existing ?? []).length }
+      if (sql.includes("path LIKE '%/%'"))
+        return { rows: opts.candidates ?? [], rowCount: (opts.candidates ?? []).length }
+      return { rows: [{ id: opts.upsertId ?? 42 }], rowCount: 1 }
+    })
+  }
+
+  const callMatching = (fragment: string) =>
+    poolQuery.mock.calls.find(([sql]) => (sql as string).includes(fragment))
+
+  it('canonicalizes the path itself — callers send whatever their OS gave them', async () => {
+    arrange({})
+    const id = await queries.upsertProject(1, 'C--Users-u-stuff', 'C:\\Users\\u\\stuff\\', 'stuff')
+    expect(id).toBe(42)
+    const insert = callMatching('INSERT INTO projects')
+    expect(insert).toBeDefined()
+    expect((insert![1] as unknown[])[2]).toBe('C:/Users/u/stuff')
+  })
+
+  it('adopts an equivalent existing row instead of inserting a twin', async () => {
+    // The WSL twin of an already-known Windows directory is being synced.
+    arrange({ candidates: [{ id: 9, path: 'D:/tools/comfy' }] })
+    const id = await queries.upsertProject(1, '-mnt-d-tools-comfy', '-mnt-d-tools-comfy', 'comfy')
+    expect(id).toBe(9)
+    expect(callMatching('INSERT INTO projects')).toBeUndefined()
+    // Adoption still records that the project was seen.
+    expect(callMatching('UPDATE projects SET machine')).toBeDefined()
+  })
+
+  // Operator directive on #33: "have the mcp send to the api automatically the
+  // operating system there thread/message came from". Automatically means the
+  // caller never passes it — the write layer stamps it, exactly like the path
+  // normalization it sits next to.
+  it('stamps the running host OS with no caller involvement', async () => {
+    arrange({})
+    await queries.upsertProject(1, 'D--x', 'D:/x', 'x')
+    const insert = callMatching('INSERT INTO projects')
+    const params = insert![1] as unknown[]
+    expect(typeof params[5]).toBe('string')
+    expect(params[5]).toBe(config.os)
+    expect(insert![0]).toContain('COALESCE($6, projects.os)')
+  })
+
+  it('lets a relay report the sender OS, and null when it is unknown', async () => {
+    arrange({})
+    await queries.upsertProject(1, 'D--x', 'D:/x', 'x', 'other-host', 'darwin')
+    expect((callMatching('INSERT INTO projects')![1] as unknown[])[5]).toBe('darwin')
+    arrange({})
+    await queries.upsertProject(1, 'D--x', 'D:/x', 'x', null, null)
+    expect((callMatching('INSERT INTO projects')![1] as unknown[])[5]).toBeNull()
+  })
+
+  // This is what the OS field is FOR: /mnt/<letter> is a Windows drive under
+  // WSL and an ordinary case-sensitive mount anywhere else, and adopting the
+  // wrong row files a second project's sessions under the first permanently.
+  it('uses the reported OS to decide whether a /mnt row is the same directory', async () => {
+    arrange({ candidates: [{ id: 9, path: '/mnt/d/Data' }] })
+    const linuxId = await queries.upsertProject(1, '-mnt-d-data', '/mnt/d/data', 'data', 'host', 'linux')
+    expect(linuxId).toBe(42) // a new row: two directories on a Linux host
+    expect(callMatching('INSERT INTO projects')).toBeDefined()
+
+    arrange({ candidates: [{ id: 9, path: '/mnt/d/Data' }] })
+    const wslId = await queries.upsertProject(1, '-mnt-d-data', '/mnt/d/data', 'data', 'host', 'wsl')
+    expect(wslId).toBe(9) // one directory seen through drvfs
+    expect(callMatching('INSERT INTO projects')).toBeUndefined()
+  })
+
+  it('skips the adoption lookup entirely when the row already exists', async () => {
+    arrange({ existing: [{ id: 7 }], upsertId: 7 })
+    const id = await queries.upsertProject(1, 'D--mechs-chat', 'D--mechs-chat', 'chat')
+    expect(id).toBe(7)
+    expect(callMatching("path LIKE '%/%'")).toBeUndefined()
+    // The raw-name fallback reaches SQL, where the CASE guard keeps it from
+    // overwriting a learned path (asserted against a real database in
+    // migration-019.test.ts).
+    const upsert = callMatching('ON CONFLICT (source_id, external_id)')
+    expect(upsert).toBeDefined()
+    expect(upsert![0]).toContain('THEN COALESCE(projects.path, $3) ELSE $3 END')
+    expect((upsert![1] as unknown[])[2]).toBe('D--mechs-chat')
+  })
+
+  it('passes NULL through untouched — unknown stays unknown, not an empty string', async () => {
+    arrange({})
+    await queries.upsertProject(5, 'phone', null, 'phone', 'phone')
+    const insert = callMatching('INSERT INTO projects')
+    expect((insert![1] as unknown[])[2]).toBeNull()
+  })
+})
+
+describe('upsertSession parameter mapping', () => {
+  it('strips NUL bytes from text fields and stores cwd verbatim — it is evidence, not display', async () => {
+    poolQuery.mockResolvedValue({ rows: [{ id: 5 }], rowCount: 1 })
+    const id = await queries.upsertSession({
+      projectId: 3,
+      externalId: 'sess-1',
+      title: 'Warmup \u0000ping',
+      cwd: 'D:\\mechs\\chat',
+    })
+    expect(id).toBe(5)
+    const [, params] = lastCall()
+    expect(params[0]).toBe(3)
+    expect(params[1]).toBe('sess-1')
+    expect(params[2]).toBe('Warmup ping')
+    expect(params[9]).toBe('D:\\mechs\\chat')
   })
 })

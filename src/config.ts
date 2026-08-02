@@ -1,5 +1,21 @@
-import { homedir, hostname } from "os";
+import { homedir, hostname, platform } from "os";
+import { existsSync } from "fs";
 import { join } from "path";
+
+// Which operating system this process runs on (#33). `process.platform` is
+// not enough on its own: WSL reports `linux`, but its `/mnt/<letter>` mounts
+// are Windows drives on a case-insensitive filesystem — the one distinction
+// project-path comparison actually depends on. So WSL gets its own value.
+//
+// Detection is deliberately narrow. `os.release()` carries `microsoft` inside
+// any container on Docker Desktop's WSL2 backend too, where the filesystem is
+// the container's and nothing is drvfs; the interop markers below are set for
+// a real WSL distro only, so a containerized sync correctly reports `linux`.
+function detectOs(): string {
+  if (platform() !== "linux") return platform();
+  const inWsl = Boolean(process.env.WSL_DISTRO_NAME) || existsSync("/run/WSL");
+  return inWsl ? "wsl" : "linux";
+}
 
 function expandPath(path: string): string {
   if (path.startsWith("~")) {
@@ -29,6 +45,12 @@ export const config = {
   // back to the OS hostname, which inside a container is the container id —
   // set MACHINE_NAME explicitly in compose for anything meaningful.
   machine: getEnv("MACHINE_NAME", hostname()),
+
+  // The operating system that machine runs, sent automatically with every
+  // project and session — callers never pass it, the same no-burden rule as
+  // path normalization (#33). Overridable for a relay that knows better than
+  // its own platform.
+  os: getEnv("MACHINE_OS", detectOs()),
 
   logs: {
     // Every process ships console output to the shared `logs` table. At the

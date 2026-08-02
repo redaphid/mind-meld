@@ -1,5 +1,5 @@
 {
-  "note": "SHA-256 hashes of terms that must never appear in this PUBLIC repository (issue #64): the operator's username, personal domain labels, and machine/device names. Stored as hashes, NOT plaintext, so this guard file does not itself leak the values it defends against.",
+  "note": "SHA-256 hashes of terms that must never appear in this PUBLIC repository (issue #64): the operator's username, personal domain labels, employer/client names, and machine/device names. Stored as hashes, NOT plaintext, so this guard file does not itself leak the values it defends against.",
   "algorithm": "sha256",
   "howToAdd": "node -e \"console.log(require('crypto').createHash('sha256').update(process.argv[1].toLowerCase()).digest('hex'))\" <term>",
   "checkedBy": "src/quality/no-personal-data.test.ts",
@@ -8,6 +8,7 @@
     "f603ebc71d1e482e7e089b08337865ca41fcc01740aa4a953401b33ab97f77a2",
     "7a01ac37408614bcf58069bb6b6a543f6c473cdded552c491de4eb36aacce235",
     "ae0facccf0a3723adefbdfe700c097b6c843dbfd06e5cd325602ec13b2361f8b",
-    "e30122fcb4aa511054a679c6eef57559e6a6943d4a033ceb89ad277d54c6ddda"
+    "e30122fcb4aa511054a679c6eef57559e6a6943d4a033ceb89ad277d54c6ddda",
+    "1a1b7c6c04b48d38321d50676c8a79c294424277626b4289dbdaa2ddead191df"
   ]
 }
