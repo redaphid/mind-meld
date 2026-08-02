@@ -192,3 +192,63 @@ describe('stop-pr-progress hook', () => {
     expect(result.stderr).toContain('warning');
   });
 });
+
+describe('post-pr-create hook', () => {
+  const SCRIPT = 'post-pr-create.mjs';
+  const stdin = (command: string) => ({
+    tool_name: 'Bash',
+    tool_input: { command },
+    tool_response: { stdout: 'https://github.com/redaphid/mind-meld/pull/77' },
+  });
+  const issueLabels = (labels: string[]) => JSON.stringify({ labels: labels.map((name) => ({ name })) });
+
+  it('exists as a hook script', () => {
+    expect(existsSync(join(HOOKS_DIR, SCRIPT))).toBe(true);
+  });
+
+  it('ignores Bash commands that are not gh pr create', async () => {
+    const result = await sandbox.run(SCRIPT, stdin('git push origin main'));
+    expect(result.code).toBe(0);
+    expect(sandbox.ghCalls()).toEqual([]);
+  });
+
+  it('stays silent when the linked issue is already in-review', async () => {
+    sandbox.setBranch('feat/thing-42');
+    sandbox.setResponses([{ match: ['issue', 'view', '42'], stdout: issueLabels(['in-review', 'user-ask']) }]);
+    const result = await sandbox.run(SCRIPT, stdin('gh pr create --draft --title x'));
+    expect(result.code).toBe(0);
+    expect(result.stderr).toBe('');
+  });
+
+  it('warns Claude (exit 2) when the linked issue was not flipped to in-review', async () => {
+    sandbox.setBranch('feat/thing-42');
+    sandbox.setResponses([{ match: ['issue', 'view', '42'], stdout: issueLabels(['in-progress']) }]);
+    const result = await sandbox.run(SCRIPT, stdin('gh pr create --draft --title x'));
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain('#42');
+    expect(result.stderr).toContain('in-review');
+  });
+
+  it('finds the issue number in the command text when the branch has none', async () => {
+    sandbox.setBranch('some-branch');
+    sandbox.setResponses([{ match: ['issue', 'view', '75'], stdout: issueLabels([]) }]);
+    const result = await sandbox.run(SCRIPT, stdin('gh pr create --title "Fix thing" --body "Closes #75"'));
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain('#75');
+  });
+
+  it('does nothing when no issue number can be determined', async () => {
+    sandbox.setBranch('some-branch');
+    const result = await sandbox.run(SCRIPT, stdin('gh pr create --title "Fix thing"'));
+    expect(result.code).toBe(0);
+    expect(sandbox.ghCalls()).toEqual([]);
+  });
+
+  it('fails open when gh fails', async () => {
+    sandbox.setBranch('feat/thing-42');
+    sandbox.setResponses([{ match: ['issue', 'view'], exitCode: 1 }]);
+    const result = await sandbox.run(SCRIPT, stdin('gh pr create --draft'));
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain('warning');
+  });
+});
