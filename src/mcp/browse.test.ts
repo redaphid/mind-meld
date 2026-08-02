@@ -136,3 +136,15 @@ describe('listSessions title resolution (#95)', () => {
     expect(items[0].titleSource).toBe('none')
   })
 })
+
+describe('listSessions withholds unsummarized sessions (#95)', () => {
+  it('excludes them by default', async () => {
+    await listSessions({ limit: 10, offset: 0 })
+    expect(sql()).toContain('s.summary IS NOT NULL')
+  })
+
+  it('includes them when explicitly asked', async () => {
+    await listSessions({ limit: 10, offset: 0, includeUnsummarized: true })
+    expect(sql()).not.toContain('s.summary IS NOT NULL')
+  })
+})

@@ -31,6 +31,10 @@ export type SearchParams = {
   likeProject?: string[]
   unlikeProject?: string[]
   includeAutomated?: boolean
+  // A session with no summary has no real title and no session-tier vector, so
+  // it can only ever arrive as an untriageable row. Withheld by default; pass
+  // true to reach one deliberately (issue #95).
+  includeUnsummarized?: boolean
   dataClass?: string[]
 }
 
@@ -283,11 +287,12 @@ const baseResult = (s: SessionRow, score: number, tier: MatchedTier): SearchResu
 
 const passesFilters = (
   session: SessionRow,
-  params: { source?: string; projectOnly?: boolean },
+  params: { source?: string; projectOnly?: boolean; includeUnsummarized?: boolean },
   sinceDate: Date | null,
   projectIds: number[],
   dataClasses: string[] | null
 ) => {
+  if (!params.includeUnsummarized && session.summary === null) return false
   if (dataClasses && !dataClasses.includes(session.data_class)) return false
   if (params.source && session.source_name !== params.source) return false
   if (sinceDate && session.started_at < sinceDate) return false
@@ -424,6 +429,9 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       `($3::timestamptz IS NULL OR s.started_at >= $3)`,
       `($4::boolean OR s.is_automated = false)`,
     ]
+    // Same rule as the semantic arms, applied in SQL: a session with no summary
+    // is not surfaced unless the caller asks for one.
+    if (!params.includeUnsummarized) conditions.push(`s.summary IS NOT NULL`)
     const values: unknown[] = [params.query, params.source ?? null, sinceDate, includeAutomated]
     let nextParam = 5
 

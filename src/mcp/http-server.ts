@@ -665,6 +665,7 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
       cwd,
       projectOnly: boolParam(req.query.projectOnly),
       includeAutomated: boolParam(req.query.includeAutomated),
+      includeUnsummarized: boolParam(req.query.includeUnsummarized),
       dataClass: dataClass?.length ? dataClass : undefined,
     })
   } catch (error) {
@@ -703,6 +704,7 @@ app.get('/api/sessions', apiRoute('Sessions', async (req, res) => {
     machine: typeof req.query.machine === 'string' ? req.query.machine : undefined,
     q: typeof req.query.q === 'string' && req.query.q ? req.query.q : undefined,
     includeAutomated: boolParam(req.query.includeAutomated),
+    includeUnsummarized: boolParam(req.query.includeUnsummarized),
   })
   res.json({ status: 'ok', total, count: items.length, sessions: items })
 }))

@@ -353,6 +353,16 @@ paths:
           schema:
             type: boolean
             default: false
+        - name: includeUnsummarized
+          in: query
+          description: |
+            Include sessions that have not been summarized yet. Excluded by
+            default: such a session has no title and no session-level vector, so
+            it can only arrive as an untriageable result. Pass true to reach the
+            indexing backlog deliberately (issue #95).
+          schema:
+            type: boolean
+            default: false
       responses:
         '200':
           description: Ranked hits, best first.
@@ -478,6 +488,14 @@ paths:
             type: string
         - name: includeAutomated
           in: query
+          schema:
+            type: boolean
+            default: false
+        - name: includeUnsummarized
+          in: query
+          description: |
+            Include sessions that have not been summarized yet. Excluded by
+            default (issue #95).
           schema:
             type: boolean
             default: false

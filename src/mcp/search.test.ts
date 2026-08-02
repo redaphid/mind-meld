@@ -450,6 +450,8 @@ describe('search title resolution (#95)', () => {
     expect(hit?.title_source).toBe('summary')
   })
 
+  // Reachable only via includeUnsummarized, since an unsummarized session is
+  // otherwise withheld — but when it is reached, it must not carry a guess.
   it('reports no title rather than inventing one when there is no summary yet', async () => {
     query.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (typeof sql === 'string' && sql.includes('s.id = $1'))
@@ -458,7 +460,7 @@ describe('search title resolution (#95)', () => {
     })
     mockChromaSessionsOnly()
 
-    const results = await search({ query: 'anything', mode: 'semantic' })
+    const results = await search({ query: 'anything', mode: 'semantic', includeUnsummarized: true })
     const hit = results.find(r => r.session_id === 2)
     expect(hit?.title).toBeNull()
     expect(hit?.title_source).toBe('none')
@@ -483,5 +485,48 @@ describe('search title resolution (#95)', () => {
     expect(formatted).toContain('Session 4268')
     expect(formatted).toContain('not summarized yet')
     expect(formatted).not.toContain('Untitled')
+  })
+})
+
+// Operator direction on #95: "let's not even surface sessions until they are
+// properly summarized and indexed." An unsummarized session has no real title
+// and no session-tier vector, so surfacing it puts an untriageable row in front
+// of the caller. It is withheld by default and reachable on request.
+describe('unsummarized sessions are withheld (#95)', () => {
+  it('does not return a session that has no summary', async () => {
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (typeof sql === 'string' && sql.includes('s.id = $1'))
+        return params?.[0] === 2 ? rows(sessionRow({ id: 2, title: null, summary: null })) : rows()
+      return rows()
+    })
+    mockChromaSessionsOnly()
+
+    expect(await search({ query: 'anything', mode: 'semantic' })).toEqual([])
+  })
+
+  it('returns it when the caller explicitly asks for unsummarized sessions', async () => {
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (typeof sql === 'string' && sql.includes('s.id = $1'))
+        return params?.[0] === 2 ? rows(sessionRow({ id: 2, title: null, summary: null })) : rows()
+      return rows()
+    })
+    mockChromaSessionsOnly()
+
+    const results = await search({ query: 'anything', mode: 'semantic', includeUnsummarized: true })
+    expect(results.map(r => r.session_id)).toEqual([2])
+  })
+
+  it('withholds them in the text arm too, not only the semantic arms', async () => {
+    query.mockResolvedValue(rows())
+    await search({ query: 'anything', mode: 'text' })
+    const ftsCall = query.mock.calls.find(c => String(c[0]).includes('ranked_messages'))
+    expect(String(ftsCall?.[0])).toContain('s.summary IS NOT NULL')
+  })
+
+  it('drops that condition when unsummarized sessions are requested', async () => {
+    query.mockResolvedValue(rows())
+    await search({ query: 'anything', mode: 'text', includeUnsummarized: true })
+    const ftsCall = query.mock.calls.find(c => String(c[0]).includes('ranked_messages'))
+    expect(String(ftsCall?.[0])).not.toContain('s.summary IS NOT NULL')
   })
 })

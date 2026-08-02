@@ -83,6 +83,9 @@ export type SessionListFilter = {
   machine?: string
   q?: string
   includeAutomated?: boolean
+  // Sessions are not listed until they are properly summarized and indexed;
+  // pass true to see the backlog deliberately (issue #95).
+  includeUnsummarized?: boolean
 }
 
 type SessionListRow = {
@@ -123,6 +126,8 @@ export const listSessions = async (
     clauses.push(`(s.title ILIKE ${p} OR p.name ILIKE ${p})`)
   }
   if (!filter.includeAutomated) clauses.push('s.is_automated = false')
+  // Not surfaced until it is properly summarized and indexed (issue #95).
+  if (!filter.includeUnsummarized) clauses.push('s.summary IS NOT NULL')
 
   params.push(filter.limit, filter.offset)
   const limitParam = `$${params.length - 1}`
