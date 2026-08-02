@@ -2,6 +2,7 @@ import { createReadStream } from 'fs';
 import { createInterface } from 'readline';
 import { stat } from 'fs/promises';
 import { basename, dirname, join } from 'path';
+import { normalizeDeep } from '../utils/text-encoding.js';
 
 // Types matching Claude Code JSONL format
 export interface ClaudeMessage {
@@ -202,7 +203,10 @@ export async function parseClaudeSessionFile(filePath: string): Promise<ParsedSe
     if (!line.trim()) continue;
 
     try {
-      const parsed = JSON.parse(line) as ClaudeMessage;
+      // Normalize before anything touches the content: wsl.exe/PowerShell
+      // output arrives as UTF-16LE, and its NUL bytes are unstorable in
+      // Postgres text and jsonb alike.
+      const parsed = normalizeDeep(JSON.parse(line)) as ClaudeMessage;
 
       // Skip non-message entries (metadata types)
       const messageTypes = ['user', 'assistant'];
@@ -346,7 +350,7 @@ export async function parseHistoryFile(historyPath: string): Promise<HistoryEntr
     if (!line.trim()) continue;
 
     try {
-      const parsed = JSON.parse(line) as {
+      const parsed = normalizeDeep(JSON.parse(line)) as {
         display: string;
         timestamp: number;
         project: string;

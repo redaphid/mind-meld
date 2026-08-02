@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { config } from '../config.js';
 import { isAutomated } from '../embeddings/classify.js';
+import { normalizeDeep, normalizeText } from '../utils/text-encoding.js';
 
 const { Pool } = pg;
 
@@ -283,12 +284,15 @@ export const queries = {
         params.externalId,
         params.parentMessageId ?? null,
         params.role,
-        params.contentText ?? null,
-        params.contentJson ? JSON.stringify(params.contentJson) : null,
+        // Last line of defence. The file parsers normalize on the way in, but
+        // the Cursor sync and the HTTP ingest reach this call by other routes,
+        // and a single NUL here fails the whole session's insert.
+        params.contentText ? normalizeText(params.contentText) : null,
+        params.contentJson ? JSON.stringify(normalizeDeep(params.contentJson)) : null,
         params.toolName ?? null,
-        params.toolInput ? JSON.stringify(params.toolInput) : null,
-        params.toolResult ?? null,
-        params.thinkingText ?? null,
+        params.toolInput ? JSON.stringify(normalizeDeep(params.toolInput)) : null,
+        params.toolResult ? normalizeText(params.toolResult) : null,
+        params.thinkingText ? normalizeText(params.thinkingText) : null,
         params.model ?? null,
         params.inputTokens ?? null,
         params.outputTokens ?? null,
