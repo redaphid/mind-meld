@@ -13,6 +13,14 @@
     "scripts/*.mjs",
     // Ratchet checkers, run by CI and pnpm quality:*.
     "scripts/quality/*.ts",
+    // Comms-protocol enforcement (issue #75). These are provider-agnostic
+    // standalone node entry points on purpose: an agent runtime invokes them
+    // from its own hook configuration (for Claude Code, .claude/settings.json),
+    // `pnpm run reconcile:labels` invokes one directly, and a human or CI can
+    // run any of them by hand. Nothing under src/ imports them, so knip cannot
+    // discover them — but they are executed code, covered by
+    // src/__tests__/comms-hooks.test.ts.
+    "scripts/comms/*.mjs",
     // Ad-hoc investigation scripts, run manually with tsx. Kept scanned so
     // the deps/exports they use are not falsely reported as unused.
     "scripts/test/*.ts",
