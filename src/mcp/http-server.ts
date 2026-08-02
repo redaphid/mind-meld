@@ -5,26 +5,16 @@ import express from 'express'
 import { listProjects, listSessions, getActivity } from './browse.js'
 import { toSearchHit, toDigest, toMessages, toMessage } from './rest.js'
 import { listQuarantine, replayQuarantine, countPending } from '../sync/quarantine.js'
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { hostHeaderValidation } from '@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js'
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
-import { search, formatSearchResults, findProjectsByPath, UnknownDataClassError } from './search.js'
+import { search, findProjectsByPath, UnknownDataClassError } from './search.js'
 import { IngestPayloadSchema, ingestConversation, MissingDataClassError } from './ingest.js'
-import { sinceSchema } from './since.js'
-import {
-  getSessionDigest,
-  getMessages,
-  getMessageById,
-  getChunk,
-  formatDigest,
-  formatMessages,
-  formatMessage,
-  formatChunk,
-} from './session.js'
+import { getSessionDigest, getMessages, getMessageById } from './session.js'
+import { createMcpServer } from './tools.js'
 import { getSyncStatus } from '../sync/orchestrator.js'
 import { getCollectionStats } from '../db/chroma.js'
 import { config } from '../config.js'
@@ -39,163 +29,10 @@ import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const { version } = require('../../package.json')
 
-const getServer = () => {
-  const server = new McpServer({
-    name: 'mindmeld',
-    version: '0.2.0',
-  })
-
-  server.tool(
-    'search',
-    'Search past AI conversations',
-    {
-      query: z.string().optional(),
-      negativeQuery: z.string().optional(),
-      excludeTerms: z.string().optional(),
-      limit: z.number().optional(),
-      cwd: z.string().optional(),
-      mode: z.enum(['semantic', 'text', 'hybrid']).optional(),
-      source: z.string().optional(),
-      since: sinceSchema.optional(),
-      projectOnly: z.boolean().optional(),
-      likeSession: z.array(z.string()).optional(),
-      unlikeSession: z.array(z.string()).optional(),
-      likeProject: z.array(z.string()).optional(),
-      unlikeProject: z.array(z.string()).optional(),
-      dataClass: z.array(z.string()).optional().describe(
-        'Data classes to search (default ["coding"]). Sources are classified as coding, personal, meetings, etc. Pass ["*"] to search everything, or e.g. ["coding","personal"] to widen. An explicit source param bypasses this default.'
-      ),
-    },
-    async (params) => {
-      const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
-      const projectIds = matchingProjects.map((p) => p.id)
-      const results = await search(params)
-      return {
-        content: [{ type: 'text', text: formatSearchResults(results, projectIds) }],
-      }
-    }
-  )
-
-  server.tool(
-    'getSession',
-    'Get a session DIGEST — summary + chunk manifest (paged: chunkOffset/chunkLimit, default 20), no raw messages. Each chunk is a section summary spanning ~dozens of messages. Use getMessages to read message regions.',
-    {
-      sessionId: z.number().describe('Session ID from search results'),
-      chunkOffset: z.number().optional().describe('First section to return (0-based, default 0)'),
-      chunkLimit: z.number().optional().describe('Max sections to return (default 20)'),
-    },
-    async (params) => {
-      const digest = await getSessionDigest(params)
-      if (!digest) return { content: [{ type: 'text', text: 'Session not found.' }] }
-      return { content: [{ type: 'text', text: formatDigest(digest) }] }
-    }
-  )
-
-  server.tool(
-    'getMessages',
-    'Read raw messages windowed: { sessionId, offset?, limit? } (default limit 30) or { startMessageId, endMessageId }. Budgeted to ~24K chars (override with maxChars); when more remain the result gives the next page cursor. A single oversized message comes back TRUNCATED — a labeled preview plus a getMessage({ id }) pointer for the full content.',
-    {
-      sessionId: z.number().optional(),
-      offset: z.number().optional(),
-      limit: z.number().optional(),
-      startMessageId: z.number().optional(),
-      endMessageId: z.number().optional(),
-      maxChars: z.number().optional(),
-    },
-    async (params) => {
-      const result = await getMessages(params)
-      if (!result) return { content: [{ type: 'text', text: 'No messages found.' }] }
-      return { content: [{ type: 'text', text: formatMessages(result) }] }
-    }
-  )
-
-  server.tool(
-    'getMessage',
-    'Read ONE message in full by id, uncapped. The escape hatch for an oversized message that getMessages returned TRUNCATED.',
-    {
-      id: z.number().describe('Message id (from a truncated getMessages preview)'),
-    },
-    async (params) => {
-      const message = await getMessageById(params.id)
-      if (!message) return { content: [{ type: 'text', text: 'Message not found.' }] }
-      return { content: [{ type: 'text', text: formatMessage(message) }] }
-    }
-  )
-
-  server.tool(
-    'getChunk',
-    'Get one chunk\'s full summary by { sessionId, chunkIndex }, with its message-id range.',
-    {
-      sessionId: z.number(),
-      chunkIndex: z.number(),
-    },
-    async (params) => {
-      const chunk = await getChunk(params)
-      if (!chunk) return { content: [{ type: 'text', text: 'Chunk not found.' }] }
-      return { content: [{ type: 'text', text: formatChunk(chunk, params.sessionId) }] }
-    }
-  )
-
-  server.tool(
-    'stats',
-    'Get conversation statistics',
-    {},
-    async () => {
-      const stats = await query<{
-        source_name: string
-        data_class: string
-        session_count: number
-      }>(
-        `SELECT src.name as source_name, src.data_class, COUNT(DISTINCT s.id) as session_count
-         FROM sources src
-         LEFT JOIN projects p ON p.source_id = src.id
-         LEFT JOIN sessions s ON s.project_id = p.id
-         GROUP BY src.name, src.data_class`
-      )
-
-      const byClass = new Map<string, number>()
-      for (const row of stats.rows)
-        byClass.set(row.data_class, (byClass.get(row.data_class) ?? 0) + Number(row.session_count))
-
-      let output = `# Mindmeld Statistics\n\n## By Source\n\n`
-      for (const row of stats.rows)
-        output += `**${row.source_name}** (${row.data_class}): ${row.session_count} sessions\n`
-
-      output += `\n## By Data Class\n\n`
-      for (const [dataClass, count] of byClass)
-        output += `**${dataClass}:** ${count} sessions\n`
-
-      return { content: [{ type: 'text', text: output }] }
-    }
-  )
-
-  server.tool(
-    'reportUselessSession',
-    `Soft-delete a session that pollutes search results.
-
-Use this when search returns results that are clearly noise — automated runs,
-monitoring jobs, repeated boilerplate sessions, or anything that isn't a real
-interactive conversation. Soft-deletes the session so it stops appearing in search.
-
-Call this proactively whenever you get useless results back from search.`,
-    {
-      sessionId: z.number().describe('Session ID to soft-delete'),
-      reason: z.string().optional().describe('Why this session is useless (for logging)'),
-    },
-    async ({ sessionId, reason }) => {
-      const result = await query(
-        `UPDATE sessions SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id`,
-        [sessionId]
-      )
-      if (result.rowCount === 0)
-        return { content: [{ type: 'text', text: `Session ${sessionId} not found or already deleted.` }] }
-      if (reason) console.error(`Session ${sessionId} reported as useless: ${reason}`)
-      return { content: [{ type: 'text', text: `Session ${sessionId} soft-deleted.` }] }
-    }
-  )
-
-  return server
-}
+// The MCP tool surface is shared verbatim with the stdio transport
+// (src/mcp/server.ts) - see src/mcp/tools.ts. Declaring the tools here as
+// well is what let the two drift, so this transport declares none of its own.
+const getServer = createMcpServer
 
 const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3000
 

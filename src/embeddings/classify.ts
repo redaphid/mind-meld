@@ -1,3 +1,5 @@
+import { stripScaffolding, isScaffoldingOnly } from '../utils/strip-scaffolding.js'
+
 // Patterns that indicate tool output, boilerplate, or noise — not worth embedding
 export const NOISE_PATTERNS = [
   /^\[Request interrupted/,
@@ -21,8 +23,16 @@ export const NOISE_PATTERNS = [
 ]
 
 export const classifyNoise = (text: string): string | null => {
-  if (text.length < 50) return `too-short:${text.length}`
-  const matched = NOISE_PATTERNS.find((p) => p.test(text))
+  // Judged on the real content, not the markup around it. The parser strips
+  // scaffolding on the way in, but ~800 messages were stored before it did and
+  // those rows still hold raw wrappers until the backfill runs. Length was the
+  // exact hole they slipped through: 70 characters of `<command-name>` XML
+  // clears the floor that the 3-character command inside it never would
+  // (issue #37).
+  const real = stripScaffolding(text)
+  if (isScaffoldingOnly(text)) return 'scaffolding-only'
+  if (real.length < 50) return `too-short:${real.length}`
+  const matched = NOISE_PATTERNS.find((p) => p.test(real))
   if (matched) return `pattern:${matched.source}`
   return null
 }
