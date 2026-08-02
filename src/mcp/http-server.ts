@@ -821,10 +821,12 @@ app.post('/api/ingest', async (req: any, res: any) => {
 
     const source = await queries.getOrCreateSource(payload.source, payload.sourceDisplayName, payload.dataClass)
 
+    // Path canonicalization is automatic inside upsertProject (#33) — senders
+    // ship whatever their OS gave them.
     const projectId = await queries.upsertProject(
       source.id,
       payload.project.externalId,
-      payload.project.path ?? '',
+      payload.project.path ?? null,
       payload.project.name,
       payload.machine ?? null
     )

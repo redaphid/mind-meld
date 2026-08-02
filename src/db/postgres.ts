@@ -2,6 +2,7 @@ import pg from 'pg';
 import { config } from '../config.js';
 import { isAutomated } from '../embeddings/classify.js';
 import { normalizeText, normalizeDeep } from '../utils/text-encoding.js';
+import { canonicalizeProjectPath, findEquivalentIn } from '../utils/project-path.js';
 
 const { Pool } = pg;
 
@@ -127,22 +128,64 @@ export const queries = {
   // sync wants. Callers relaying someone else's data (/api/ingest) pass the
   // sender's machine, or null when it is unknown — null preserves whatever was
   // already recorded rather than overwriting a known origin with a guess.
+  //
+  // Path normalization is automatic and happens HERE, nowhere else (#33):
+  // every caller — sync, /api/ingest, MCP — gets the canonical form without
+  // knowing it exists. Two further rules keep the column trustworthy:
+  //
+  //  - No clobbering: a path equal to the raw external id is the honest
+  //    "unknown" fallback and only ever fills a NULL; it never overwrites a
+  //    real path learned from a session cwd. Real paths always win.
+  //  - No duplicates: when no row exists for this external id but an existing
+  //    row's path is an equivalent spelling of the same directory
+  //    (`D:\x` = `D:/x` = `/mnt/d/x`, Windows case-insensitively), that row is
+  //    adopted instead of inserting a twin. This is what keeps the 019 merge
+  //    merged: both encodings of a directory (`D--tools-comfy`,
+  //    `-mnt-d-tools-comfy`) keep resolving to the one surviving row. The
+  //    check-then-insert is not atomic, but sync is single-process; the worst
+  //    a lost race can produce is one duplicate row, never lost data.
   upsertProject: async (
     sourceId: number,
     externalId: string,
-    path: string,
+    path: string | null,
     name: string,
     machine: string | null = config.machine
   ) => {
+    const cleanExternalId = normalizeText(externalId);
+    const canonicalPath = clean(canonicalizeProjectPath(path));
+
+    const existing = await query<{ id: number }>(
+      'SELECT id FROM projects WHERE source_id = $1 AND external_id = $2',
+      [sourceId, cleanExternalId]
+    );
+    if (existing.rows.length === 0) {
+      const candidates = await query<{ id: number; path: string | null }>(
+        "SELECT id, path FROM projects WHERE source_id = $1 AND path LIKE '%/%'",
+        [sourceId]
+      );
+      const adopted = findEquivalentIn(candidates.rows, cleanExternalId, canonicalPath);
+      if (adopted) {
+        await query(
+          'UPDATE projects SET machine = COALESCE($2, machine), last_synced_at = NOW() WHERE id = $1',
+          [adopted.id, clean(machine)]
+        );
+        return adopted.id;
+      }
+    }
+
     const result = await query<{ id: number }>(
       `INSERT INTO projects (source_id, external_id, path, name, machine, last_synced_at)
        VALUES ($1, $2, $3, $4, $5, NOW())
        ON CONFLICT (source_id, external_id)
-       DO UPDATE SET path = $3, name = $4,
-                     machine = COALESCE($5, projects.machine),
-                     last_synced_at = NOW()
+       DO UPDATE SET
+         path = CASE WHEN $3::text IS NULL OR $3 = projects.external_id
+                     THEN COALESCE(projects.path, $3) ELSE $3 END,
+         name = CASE WHEN $3::text IS NULL OR $3 = projects.external_id
+                     THEN COALESCE(projects.name, $4) ELSE $4 END,
+         machine = COALESCE($5, projects.machine),
+         last_synced_at = NOW()
        RETURNING id`,
-      [sourceId, normalizeText(externalId), normalizeText(path), normalizeText(name), clean(machine)]
+      [sourceId, cleanExternalId, canonicalPath, normalizeText(name), clean(machine)]
     );
     return result.rows[0].id;
   },

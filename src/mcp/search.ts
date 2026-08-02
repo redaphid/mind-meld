@@ -4,6 +4,7 @@ import { querySimilar } from '../db/chroma.js'
 import { config } from '../config.js'
 import { getOllamaClient } from '../embeddings/ollama.js'
 import { subtractVectors, normalizeVector, addVectors, scaleVector } from '../utils/vector-math.js'
+import { projectPathVariants, isWindowsBackedPath } from '../utils/project-path.js'
 import { fuseRanks, type RankedList } from './rrf.js'
 import { buildSnippet, ts_headline_options } from './snippet.js'
 import { parseSinceDate } from './since.js'
@@ -154,15 +155,26 @@ const composeQueryVector = async (
   return normalizeVector(vec)
 }
 
+// Matches the caller's cwd against stored (canonical, #33) project paths in
+// every spelling of the same directory: `D:\x`, `D:/x` and `/mnt/d/x` all find
+// each other, case-insensitively where the filesystem is. The caller sends
+// whatever its OS gave it — normalization is automatic here, never the
+// caller's job.
 export const findProjectsByPath = async (cwd: string) => {
+  const variants = projectPathVariants(cwd)
+  if (variants.length === 0) return []
+  const conditions = variants.map((variant, i) => {
+    const op = isWindowsBackedPath(variant) ? 'ILIKE' : 'LIKE'
+    return `($${i + 1} ${op} p.path || '%' OR p.path ${op} $${i + 1} || '%')`
+  })
   const result = await query<{ id: number; path: string; name: string; source_name: string }>(
     `SELECT p.id, p.path, p.name, s.name as source_name
      FROM projects p
      JOIN sources s ON p.source_id = s.id
      WHERE p.path IS NOT NULL
-       AND ($1 LIKE p.path || '%' OR p.path LIKE $1 || '%')
+       AND (${conditions.join(' OR ')})
      ORDER BY LENGTH(p.path) DESC`,
-    [cwd]
+    variants
   )
   return result.rows
 }
