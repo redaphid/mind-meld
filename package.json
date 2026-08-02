@@ -18,6 +18,12 @@
   "bin": {
     "mindmeld": "dist/index.js"
   },
+  "//files": "Allowlist, not a denylist: without this every published tarball packs the whole working tree (issue #64 — this repo is public and release.yml publishes on every version bump). init-db is required at runtime, not optional: src/db/migrations.ts reads it from ../../init-db.",
+  "files": [
+    "dist",
+    "init-db",
+    "README.md"
+  ],
   "scripts": {
     "preinstall": "npx only-allow pnpm",
     "build": "tsc",
