@@ -72,6 +72,24 @@ rather than posting a new one — the deadman gets its timestamp and the operato
 gets no notification spam. Anything the operator must actually see is a real
 comment, deliberately written.
 
+## The coordinator is reborn hourly
+
+A cloud routine ("Mindmeld coordinator hourly cycle", :26 past every hour) runs
+a full cycle in a **fresh session with zero context**, on the bridge
+environment so it can reach the live service and the checkouts.
+
+That is the cure rather than a workaround. A coordinator that persists
+accumulates context until it degrades; a coordinator that is reborn each hour
+and bootstraps from `state.sh` cannot. Generations therefore rotate for
+staleness, context pressure, or an operator request — never for a routine
+cycle, or the board would fill with channels.
+
+The routine self-heals before it coordinates: unowned board ⇒ stand a
+coordinator up; stale heartbeat ⇒ `--force` rotate. And if the handoff scripts
+themselves fail, it is instructed to fix and commit them rather than complete
+the handoff by hand — a workflow that needs a human to restart it is the exact
+failure this schedule exists to prevent.
+
 ## What is deliberately not automated
 
 Judgement. The protocol moves *state*, never decisions: merges, design
