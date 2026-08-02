@@ -8,6 +8,7 @@ import {
   projectPathEquivalenceKey,
   findEquivalentIn,
   isWindowsBackedPath,
+  isWindowsHostOs,
 } from './project-path.js'
 
 describe('canonicalizeProjectPath', () => {
@@ -97,9 +98,21 @@ describe('verifyCwdAgainstDirName', () => {
     expect(verifyCwdAgainstDirName('D--', 'D:\\')).toBe(true)
   })
 
-  it('accepts Windows cwds case-insensitively (the filesystem does)', () => {
+  it('accepts drive-form Windows cwds case-insensitively (the filesystem does)', () => {
     expect(verifyCwdAgainstDirName('D--Projects-sporefall-art', 'd:\\Projects\\sporefall-art')).toBe(true)
-    expect(verifyCwdAgainstDirName('-mnt-d-Projects-sporefall-art', '/mnt/d/projects/Sporefall-Art')).toBe(true)
+  })
+
+  it('case-folds /mnt only when the host is known to be Windows-backed', () => {
+    // `/mnt/d` is drvfs on WSL and case-insensitive — but on a plain Linux box
+    // it is an ordinary ext4 mount where `Data` and `data` are two directories.
+    // The shape of the path is not evidence of which; the host is.
+    expect(
+      verifyCwdAgainstDirName('-mnt-d-Projects-sporefall-art', '/mnt/d/projects/Sporefall-Art', {
+        windowsHost: true,
+      })
+    ).toBe(true)
+    expect(verifyCwdAgainstDirName('-mnt-d-Projects-sporefall-art', '/mnt/d/projects/Sporefall-Art')).toBe(false)
+    expect(verifyCwdAgainstDirName('-mnt-d-data', '/mnt/d/Data')).toBe(false)
   })
 
   it('rejects a cwd from a different directory — the worktree-parent trap', () => {
@@ -169,9 +182,30 @@ describe('projectPathVariants', () => {
 describe('projectPathEquivalenceKey', () => {
   it('collapses all spellings of one Windows directory to one key', () => {
     const spellings = ['D:\\mechs\\mindmeld', 'D:/mechs/mindmeld', 'd:/MECHS/mindmeld', '/mnt/d/mechs/mindmeld']
-    const keys = new Set(spellings.map(projectPathEquivalenceKey))
+    const keys = new Set(spellings.map(s => projectPathEquivalenceKey(s, { windowsHost: true })))
     expect(keys.size).toBe(1)
     expect(keys.has('d:/mechs/mindmeld')).toBe(true)
+  })
+
+  // Round-2 finding 1: the key folded case for ANY `/mnt/<letter>/` path, so
+  // two distinct directories on a Linux host collapsed into one — the same
+  // data-destroying class the verification gate already blocks.
+  it('treats /mnt as a case-sensitive unix mount unless the host is Windows-backed', () => {
+    expect(projectPathEquivalenceKey('/mnt/d/Data')).not.toBe(projectPathEquivalenceKey('/mnt/d/data'))
+    expect(projectPathEquivalenceKey('/mnt/d/Data')).toBe('/mnt/d/Data')
+    expect(projectPathEquivalenceKey('/mnt/d/Data', { windowsHost: true })).toBe(
+      projectPathEquivalenceKey('/mnt/d/data', { windowsHost: true })
+    )
+  })
+
+  it('recognises which reported OSes make /mnt Windows-backed', () => {
+    // WSL reports platform `linux`, so the platform alone cannot answer this;
+    // `wsl` is detected separately and is exactly the case that matters here.
+    expect(isWindowsHostOs('win32')).toBe(true)
+    expect(isWindowsHostOs('wsl')).toBe(true)
+    expect(isWindowsHostOs('linux')).toBe(false)
+    expect(isWindowsHostOs('darwin')).toBe(false)
+    expect(isWindowsHostOs(null)).toBe(false)
   })
 
   it('keeps unix paths exact-case and distinct across users', () => {
@@ -219,6 +253,23 @@ describe('findEquivalentIn', () => {
     expect(findEquivalentIn(rows, '-home-redaphid-projects-MIND-meld', null)).toBeNull()
   })
 
+  // Round-2 finding 1, runtime half: this is the standing write-layer defect —
+  // `upsertProject` adopted the wrong row, so sessions from a second Linux
+  // directory were filed under the first one forever.
+  it('does not adopt a /mnt row that differs only in case on a non-Windows host', () => {
+    const linuxRows = [{ id: 7, path: '/mnt/d/Data' }]
+    expect(findEquivalentIn(linuxRows, '-mnt-d-data', '/mnt/d/data')).toBeNull()
+    expect(findEquivalentIn(linuxRows, '-mnt-d-data', null)).toBeNull()
+    // Same host, told it is Windows-backed: now they are one directory.
+    expect(findEquivalentIn(linuxRows, '-mnt-d-data', '/mnt/d/data', { windowsHost: true })?.id).toBe(7)
+  })
+
+  it('still adopts across the drvfs boundary when a drive-form path proves Windows', () => {
+    // A stored `D:/…` path is self-evidence of a case-insensitive filesystem,
+    // so no external hint is needed for the real live pairs 019 merges.
+    expect(findEquivalentIn(rows, '-mnt-d-Tools-Comfy', '/mnt/d/Tools/Comfy')?.id).toBe(1)
+  })
+
   it('finds nothing for unrelated projects or raw-only rows', () => {
     expect(findEquivalentIn(rows, 'D--other-place', null)).toBeNull()
     expect(findEquivalentIn(rows, 'D--mechs-comfy', null)).toBeNull()
@@ -229,7 +280,8 @@ describe('findEquivalentIn', () => {
 describe('isWindowsBackedPath', () => {
   it.each([
     ['D:/x', true],
-    ['/mnt/d/x', true],
+    // `/mnt/d` is only Windows-backed on a Windows-backed host — see finding 1.
+    ['/mnt/d/x', false],
     ['/mnt/data/x', false],
     ['/home/user/x', false],
     ['//server/share', false],
