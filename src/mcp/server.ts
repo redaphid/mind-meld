@@ -49,9 +49,9 @@ CWD-AWARE:
 - Results from the current project are boosted in relevance
 
 SEARCH MODES:
-- semantic: Find conceptually similar content (default)
-- text: Exact phrase/keyword matching
-- hybrid: Combines both approaches
+- hybrid: Semantic + full-text, fused by reciprocal rank (default)
+- semantic: Vector similarity only
+- text: Postgres full-text only — exact phrase/keyword matching
 
 WEIGHTED CENTROID SEARCH:
 - likeSession: Boost results similar to specific session(s) style
@@ -66,7 +66,7 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
     negativeQuery: z.string().optional().describe('Negative query - pushes results away from this concept'),
     excludeTerms: z.string().optional().describe('Hard filter - exclude results containing these terms'),
     cwd: z.string().optional().describe('Current working directory - conversations from matching projects get boosted'),
-    mode: z.enum(['semantic', 'text', 'hybrid']).optional().describe('Search mode: semantic (default), text, or hybrid'),
+    mode: z.enum(['semantic', 'text', 'hybrid']).optional().describe('Search mode: hybrid (default), semantic, or text'),
     limit: z.number().optional().describe('Max results to return (default 8)'),
     source: z.string().optional().describe('Filter to specific source'),
     since: sinceSchema.optional(),

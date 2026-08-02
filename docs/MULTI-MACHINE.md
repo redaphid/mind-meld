@@ -13,7 +13,7 @@ and reading the merged index back out.
   laptop A ── ssh ──┐   │   mindmeld-postgres :5433   mindmeld-chroma :8001         │
   laptop B ── ssh ──┼──▶│   mindmeld-mcp :3847        sync / centroids / warmups    │
   desktop C ─ ssh ──┘   │                                                           │
-                        │   ollama :11434 (generation)   ollama :21434 (embeddings) │
+                        │   ollama :11434 (embeddings + generation)                 │
                         └───────────────────────────────────────────────────────────┘
         each machine's ~/.claude  ─────sync────▶  one `conversations` DB + `convo-*` collections
 ```
@@ -22,36 +22,26 @@ Everything below is in addition to the single-host [Docker Setup](DOCKER.md).
 
 ---
 
-## The two-Ollama requirement
+## The one Ollama, and its one trap
 
-Mindmeld talks to **two** Ollama endpoints, and they should be separate:
+Every machine reaches a single Ollama through `OLLAMA_URL` (default
+`http://localhost:11434`), which serves both `bge-m3` for vectorization and
+`SUMMARIZE_MODEL` for generation.
 
-| Env var                | Default                        | Purpose                                   |
-| ---------------------- | ------------------------------ | ----------------------------------------- |
-| `OLLAMA_URL`           | `http://localhost:11434`       | Generation / summaries (`qwen3…`)         |
-| `OLLAMA_EMBEDDING_URL` | `http://localhost:21434`       | Vectorization (`bge-m3`, 1024-dim)        |
-
-Why two: **`bge-m3` returns all-null embeddings when Ollama flash attention is
-ON**, which silently breaks semantic search. Generation benefits from flash
-attention. So run a dedicated embedding Ollama with flash attention **off**:
-
-```bash
-OLLAMA_FLASH_ATTENTION=0 OLLAMA_HOST=127.0.0.1:21434 ollama serve
-ollama pull bge-m3   # into that instance
-```
-
-> ⚠️ `OLLAMA_EMBEDDING_URL` does **not** fall back to `OLLAMA_URL`. If you leave it
-> unset, mindmeld uses the default `localhost:21434`; if nothing is listening
-> there, sync produces **zero** embeddings while otherwise appearing to succeed.
-> Verify any embedding endpoint before trusting it:
+> ⚠️ **`bge-m3` returns all-null embeddings when Ollama flash attention is ON.**
+> Nothing errors. Sync reports success, Postgres fills up, and semantic search
+> stays empty forever. The instance must run with `OLLAMA_FLASH_ATTENTION=0`.
+>
+> Verify any endpoint before trusting it — the probe is the only proof:
 > ```bash
-> curl -s localhost:21434/api/embed -d '{"model":"bge-m3","input":"probe"}' \
+> curl -s localhost:11434/api/embed -d '{"model":"bge-m3","input":"probe"}' \
 >   | head -c 80   # expect a long non-null "embeddings":[[...]] array
 > ```
 
-If you genuinely can't run a second instance and your main Ollama has flash
-attention off, you may point `OLLAMA_EMBEDDING_URL` at `:11434` — but confirm the
-probe above returns non-null vectors first.
+Mindmeld used to split this across two instances, with vectorization on `:21434`
+via `OLLAMA_EMBEDDING_URL`. That variable was **removed** — if an old `.env`,
+compose file, or systemd unit still sets it, it is silently ignored, and the
+`:21434` tunnel forward is dead weight you can drop.
 
 ---
 
@@ -69,8 +59,7 @@ Expose (or SSH-tunnel) these host ports to the remote machine's `localhost`:
 | `5433`  | mindmeld-postgres               |
 | `8001`  | mindmeld-chroma                 |
 | `3847`  | mindmeld-mcp (read/query API)   |
-| `11434` | generation Ollama               |
-| `21434` | embedding Ollama                |
+| `11434` | Ollama (embeddings + generation) |
 
 With SSH, a persistent tunnel does it (run under systemd so it self-heals):
 
@@ -83,7 +72,6 @@ Host brain-tunnel
   LocalForward 8001  localhost:8001
   LocalForward 3847  localhost:3847
   LocalForward 11434 localhost:11434
-  LocalForward 21434 localhost:21434
   RequestTTY no
   ServerAliveInterval 60
   ServerAliveCountMax 3
@@ -125,15 +113,15 @@ CHROMA_HOST=localhost
 CHROMA_PORT=8001
 
 OLLAMA_URL=http://localhost:11434
-OLLAMA_EMBEDDING_URL=http://localhost:21434
 OLLAMA_MAX_CONCURRENCY=1            # a tunnel saturates fast; serialize it
 OLLAMA_TIMEOUT_MS=300000
 
 EMBEDDING_MODEL=bge-m3
 EMBEDDING_DIMENSIONS=1024
-SUMMARIZE_MODEL=qwen3:4b-instruct   # match the host's summarizer
+SUMMARIZE_MODEL=qwen3:8b            # match the host's summarizer
 
 CLAUDE_CODE_PATH=~/.claude
+CURSOR_PATH=~/.config/Cursor/User/globalStorage   # Linux; omit if unused
 ```
 
 ```bash
@@ -206,10 +194,16 @@ Then ask Claude *"what was I working on yesterday?"* from any repo.
 Follow the host update in [DOCKER.md](DOCKER.md) (`docker compose pull && up -d`),
 plus:
 
-- **Set `OLLAMA_EMBEDDING_URL` before upgrading.** Older deployments that embedded
-  via `:11434` and never set it will, after upgrade, default to the dead
-  `localhost:21434` and stop embedding. Add it to the `sync`, `centroid-compute`,
-  and `mcp` services (they're the ones that embed).
+- **Upgrading past 1.7.0 folds the two Ollamas back into one.** Deployments that
+  set `OLLAMA_EMBEDDING_URL` to a flash-off instance on `:21434` will, after the
+  upgrade, send *all* embedding traffic to `OLLAMA_URL` instead. If that instance
+  has flash attention on, embeddings silently become null. Point `OLLAMA_URL` at
+  the flash-off instance (or disable flash attention on it) **before** upgrading,
+  and re-run the probe afterwards.
+- **1.7.0 also changed how oversize text is embedded** — text that used to be
+  silently clipped to `bge-m3`'s window is now summarized down to fit, so vectors
+  differ from 1.6.x. Repair the old, quietly-wrong vectors with
+  `pnpm exec tsx scripts/backfill-truncated.ts --dry-run` (then without the flag).
 - **Preserve the data volumes.** Compose names them `<project>_mindmeld-postgres`
   and `<project>_mindmeld-chroma`. Always bring the stack up with the **same
   compose project name** (default = the directory name). A different project name

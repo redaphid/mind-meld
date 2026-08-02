@@ -1,0 +1,648 @@
+openapi: 3.1.0
+
+info:
+  title: Mindmeld HTTP API
+  version: 1.7.1
+  summary: Unified conversation index for Claude Code and Cursor.
+  description: |
+    Mindmeld indexes AI coding conversations into PostgreSQL (metadata +
+    full-text search) and Chroma (vector embeddings), and serves them back over
+    two surfaces on the same port:
+
+    * **MCP** — `/mcp`, a [Model Context Protocol](https://modelcontextprotocol.io)
+      Streamable HTTP endpoint. This is what Claude Code talks to, and where
+      search/retrieval lives. Its JSON-RPC methods are *not* modelled as REST
+      paths here; see the `tools` list in `docs/USAGE.md` for the tool contracts.
+    * **REST** — `/health`, `/status`, `/openapi.yaml`, and `/api/ingest`, for
+      monitoring and for pushing conversations from sources Mindmeld does not
+      sync itself (e.g. Slack huddle transcripts).
+
+    ### Trust model
+
+    There is **no authentication**. The server binds to a Host header allowlist
+    (`localhost`, `127.0.0.1`, `mcp`) and is meant to be reached over loopback,
+    an SSH tunnel, or an authenticated Cloudflare Tunnel — never exposed
+    directly to a network you do not control. `/api/ingest` writes to the index
+    unauthenticated, so anything that can reach the port can write to your brain.
+
+  license:
+    name: See repository
+    url: https://github.com/redaphid/mind-meld
+
+servers:
+  - url: http://localhost:3847
+    description: Default host port published by docker-compose (`MCP_HTTP_PORT`).
+  - url: http://mcp:3000
+    description: In-container address on the `mindmeld-network` Docker network.
+
+tags:
+  - name: MCP
+    description: Model Context Protocol Streamable HTTP transport.
+  - name: Monitoring
+    description: Liveness and pipeline-progress endpoints.
+  - name: Ingest
+    description: Push conversations from sources Mindmeld does not sync itself.
+
+paths:
+  /health:
+    get:
+      tags: [Monitoring]
+      operationId: getHealth
+      summary: Liveness probe
+      description: |
+        Returns immediately without touching Postgres, Chroma, or Ollama. A `200`
+        means the process is up — not that the pipeline is healthy. For pipeline
+        health use `/status`, or the `health` MCP tool (stdio server only).
+      responses:
+        '200':
+          description: Server is running.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: ok
+                name: mindmeld
+                version: 1.7.1
+
+  /status:
+    get:
+      tags: [Monitoring]
+      operationId: getStatus
+      summary: Sync, embedding, and collection status
+      description: |
+        Aggregates per-source sync state, index totals, the embedding backlog,
+        Chroma collection sizes, and the most recent non-warmup session. Queries
+        Postgres on every call; Chroma is best-effort, so `chroma.collections`
+        comes back empty (not an error) when Chroma is unreachable.
+      responses:
+        '200':
+          description: Current pipeline status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '500':
+          description: A backing query failed (usually Postgres unreachable).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /openapi.yaml:
+    get:
+      tags: [Monitoring]
+      operationId: getOpenApiDocument
+      summary: This document
+      description: Serves `docs/openapi.yaml` as shipped in the running image.
+      responses:
+        '200':
+          description: The OpenAPI document.
+          content:
+            application/yaml:
+              schema:
+                type: string
+        '404':
+          description: The spec file is not present in this deployment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /api/ingest:
+    post:
+      tags: [Ingest]
+      operationId: ingestConversation
+      summary: Upsert a conversation into the index
+      description: |
+        Upserts a source, project, and session, then inserts the supplied
+        messages and recomputes the session's aggregate stats.
+
+        **Idempotency.** Source, project, and session are keyed on
+        `externalId`, so re-posting the same payload updates in place rather
+        than duplicating. Messages are inserted on conflict-do-nothing by
+        `externalId`; `messagesInserted` counts only the rows that were new, so
+        a replayed payload legitimately returns `0`.
+
+        **Embeddings are not generated here.** Ingested messages join the
+        pending queue and are vectorised by the next `mindmeld embeddings` run,
+        which means they are searchable by full text immediately but by
+        semantic similarity only after that run.
+      requestBody:
+        required: true
+        description: The conversation to index. Body limit is 10 MB.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestPayload'
+            examples:
+              huddle:
+                summary: A Slack huddle transcript
+                value:
+                  source: huddle
+                  sourceDisplayName: Slack Huddles
+                  project:
+                    externalId: C0123ABCD
+                    name: '#platform-team'
+                    path: /slack/platform-team
+                  session:
+                    externalId: huddle-2026-07-30-1430
+                    title: Storefront rollout sync
+                    startedAt: '2026-07-30T14:30:00Z'
+                    endedAt: '2026-07-30T15:05:00Z'
+                  messages:
+                    - externalId: huddle-2026-07-30-1430-0
+                      role: user
+                      content: Do we cut the storefront release before or after the migration?
+                      timestamp: '2026-07-30T14:30:12Z'
+                      sequenceNum: 0
+                      metadata:
+                        speaker: alex
+                    - externalId: huddle-2026-07-30-1430-1
+                      role: user
+                      content: After — the migration backfills the columns the storefront reads.
+                      timestamp: '2026-07-30T14:30:41Z'
+                      sequenceNum: 1
+      responses:
+        '200':
+          description: Conversation indexed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestResult'
+        '400':
+          description: The payload failed schema validation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationError'
+        '500':
+          description: Indexing failed (usually Postgres unreachable).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestError'
+
+  /mcp:
+    post:
+      tags: [MCP]
+      operationId: mcpRequest
+      summary: MCP JSON-RPC request (Streamable HTTP)
+      description: |
+        The MCP Streamable HTTP transport. Send an `initialize` request with no
+        `Mcp-Session-Id` header; the response carries the session id, which every
+        later request must echo back. Depending on the client's `Accept` header
+        the response is either a single JSON-RPC message or an SSE stream.
+
+        Do not hand-roll this — point an MCP client at it:
+
+        ```bash
+        claude mcp add --scope user --transport http mindmeld http://localhost:3847/mcp
+        ```
+
+        Tools exposed over this endpoint: `search`, `getSession`, `getMessages`,
+        `getMessage`, `getChunk`, `stats`, `reportUselessSession`. The stdio
+        server (`pnpm run mcp`) additionally exposes `health`,
+        `getSessionTranscript`, and the `context` prompt.
+      parameters:
+        - $ref: '#/components/parameters/McpSessionIdOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JsonRpcMessage'
+            examples:
+              initialize:
+                summary: Open a session
+                value:
+                  jsonrpc: '2.0'
+                  id: 1
+                  method: initialize
+                  params:
+                    protocolVersion: '2025-06-18'
+                    capabilities: {}
+                    clientInfo:
+                      name: example-client
+                      version: 1.0.0
+              callSearch:
+                summary: Call the search tool
+                value:
+                  jsonrpc: '2.0'
+                  id: 2
+                  method: tools/call
+                  params:
+                    name: search
+                    arguments:
+                      query: how did I set up the SSH tunnel to the embedding Ollama
+                      cwd: /home/you/Projects/mind-meld
+                      since: 30d
+                      limit: 5
+      responses:
+        '200':
+          description: JSON-RPC response, or an SSE stream when the client accepts `text/event-stream`.
+          headers:
+            Mcp-Session-Id:
+              description: Session id, returned on the `initialize` response.
+              schema:
+                type: string
+                format: uuid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JsonRpcMessage'
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: |
+            No valid session id, and the body was not an `initialize` request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JsonRpcError'
+        '500':
+          description: Transport error while handling the request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JsonRpcError'
+
+    get:
+      tags: [MCP]
+      operationId: mcpStream
+      summary: Open the server-to-client SSE stream
+      description: Opens the notification stream for an already-initialized session.
+      parameters:
+        - $ref: '#/components/parameters/McpSessionIdRequired'
+      responses:
+        '200':
+          description: SSE stream of server-initiated JSON-RPC messages.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: Missing or unknown session id.
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: Invalid or missing session ID
+
+    delete:
+      tags: [MCP]
+      operationId: mcpTerminate
+      summary: Terminate an MCP session
+      parameters:
+        - $ref: '#/components/parameters/McpSessionIdRequired'
+      responses:
+        '200':
+          description: Session terminated.
+        '400':
+          description: Missing or unknown session id.
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: Invalid or missing session ID
+        '500':
+          description: Error processing session termination.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  parameters:
+    McpSessionIdOptional:
+      name: Mcp-Session-Id
+      in: header
+      required: false
+      description: Omit on `initialize`; required on every subsequent request.
+      schema:
+        type: string
+        format: uuid
+
+    McpSessionIdRequired:
+      name: Mcp-Session-Id
+      in: header
+      required: true
+      description: Session id issued by the `initialize` response.
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    Health:
+      type: object
+      required: [status, name, version]
+      properties:
+        status:
+          type: string
+          const: ok
+        name:
+          type: string
+          const: mindmeld
+        version:
+          type: string
+          description: Version from the running image's `package.json`.
+          examples: ['1.7.1']
+
+    Status:
+      type: object
+      required: [status, version, sync, totals, pendingEmbeddings, chroma, latestSession]
+      properties:
+        status:
+          type: string
+          const: ok
+        version:
+          type: string
+        sync:
+          type: object
+          required: [sources, recentlyProcessed]
+          properties:
+            sources:
+              type: array
+              description: One entry per registered source, with its `sessions` sync state.
+              items:
+                $ref: '#/components/schemas/SourceSyncState'
+            recentlyProcessed:
+              type: array
+              description: Sessions touched by sync in the last 10 minutes, newest first (max 10).
+              items:
+                $ref: '#/components/schemas/RecentlyProcessedSession'
+        totals:
+          $ref: '#/components/schemas/IndexTotals'
+        pendingEmbeddings:
+          type: object
+          description: Work the embedding backfill still owes.
+          required: [messages, sessions]
+          properties:
+            messages:
+              type: integer
+              description: Messages with indexable text and no `convo-messages` embedding.
+            sessions:
+              type: integer
+              description: |
+                Sessions with no `convo-sessions` embedding, or whose content has
+                grown since the embedding was made.
+        chroma:
+          type: object
+          required: [collections]
+          properties:
+            collections:
+              type: array
+              description: Empty when Chroma is unreachable — this endpoint does not fail on it.
+              items:
+                $ref: '#/components/schemas/ChromaCollection'
+        latestSession:
+          description: Most recent non-briefing session, or `null` if the index is empty.
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [startedAt, title, project]
+              properties:
+                startedAt:
+                  type: string
+                  format: date-time
+                title:
+                  type: string
+                project:
+                  type: string
+
+    SourceSyncState:
+      type: object
+      required: [name, lastSync, filesProcessed, recordsSynced, lastError]
+      properties:
+        name:
+          type: string
+          examples: ['claude_code', 'cursor', 'huddle']
+        lastSync:
+          description: Timestamp of the last completed sync, or `null` if never synced.
+          oneOf:
+            - type: 'null'
+            - type: string
+              format: date-time
+        filesProcessed:
+          type: integer
+        recordsSynced:
+          type: integer
+        lastError:
+          description: Error recorded by the last failed sync, or `null`.
+          oneOf:
+            - type: 'null'
+            - type: string
+
+    RecentlyProcessedSession:
+      type: object
+      required: [sessionId, title, project, lastSyncedAt, messageCount]
+      properties:
+        sessionId:
+          type: integer
+        title:
+          type: string
+          description: Full session title.
+        project:
+          type: string
+        lastSyncedAt:
+          type: string
+          format: date-time
+        messageCount:
+          type: integer
+
+    IndexTotals:
+      type: object
+      required: [projects, sessions, messages, embeddings]
+      properties:
+        projects:
+          type: integer
+        sessions:
+          type: integer
+          description: Includes soft-deleted sessions.
+        messages:
+          type: integer
+        embeddings:
+          type: integer
+          description: Rows in the `embeddings` table (Postgres-side bookkeeping, not Chroma's count).
+
+    ChromaCollection:
+      type: object
+      required: [name, count]
+      properties:
+        name:
+          type: string
+          enum: [convo-messages, convo-sessions, convo-projects, convo-chunks]
+        count:
+          type: integer
+
+    IngestPayload:
+      type: object
+      required: [source, project, session, messages]
+      properties:
+        source:
+          type: string
+          description: |
+            Stable source key. Created on first use. Reusing `claude_code` or
+            `cursor` mixes pushed data into what sync owns — prefer a distinct
+            key such as `huddle`.
+          examples: ['huddle']
+        sourceDisplayName:
+          type: string
+          description: Human-readable label, used only when the source is first created.
+        project:
+          type: object
+          required: [externalId, name]
+          properties:
+            externalId:
+              type: string
+              description: Stable id within the source; the upsert key.
+            name:
+              type: string
+            path:
+              type: string
+              description: |
+                Filesystem path this project maps to. Defaults to `""`. Set it if
+                you want `cwd`-aware search boosting to match this project.
+        session:
+          type: object
+          required: [externalId, title, startedAt]
+          properties:
+            externalId:
+              type: string
+              description: Stable id within the project; the upsert key.
+            title:
+              type: string
+            startedAt:
+              type: string
+              format: date-time
+            endedAt:
+              type: string
+              format: date-time
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/IngestMessage'
+
+    IngestMessage:
+      type: object
+      required: [externalId, role, content, timestamp, sequenceNum]
+      properties:
+        externalId:
+          type: string
+          description: Stable id within the session; duplicates are skipped, not updated.
+        role:
+          type: string
+          examples: ['user', 'assistant', 'system', 'tool']
+        content:
+          type: string
+          description: Full message text. Never pre-truncate — the index stores it whole.
+        timestamp:
+          type: string
+          format: date-time
+        sequenceNum:
+          type: integer
+          description: Ordering within the session; reads are ordered by this, not by timestamp.
+        metadata:
+          type: object
+          description: Arbitrary JSON stored alongside the message (speaker, tool call, etc.).
+          additionalProperties: true
+
+    IngestResult:
+      type: object
+      required: [success, sourceId, projectId, sessionId, messagesInserted]
+      properties:
+        success:
+          type: boolean
+          const: true
+        sourceId:
+          type: integer
+        projectId:
+          type: integer
+        sessionId:
+          type: integer
+          description: Use this id with the `getSession` MCP tool.
+        messagesInserted:
+          type: integer
+          description: Newly inserted messages; `0` on a replayed payload.
+
+    ValidationError:
+      type: object
+      required: [success, error, details]
+      properties:
+        success:
+          type: boolean
+          const: false
+        error:
+          type: string
+          const: Validation failed
+        details:
+          type: array
+          description: Raw Zod issues.
+          items:
+            type: object
+            additionalProperties: true
+
+    IngestError:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          const: false
+        error:
+          type: string
+
+    ErrorStatus:
+      type: object
+      required: [status, error]
+      properties:
+        status:
+          type: string
+          const: error
+        error:
+          type: string
+
+    JsonRpcMessage:
+      type: object
+      description: A JSON-RPC 2.0 request, response, or notification. See the MCP specification.
+      required: [jsonrpc]
+      properties:
+        jsonrpc:
+          type: string
+          const: '2.0'
+        id:
+          oneOf:
+            - type: string
+            - type: integer
+            - type: 'null'
+        method:
+          type: string
+        params:
+          type: object
+          additionalProperties: true
+        result:
+          type: object
+          additionalProperties: true
+        error:
+          type: object
+          additionalProperties: true
+      additionalProperties: true
+
+    JsonRpcError:
+      type: object
+      required: [jsonrpc, error, id]
+      properties:
+        jsonrpc:
+          type: string
+          const: '2.0'
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: integer
+            message:
+              type: string
+        id:
+          type: 'null'
