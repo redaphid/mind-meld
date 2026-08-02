@@ -87,6 +87,8 @@ export const createUiApp = ({
     // client forever. Two deadlines cover it — one to connect, one to start
     // responding — and both stop mattering the moment headers arrive, so a
     // long-lived stream (MCP SSE) is never cut off mid-flight.
+    // Only fires before upstream headers arrive (both timers are cleared the
+    // moment they do), so the response is always still writable here.
     let settled = false
     const fail = (status: number, message: string) => {
       if (settled) return
@@ -94,8 +96,7 @@ export const createUiApp = ({
       clearTimeout(headerTimer)
       upReq.destroy()
       console.error(`[UI] ${message} for ${req.method} ${req.originalUrl}`)
-      if (!res.headersSent) res.status(status).json({ status: 'error', error: message })
-      else res.end()
+      res.status(status).json({ status: 'error', error: message })
     }
 
     const upReq = httpRequest(
@@ -113,6 +114,9 @@ export const createUiApp = ({
         for (const h of HOP_BY_HOP) delete resHeaders[h]
         res.writeHead(upRes.statusCode ?? 502, resHeaders)
         upRes.pipe(res)
+        // An upstream that dies mid-stream must end the response, not leave
+        // the client waiting on a body that will never finish.
+        upRes.on('error', () => res.end())
       }
     )
 
@@ -131,14 +135,15 @@ export const createUiApp = ({
       socket.once('close', () => clearTimeout(connectTimer))
     })
 
+    // Pre-response socket failures only: once headers have arrived `settled`
+    // is set (a deadline answered, or the response callback ran and the
+    // mid-stream handler above owns the outcome).
     upReq.on('error', (error: Error) => {
-      if (settled) return // a deadline already answered; destroy() echoes here
+      if (settled) return
       settled = true
       clearTimeout(headerTimer)
       console.error(`[UI] Upstream error for ${req.method} ${req.originalUrl}:`, error.message)
-      if (!res.headersSent)
-        res.status(502).json({ status: 'error', error: `API upstream unreachable: ${error.message}` })
-      else res.end()
+      res.status(502).json({ status: 'error', error: `API upstream unreachable: ${error.message}` })
     })
 
     // If the client goes away mid-stream, stop the upstream request too.

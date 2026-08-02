@@ -188,6 +188,50 @@ describe('createUiApp', () => {
     await new Promise<void>(resolve => slow.close(() => resolve()))
   })
 
+  it('ends the response instead of hanging when the upstream dies mid-stream', async () => {
+    const dying = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.write('partial')
+      setTimeout(() => res.socket?.destroy(), 50)
+    })
+    await new Promise<void>(resolve => dying.listen(0, '127.0.0.1', resolve))
+    const dyingPort = (dying.address() as AddressInfo).port
+
+    const app = createUiApp({
+      upstream: `http://127.0.0.1:${dyingPort}`,
+      publicDir: await mkdtemp(join(tmpdir(), 'mindmeld-ui-test-')),
+      version: 'test',
+    })
+    const server = await new Promise<Server>(resolve => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s))
+    })
+    const port = (server.address() as AddressInfo).port
+
+    // The proxy must terminate the response promptly — the test itself would
+    // time out if the client were left waiting forever.
+    const res = await fetch(`http://127.0.0.1:${port}/status`)
+    expect(res.status).toBe(200)
+    const text = await res.text().catch(() => 'aborted')
+    expect(['partial', 'aborted']).toContain(text)
+
+    server.close()
+    await new Promise<void>(resolve => dying.close(() => resolve()))
+  })
+
+  it('serves the real public/ directory when no publicDir is given', async () => {
+    const app = createUiApp({ upstream: `http://127.0.0.1:${upstream.port}`, version: 'test' })
+    const server = await new Promise<Server>(resolve => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s))
+    })
+    const port = (server.address() as AddressInfo).port
+
+    const res = await fetch(`http://127.0.0.1:${port}/`)
+    expect(res.status).toBe(200)
+    expect(await res.text()).toContain('Mindmeld')
+
+    server.close()
+  })
+
   it('answers 502 with the shared error envelope when the API is down', async () => {
     const dead = await startUpstream()
     await new Promise<void>(resolve => dead.server.close(() => resolve()))
