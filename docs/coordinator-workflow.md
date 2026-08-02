@@ -95,7 +95,12 @@ Every PR — subagent-authored or not — goes through this before merge:
 
 ## Verification requirements for implementation agents
 
-- Full test suite + type-check pass before the PR opens.
+- **TDD, visibly**: failing test first, then the code; commit and push every
+  red→green cycle. Open a **draft PR after the first push** so the work is
+  watchable on GitHub from the start; flip to ready-for-review when done.
+- **Frequent PR progress comments**: what just went green, what's next —
+  posted on the PR as work proceeds, not saved for the end.
+- Full test suite + type-check pass before the PR leaves draft.
 - **Browser verification is mandatory**: run the server from the worktree on a
   unique port (never 3847 — that's production) and drive the real UI through
   the Claude in Chrome MCP in a dedicated tab. Screenshot evidence in the PR.
