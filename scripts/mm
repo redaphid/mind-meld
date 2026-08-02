@@ -48,6 +48,21 @@ db() { dex "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "$1" 2>/dev/null 
 
 running() { docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$1"; }
 
+# A sync writes a session row before its messages, so mid-run the counts
+# legitimately disagree. Treating that as damage makes doctor cry wolf and
+# makes repair clear the stamp of a session that is being written right now,
+# forcing a pointless re-read on the next pass.
+SYNC_GRACE="${MM_SYNC_GRACE:-5 minutes}"
+
+sync_active() {
+  local n
+  n=$(db "select count(*) from sessions where last_synced_at > now() - interval '$SYNC_GRACE'")
+  [ "${n:-0}" != "0" ]
+}
+
+# Excludes sessions touched inside the grace window from every integrity check.
+SETTLED="and (s.last_synced_at is null or s.last_synced_at < now() - interval '$SYNC_GRACE')"
+
 require_docker() {
   if ! docker info >/dev/null 2>&1; then
     bad "Docker is not running or not reachable."
@@ -204,6 +219,15 @@ cmd_doctor() {
   require_docker
   local problems=0
 
+  # Say so rather than silently skipping rows — a check that quietly ignores
+  # part of the table is how you end up trusting a clean bill of health.
+  if sync_active; then
+    local inflight
+    inflight=$(db "select count(*) from sessions where last_synced_at > now() - interval '$SYNC_GRACE'")
+    printf "\n%s  A sync touched %s session(s) in the last %s; they are excluded\n" "$DIM" "$inflight" "$SYNC_GRACE"
+    printf "  from the checks below, because a half-written session is not damage.%s\n" "$RST"
+  fi
+
   head_ "Schema"
   local applied missing=""
   for f in "$REPO_ROOT"/init-db/*.sql; do
@@ -235,6 +259,7 @@ cmd_doctor() {
                coalesce(p.external_id,'?')
              from sessions s join projects p on s.project_id = p.id
              where s.message_count <> (select count(*) from messages m where m.session_id = s.id)
+             $SETTLED
              order by s.id")
   if [ -z "$rows" ]; then
     ok "every session's message_count matches its rows"
@@ -255,7 +280,8 @@ cmd_doctor() {
   local stuck
   stuck=$(db "select count(*) from sessions s
               where s.file_modified_at is not null
-                and s.message_count <> (select count(*) from messages m where m.session_id = s.id)")
+                and s.message_count <> (select count(*) from messages m where m.session_id = s.id)
+                $SETTLED")
   if [ "${stuck:-0}" = "0" ]; then
     ok "none"
   else
@@ -297,10 +323,12 @@ cmd_repair() {
   local retryable unrepairable
   retryable=$(db "select count(*) from sessions s
                   where s.file_modified_at is not null
-                    and s.message_count <> (select count(*) from messages m where m.session_id = s.id)")
+                    and s.message_count <> (select count(*) from messages m where m.session_id = s.id)
+                    $SETTLED")
   unrepairable=$(db "select count(*) from sessions s
                      where s.file_modified_at is null
-                       and s.message_count <> (select count(*) from messages m where m.session_id = s.id)")
+                       and s.message_count <> (select count(*) from messages m where m.session_id = s.id)
+                       $SETTLED")
 
   printf "  %s sessions: clear the sync stamp so the next sync re-reads them\n" "${retryable:-0}"
   printf "  %s sessions: refresh cached counts (source file may be gone)\n" "${unrepairable:-0}"
@@ -313,7 +341,8 @@ cmd_repair() {
   if [ "${retryable:-0}" != "0" ]; then
     db "update sessions s set file_modified_at = null
         where s.file_modified_at is not null
-          and s.message_count <> (select count(*) from messages m where m.session_id = s.id)" >/dev/null
+          and s.message_count <> (select count(*) from messages m where m.session_id = s.id)
+          $SETTLED" >/dev/null
     ok "cleared $retryable sync stamps — run 'mm sync' to re-read them"
   fi
 
@@ -322,7 +351,8 @@ cmd_repair() {
   if [ "${unrepairable:-0}" != "0" ]; then
     db "select update_session_stats(s.id) from sessions s
         where s.file_modified_at is null
-          and s.message_count <> (select count(*) from messages m where m.session_id = s.id)" >/dev/null
+          and s.message_count <> (select count(*) from messages m where m.session_id = s.id)
+          $SETTLED" >/dev/null
     ok "refreshed $unrepairable cached counts"
   fi
 
