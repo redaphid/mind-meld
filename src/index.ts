@@ -9,6 +9,13 @@ import { generatePendingEmbeddings, updateAggregateEmbeddings } from './embeddin
 import { closePool, query } from './db/postgres.js';
 import { getCollectionStats, listCollections } from './db/chroma.js';
 import { config } from './config.js';
+import { captureConsole } from './mcp/log-buffer.js';
+import { startDbLogSink, installFlushOnExit } from './logging/db-sink.js';
+
+// Sync runs on several machines and in containers whose stdout nobody else can
+// read; shipping to the shared `logs` table is what makes /logs cover them.
+captureConsole(startDbLogSink('sync'));
+installFlushOnExit();
 
 program
   .name('mindmeld')

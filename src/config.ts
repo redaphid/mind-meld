@@ -1,4 +1,4 @@
-import { homedir } from "os";
+import { homedir, hostname } from "os";
 import { join } from "path";
 
 function expandPath(path: string): string {
@@ -24,6 +24,19 @@ function getEnvBool(key: string, defaultValue: boolean): boolean {
 }
 
 export const config = {
+  // Which computer this process is running on. Several machines sync into the
+  // same database, so every project a sync stamps carries its origin. Falls
+  // back to the OS hostname, which inside a container is the container id —
+  // set MACHINE_NAME explicitly in compose for anything meaningful.
+  machine: getEnv("MACHINE_NAME", hostname()),
+
+  logs: {
+    // Every process ships console output to the shared `logs` table. At the
+    // observed ~265KB/day for a sync container this is a few MB per machine
+    // per fortnight; set 0 to keep everything.
+    retentionDays: getEnvInt("LOG_RETENTION_DAYS", 14),
+  },
+
   // PostgreSQL
   postgres: {
     host: getEnv("POSTGRES_HOST", "localhost"),

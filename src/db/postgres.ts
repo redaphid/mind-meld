@@ -96,14 +96,26 @@ export const queries = {
   },
 
   // Projects
-  upsertProject: async (sourceId: number, externalId: string, path: string, name: string) => {
+  // `machine` defaults to whoever is running this process, which is what every
+  // sync wants. Callers relaying someone else's data (/api/ingest) pass the
+  // sender's machine, or null when it is unknown — null preserves whatever was
+  // already recorded rather than overwriting a known origin with a guess.
+  upsertProject: async (
+    sourceId: number,
+    externalId: string,
+    path: string,
+    name: string,
+    machine: string | null = config.machine
+  ) => {
     const result = await query<{ id: number }>(
-      `INSERT INTO projects (source_id, external_id, path, name, last_synced_at)
-       VALUES ($1, $2, $3, $4, NOW())
+      `INSERT INTO projects (source_id, external_id, path, name, machine, last_synced_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
        ON CONFLICT (source_id, external_id)
-       DO UPDATE SET path = $3, name = $4, last_synced_at = NOW()
+       DO UPDATE SET path = $3, name = $4,
+                     machine = COALESCE($5, projects.machine),
+                     last_synced_at = NOW()
        RETURNING id`,
-      [sourceId, externalId, path, name]
+      [sourceId, externalId, path, name, machine]
     );
     return result.rows[0].id;
   },

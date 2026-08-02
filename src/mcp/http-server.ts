@@ -23,6 +23,10 @@ import { getSyncStatus } from '../sync/orchestrator.js'
 import { getCollectionStats } from '../db/chroma.js'
 import { config } from '../config.js'
 import { ensureEmbeddingModel } from '../embeddings/ollama.js'
+import { captureConsole, type LogLevel } from './log-buffer.js'
+import { getMachineActivity, getMachineSessions, mostRecentlyIndexed } from './machines.js'
+import { readStoredLogs, countStoredLogs, getLogWriters } from './stored-logs.js'
+import { startDbLogSink, installFlushOnExit, sinkStats, flushLogs } from '../logging/db-sink.js'
 import { ensureSummarizeModel } from '../embeddings/summarize.js'
 import { createRequire } from 'node:module'
 
@@ -41,6 +45,9 @@ const IngestMessageSchema = z.object({
 const IngestPayloadSchema = z.object({
   source: z.string(),
   sourceDisplayName: z.string().optional(),
+  // The sending computer. Omitted means "unknown" — we record nothing rather
+  // than mislabelling it as the machine running this server.
+  machine: z.string().max(64).optional(),
   project: z.object({
     externalId: z.string(),
     name: z.string(),
@@ -202,6 +209,10 @@ Call this proactively whenever you get useless results back from search.`,
 }
 
 const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3000
+
+// Installed before anything else logs so /logs sees startup too.
+captureConsole(startDbLogSink('mcp'))
+installFlushOnExit()
 
 const app = express()
 app.use(hostHeaderValidation(['localhost', '127.0.0.1', 'mcp']))
@@ -383,6 +394,170 @@ app.get('/status', async (req: any, res: any) => {
   }
 })
 
+const LOG_LEVELS: LogLevel[] = ['log', 'warn', 'error']
+
+// Bounded so a single call can't try to serialise the whole buffer at once;
+// walk further back with ?offset= rather than expecting a truncated response.
+const MAX_LOG_LIMIT = 500
+
+const parseCount = (raw: unknown, fallback: number) => {
+  if (raw === undefined) return fallback
+  const n = parseInt(String(raw), 10)
+  return Number.isFinite(n) ? n : NaN
+}
+
+// Shared by both log routes. Returns an error string, or the parsed page.
+const parsePaging = (req: any): { error: string } | { limit: number; offset: number } => {
+  const limit = parseCount(req.query.limit, 100)
+  const offset = parseCount(req.query.offset, 0)
+
+  if (Number.isNaN(limit) || limit < 1 || limit > MAX_LOG_LIMIT)
+    return { error: `limit must be an integer between 1 and ${MAX_LOG_LIMIT}` }
+  if (Number.isNaN(offset) || offset < 0)
+    return { error: 'offset must be a non-negative integer' }
+
+  return { limit, offset }
+}
+
+// Both path prefixes are served: /api/logs matches the other /api routes,
+// /logs is the shorter form to type on a phone.
+app.get(['/api/logs', '/logs'], async (req: any, res: any) => {
+  try {
+    const paging = parsePaging(req)
+    if ('error' in paging) {
+      res.status(400).json({ status: 'error', error: paging.error })
+      return
+    }
+
+    const level = req.query.level as string | undefined
+    if (level !== undefined && !LOG_LEVELS.includes(level as LogLevel)) {
+      res.status(400).json({
+        status: 'error',
+        error: `level must be one of ${LOG_LEVELS.join(', ')}`,
+      })
+      return
+    }
+
+    // So lines this process emitted moments ago are in the response rather than
+    // still sitting in the sink's queue.
+    await flushLogs()
+
+    const filter = {
+      ...paging,
+      level,
+      machine: req.query.machine as string | undefined,
+      service: req.query.service as string | undefined,
+      contains: req.query.contains as string | undefined,
+    }
+
+    const [machines, entries, total, writers] = await Promise.all([
+      getMachineActivity(),
+      readStoredLogs(filter),
+      countStoredLogs(filter),
+      getLogWriters(),
+    ])
+
+    res.json({
+      status: 'ok',
+      name: 'mindmeld',
+      version,
+      thisMachine: config.machine,
+      lastIndexedMachine: mostRecentlyIndexed(machines),
+      machines,
+      // Every process that has ever shipped logs, so a machine that stopped
+      // reporting shows up as a stale lastLoggedAt instead of just vanishing.
+      logWriters: writers,
+      entries,
+      returned: entries.length,
+      total,
+      ...paging,
+      sink: sinkStats(),
+    })
+  } catch (error) {
+    console.error('[API] Logs error:', error)
+    res.status(500).json({
+      status: 'error',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+})
+
+app.get(['/api/logs/:machine', '/logs/:machine'], async (req: any, res: any) => {
+  try {
+    const paging = parsePaging(req)
+    if ('error' in paging) {
+      res.status(400).json({ status: 'error', error: paging.error })
+      return
+    }
+
+    const level = req.query.level as string | undefined
+    if (level !== undefined && !LOG_LEVELS.includes(level as LogLevel)) {
+      res.status(400).json({
+        status: 'error',
+        error: `level must be one of ${LOG_LEVELS.join(', ')}`,
+      })
+      return
+    }
+
+    await flushLogs()
+
+    const requested = String(req.params.machine)
+    const machines = await getMachineActivity()
+    const writers = await getLogWriters()
+    const activity = machines.find(m => m.machine === requested)
+    const writesLogs = writers.some(w => w.machine === requested)
+
+    // A machine may have indexed projects, or shipped logs, or both — it is
+    // only genuinely unknown when neither is true.
+    if (!activity && !writesLogs) {
+      const known = [...new Set([...machines.map(m => m.machine), ...writers.map(w => w.machine)])]
+      res.status(404).json({
+        status: 'error',
+        error: `nothing recorded for machine '${requested}'`,
+        knownMachines: known,
+      })
+      return
+    }
+
+    const filter = {
+      ...paging,
+      level,
+      machine: requested,
+      service: req.query.service as string | undefined,
+      contains: req.query.contains as string | undefined,
+    }
+
+    const [entries, total, sessions] = await Promise.all([
+      readStoredLogs(filter),
+      countStoredLogs(filter),
+      activity
+        ? getMachineSessions(requested, paging.limit, paging.offset)
+        : Promise.resolve([]),
+    ])
+
+    res.json({
+      status: 'ok',
+      name: 'mindmeld',
+      version,
+      machine: requested,
+      isThisMachine: requested === config.machine,
+      activity: activity ?? null,
+      logWriters: writers.filter(w => w.machine === requested),
+      entries,
+      returned: entries.length,
+      total,
+      sessions,
+      ...paging,
+    })
+  } catch (error) {
+    console.error('[API] Machine logs error:', error)
+    res.status(500).json({
+      status: 'error',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+})
+
 app.post('/api/ingest', async (req: any, res: any) => {
   try {
     const payload = IngestPayloadSchema.parse(req.body)
@@ -393,7 +568,8 @@ app.post('/api/ingest', async (req: any, res: any) => {
       source.id,
       payload.project.externalId,
       payload.project.path ?? '',
-      payload.project.name
+      payload.project.name,
+      payload.machine ?? null
     )
 
     const sessionId = await queries.upsertSession({
