@@ -162,6 +162,26 @@ pnpm run dev
 pnpm run type-check
 ```
 
+## This repository is PUBLIC (issue #64)
+
+Nothing personal may be committed: no usernames, home-directory paths, device
+or machine names, machine topology, tunnel hostnames, or credentials. Use
+placeholders instead — `/home/<user>`, `\\wsl.localhost\<distro>\...`,
+`mindmeld.example.com`, `<your-username>` — and keep the surrounding
+explanation, so the docs stay followable by a stranger.
+
+This is enforced mechanically, not by good intentions:
+`src/quality/no-personal-data.test.ts` scans every git-tracked file on each
+test run and fails on personal-path shapes and on banned terms listed (as
+SHA-256 hashes, never plaintext) in `quality/personal-terms.json`.
+
+If it fires, **replace the value with a placeholder** — do not delete the hash
+or add an exception. Failures report file and line only, never the matched
+text, because this repo's CI logs are public too.
+
+Real host-specific values belong in your `.env` (see `.env.example`), which is
+not tracked.
+
 ## Deployment
 
 Deploys are **semver-driven** — CI only builds images when `package.json`'s `version` changes. A plain merge to `main` does **not** deploy.
