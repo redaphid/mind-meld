@@ -1051,9 +1051,15 @@ paths:
       description: |
         A pending count on its own cannot tell a healthy pipeline that is nearly
         done from one that stalled hours ago from one losing ground to incoming
-        messages. This measures two rates over a recent window — messages
-        embedded, and new messages arriving — and reports the difference, which
-        is the only number an ETA can honestly come from.
+        messages. This measures rates over a recent window — messages embedded,
+        new messages arriving, and sessions summarized — and reports the
+        difference between the first two, which is the only number an ETA can
+        honestly come from.
+
+        The pipeline has two phases at very different speeds: message embedding
+        (fast) and session summarization (an LLM pass each, slow). While the
+        slow one runs the message rate is legitimately zero, so a state derived
+        from that rate alone reported a busy machine as `stalled`.
 
         `state` is the summary worth reading first:
 
@@ -1063,14 +1069,26 @@ paths:
         | `draining` | backlog shrinking; `eta` is populated |
         | `holding` | work happening, arrivals cancel it out |
         | `falling-behind` | backlog grew over the window |
-        | `stalled` | a backlog exists and nothing was embedded at all |
+        | `summarizing` | no messages embedded, but sessions were summarized — the slow phase is running |
+        | `stalled` | work is queued and **neither** phase advanced in the window |
+
+        Ranking, highest first: an embedding verdict (`draining` /
+        `falling-behind` / `holding`) outranks `summarizing`, because only it
+        carries a rate an ETA can come from; `summarizing` outranks both
+        `stalled` and `caught-up`, because naming the phase that is running
+        beats a verdict drawn from the phase that is not.
 
         `eta` is null unless the backlog is actually shrinking: computed from a
         non-positive drain rate it would be infinite or negative, and rendering
-        either as a finish time is worse than admitting there isn't one.
+        either as a finish time is worse than admitting there isn't one. There is
+        no ETA for summarization.
 
-        `pending` uses the same definition as `/status`, so the two screens
-        cannot disagree about how much work is left.
+        `pending` and `summariesPending` use the same definitions as `/status`
+        (`pendingEmbeddings.messages` and `pendingEmbeddings.sessions`), so the
+        two screens cannot disagree about how much work is left. Note that
+        `summariesPending` counts some sessions the embedder itself skips
+        (warmups, automated and still-active ones), so it does not reach zero on
+        a live instance — which is why a state is never derived from it alone.
       parameters:
         - name: minutes
           in: query
@@ -1096,18 +1114,24 @@ paths:
                     const: ok
                   state:
                     type: string
-                    enum: [caught-up, draining, holding, falling-behind, stalled]
+                    enum: [caught-up, draining, holding, falling-behind, summarizing, stalled]
                   queue:
                     type: object
-                    required: [pending, embedded]
+                    required: [pending, embedded, summariesPending]
                     properties:
                       pending:
                         type: integer
                       embedded:
                         type: integer
+                      summariesPending:
+                        type: integer
+                        description: >-
+                          Sessions still owed a summary embedding. Same
+                          definition as `/status`'s `pendingEmbeddings.sessions`.
                   rates:
                     type: object
-                    required: [embeddedPerMinute, arrivedPerMinute, netDrainPerMinute]
+                    required:
+                      [embeddedPerMinute, arrivedPerMinute, netDrainPerMinute, summarizedPerMinute]
                     properties:
                       embeddedPerMinute:
                         type: number
@@ -1116,6 +1140,12 @@ paths:
                       netDrainPerMinute:
                         type: number
                         description: Positive means the backlog shrinks by this much per minute.
+                      summarizedPerMinute:
+                        type: number
+                        description: >-
+                          Sessions summarized per minute. Orders of magnitude
+                          smaller than the message rate — a value like 0.07 is a
+                          healthy summarization run, not a rounding artefact.
                   eta:
                     type: object
                     required: [secondsRemaining, finishesAt]
@@ -1129,7 +1159,7 @@ paths:
                         nullable: true
                   window:
                     type: object
-                    required: [minutes, embedded, arrived]
+                    required: [minutes, embedded, arrived, summarized]
                     description: The counts the rates were derived from, so a rate is never read bare.
                     properties:
                       minutes:
@@ -1138,6 +1168,11 @@ paths:
                         type: integer
                       arrived:
                         type: integer
+                      summarized:
+                        type: integer
+                        description: >-
+                          Session summaries completed in the window. This is the
+                          signal that separates `summarizing` from `stalled`.
 
   /api/sync:
     post:
