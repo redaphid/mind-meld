@@ -223,6 +223,113 @@ const SourceLine = ({ source }) => html`
   </div>
 `
 
+// Two different populations wear the word "machine" on this screen, and the
+// card used to conflate them. `machines` is sync activity: everything that has
+// ever fed a conversation into the index. The logs table's `machine` column is
+// written by the log sink, so it only ever names processes that *ship* logs. A
+// device that syncs conversations but runs no mindmeld service is in the first
+// list and absent from the second, and a log link for it opens a page that is
+// empty by construction (#112).
+//
+// Both questions are worth answering, so neither list is discarded: sync
+// activity still drives the card, the log link only renders for a machine that
+// actually writes logs, and machines that ship logs without syncing get a
+// section of their own instead of being unreachable from this screen.
+const logTotals = writers => {
+  const byMachine = new Map()
+  for (const w of writers) {
+    const acc = byMachine.get(w.machine) ?? { machine: w.machine, entries: 0, lastLoggedAt: null }
+    acc.entries += Number(w.entries ?? 0)
+    if (!acc.lastLoggedAt || w.lastLoggedAt > acc.lastLoggedAt) acc.lastLoggedAt = w.lastLoggedAt
+    byMachine.set(w.machine, acc)
+  }
+  return [...byMachine.values()].sort((a, b) => (a.lastLoggedAt < b.lastLoggedAt ? 1 : -1))
+}
+
+// Same row shape either way — only the one that leads somewhere is a button.
+// `.inert` drops the pointer cursor and the press state, so "no logs" reads as
+// a fact about the machine rather than a link that failed.
+const SyncMachineRow = ({ m, thisMachine, lastIndexedMachine, hasLogs }) => {
+  const body = html`
+    <div class="m" style="margin:0">
+      <strong style="color:var(--text)">${m.machine}</strong>
+      ${m.machine === thisMachine && html`<${Pill} kind="good">serving<//>`}
+      ${m.machine === lastIndexedMachine && html`<${Pill}>last indexed<//>`}
+      <span class="right faint nowrap">${timeAgo(m.lastIndexedAt) ?? 'never'}</span>
+    </div>
+    <div class="m faint" style="margin-top:4px">
+      <span>
+        ${fmtNum(m.sessions)} sessions · ${fmtNum(m.messages)} messages ·
+        ${fmtNum(m.projects)} projects
+      </span>
+      <span class="right nowrap">${hasLogs ? 'logs →' : 'no logs'}</span>
+    </div>
+  `
+  return hasLogs
+    ? html`<button
+        class="row"
+        style="margin-bottom:6px"
+        onClick=${() => navigate('logs', { machine: m.machine })}
+      >
+        ${body}
+      </button>`
+    : html`<div
+        class="row inert"
+        style="margin-bottom:6px"
+        title="Syncs conversations but runs no mindmeld service, so it ships no logs"
+      >
+        ${body}
+      </div>`
+}
+
+const LogOnlyRow = ({ w }) => html`
+  <button
+    class="row"
+    style="margin-bottom:6px"
+    onClick=${() => navigate('logs', { machine: w.machine })}
+  >
+    <div class="m" style="margin:0">
+      <strong style="color:var(--text)">${w.machine}</strong>
+      <span class="right faint nowrap">${timeAgo(w.lastLoggedAt) ?? 'never'}</span>
+    </div>
+    <div class="m faint" style="margin-top:4px">
+      <span>${fmtNum(w.entries)} log ${w.entries === 1 ? 'entry' : 'entries'}</span>
+      <span class="right nowrap">logs →</span>
+    </div>
+  </button>
+`
+
+const MachinesCard = ({ machines }) => {
+  const data = machines.data
+  const synced = data?.machines ?? []
+  const writers = logTotals(data?.logWriters ?? [])
+  const shipsLogs = new Set(writers.map(w => w.machine))
+  const syncedNames = new Set(synced.map(m => m.machine))
+  const logOnly = writers.filter(w => !syncedNames.has(w.machine))
+
+  return html`
+    <${Card} title="Machines">
+      ${machines.loading && html`<${Spinner} />`}
+      ${synced.map(
+        m => html`<${SyncMachineRow}
+          key=${m.machine}
+          m=${m}
+          thisMachine=${data.thisMachine}
+          lastIndexedMachine=${data.lastIndexedMachine}
+          hasLogs=${shipsLogs.has(m.machine)}
+        />`
+      )}
+      ${logOnly.length > 0 &&
+      html`
+        <div class="faint" style="margin:14px 0 6px;font-size:12px">
+          Ships logs, syncs no conversations
+        </div>
+        ${logOnly.map(w => html`<${LogOnlyRow} key=${w.machine} w=${w} />`)}
+      `}
+    <//>
+  `
+}
+
 // How often the live numbers refresh. The queue moves in the tens-to-hundreds
 // per minute, so a status read that only happens on navigation is stale within
 // seconds of opening the page — and this screen exists to answer "what is it
@@ -328,30 +435,7 @@ export const OverviewView = () => {
           )}
     <//>
 
-    <${Card} title="Machines">
-      ${machines.loading && html`<${Spinner} />`}
-      ${machines.data?.machines?.map(
-        m => html`
-          <button
-            class="row"
-            style="margin-bottom:6px"
-            onClick=${() => navigate('logs', { machine: m.machine })}
-          >
-            <div class="m" style="margin:0">
-              <strong style="color:var(--text)">${m.machine}</strong>
-              ${m.machine === machines.data.thisMachine && html`<${Pill} kind="good">serving<//>`}
-              ${m.machine === machines.data.lastIndexedMachine &&
-              html`<${Pill}>last indexed<//>`}
-              <span class="right faint nowrap">${timeAgo(m.lastIndexedAt) ?? 'never'}</span>
-            </div>
-            <div class="m faint" style="margin-top:4px">
-              ${fmtNum(m.sessions)} sessions · ${fmtNum(m.messages)} messages ·
-              ${fmtNum(m.projects)} projects
-            </div>
-          </button>
-        `
-      )}
-    <//>
+    <${MachinesCard} machines=${machines} />
 
     <div class="faint" style="text-align:center;font-size:12px;padding:6px 0 20px">
       mindmeld v${s?.version} · ${machines.data?.thisMachine ?? ''}
