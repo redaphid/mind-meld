@@ -8,6 +8,15 @@ import { query } from '../db/postgres.js'
 // is a rate, so this measures two of them over a recent window — how fast
 // messages are being embedded, and how fast new ones are arriving — and reports
 // the difference, which is the only number an ETA can honestly come from.
+//
+// The pipeline has two phases, though, and they move at wildly different
+// speeds: message embedding (fast, thousands per hour) and session
+// summarization (slow, an LLM pass per session). Measuring only the first one
+// made the dashboard report `stalled` — "nothing embedded in the last 60m" —
+// during the exact runs where the machine was working hardest, because
+// `updateAggregateEmbeddings` writes to `convo-sessions`, not `convo-messages`
+// (#109). So both phases are measured, and a phase that is moving outranks the
+// verdict that nothing is.
 
 type QueueState =
   // Nothing left to embed.
@@ -18,17 +27,30 @@ type QueueState =
   | 'holding'
   // Work is happening and losing: the backlog grew over the window.
   | 'falling-behind'
-  // A backlog exists and nothing was embedded in the window at all.
+  // No messages were embedded, but sessions were summarized: the slow phase of
+  // the pipeline is running. Healthy work, just not the work the message rate
+  // can see.
+  | 'summarizing'
+  // A backlog exists and NEITHER phase advanced in the window.
   | 'stalled'
 
 export type ThroughputReport = {
   state: QueueState
-  queue: { pending: number; embedded: number }
+  queue: {
+    pending: number
+    embedded: number
+    // Sessions still owed a summary embedding — the same count /status reports
+    // as `pendingEmbeddings.sessions`.
+    summariesPending: number
+  }
   rates: {
     embeddedPerMinute: number
     arrivedPerMinute: number
     // Positive means the backlog is shrinking by this much each minute.
     netDrainPerMinute: number
+    // Sessions summarized per minute. An order of magnitude slower than the
+    // message rate — it is normal for this to read 0.05 while the box is busy.
+    summarizedPerMinute: number
   }
   eta: {
     // Null whenever the backlog is not shrinking — an ETA computed from a
@@ -37,7 +59,7 @@ export type ThroughputReport = {
     secondsRemaining: number | null
     finishesAt: string | null
   }
-  window: { minutes: number; embedded: number; arrived: number }
+  window: { minutes: number; embedded: number; arrived: number; summarized: number }
 }
 
 const round = (n: number, places = 2) => {
@@ -50,25 +72,52 @@ export const summarizeThroughput = (input: {
   embeddedTotal: number
   embeddedInWindow: number
   arrivedInWindow: number
+  summariesPending: number
+  summarizedInWindow: number
   windowMinutes: number
   now: Date
 }): ThroughputReport => {
-  const { pending, embeddedTotal, embeddedInWindow, arrivedInWindow, windowMinutes, now } = input
+  const {
+    pending,
+    embeddedTotal,
+    embeddedInWindow,
+    arrivedInWindow,
+    summariesPending,
+    summarizedInWindow,
+    windowMinutes,
+    now,
+  } = input
 
   const embeddedPerMinute = round(embeddedInWindow / windowMinutes)
   const arrivedPerMinute = round(arrivedInWindow / windowMinutes)
   const netDrainPerMinute = round(embeddedPerMinute - arrivedPerMinute)
+  const summarizedPerMinute = round(summarizedInWindow / windowMinutes)
 
-  const state: QueueState =
-    pending === 0
-      ? 'caught-up'
-      : embeddedInWindow === 0
-        ? 'stalled'
-        : netDrainPerMinute > 0
-          ? 'draining'
-          : netDrainPerMinute < 0
-            ? 'falling-behind'
-            : 'holding'
+  // Ranked, most specific first. Order is the whole fix, so it is spelled out
+  // rather than nested into one ternary:
+  const queueState = (): QueueState => {
+    // 1. Messages are moving and some remain: the existing three-way verdict,
+    //    which is also the only branch that can honestly produce an ETA.
+    if (embeddedInWindow > 0 && pending > 0)
+      return netDrainPerMinute > 0 ? 'draining' : netDrainPerMinute < 0 ? 'falling-behind' : 'holding'
+
+    // 2. Nothing embedded, but sessions were summarized and more are owed one.
+    //    This outranks `stalled` (#109) — and outranks `caught-up` too, because
+    //    "Caught up" while the slowest phase still has a queue is the same lie
+    //    pointed the other way.
+    if (summarizedInWindow > 0 && summariesPending > 0) return 'summarizing'
+
+    // 3. No messages left to embed. `summariesPending` follows /status, which
+    //    counts sessions the embedder itself filters out (warmups, automated
+    //    and still-active ones), so it never fully reaches zero on a live box.
+    //    A residual count like that must not be allowed to read as a stall.
+    if (pending === 0) return 'caught-up'
+
+    // 4. A backlog exists and neither phase advanced. Now it is a stall.
+    return 'stalled'
+  }
+
+  const state = queueState()
 
   const secondsRemaining =
     state === 'caught-up'
@@ -79,14 +128,19 @@ export const summarizeThroughput = (input: {
 
   return {
     state,
-    queue: { pending, embedded: embeddedTotal },
-    rates: { embeddedPerMinute, arrivedPerMinute, netDrainPerMinute },
+    queue: { pending, embedded: embeddedTotal, summariesPending },
+    rates: { embeddedPerMinute, arrivedPerMinute, netDrainPerMinute, summarizedPerMinute },
     eta: {
       secondsRemaining,
       finishesAt:
         secondsRemaining === null ? null : new Date(now.getTime() + secondsRemaining * 1000).toISOString(),
     },
-    window: { minutes: windowMinutes, embedded: embeddedInWindow, arrived: arrivedInWindow },
+    window: {
+      minutes: windowMinutes,
+      embedded: embeddedInWindow,
+      arrived: arrivedInWindow,
+      summarized: summarizedInWindow,
+    },
   }
 }
 
@@ -103,8 +157,25 @@ export const clampWindow = (minutes: unknown): number => {
 // `pending` and the embeddable filter deliberately match /status's definition
 // (content_text over 10 chars, no row in convo-messages) — two screens
 // disagreeing about how much work is left is worse than either number alone.
+// `summariesPending` is held to the same rule: it is /status's pending-sessions
+// query verbatim (http-server.ts), so the pending-sessions pill and the queue
+// state that explains it cannot contradict each other.
+//
+// That predicate — "content_chars GREW past the watermark" — is also the one
+// `updateAggregateEmbeddings` selects sessions with (batch.ts), so this count
+// reflects what the embedder will actually pick up rather than a second
+// opinion about it. #108 argues the growth test should be a change test at
+// every site; whether it does or not, these are the same string in three
+// places and they have to move together.
 export const getThroughput = async (windowMinutes: number): Promise<ThroughputReport> => {
-  const [pending, embeddedTotal, embeddedInWindow, arrivedInWindow] = await Promise.all([
+  const [
+    pending,
+    embeddedTotal,
+    embeddedInWindow,
+    arrivedInWindow,
+    summariesPending,
+    summarizedInWindow,
+  ] = await Promise.all([
     query<{ count: string }>(`
       SELECT COUNT(*) as count FROM messages m
       LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'
@@ -125,6 +196,27 @@ export const getThroughput = async (windowMinutes: number): Promise<ThroughputRe
          AND content_text IS NOT NULL AND LENGTH(content_text) > 10`,
       [String(windowMinutes)]
     ),
+    query<{ count: string }>(`
+      SELECT COUNT(*) as count FROM sessions s
+      LEFT JOIN embeddings e ON e.chroma_collection = 'convo-sessions' AND e.chroma_id = 'session-' || s.id::text
+      WHERE s.deleted_at IS NULL
+        AND s.message_count > 0
+        AND (e.id IS NULL OR s.content_chars > COALESCE(e.content_chars_at_embed, 0))
+    `),
+    // The completion signal for the slow phase: `updateAggregateEmbeddings`
+    // writes this row immediately after the summary comes back from the LLM,
+    // so a row here means a session finished, not that one was attempted.
+    // Counted by `created_at`, which only moves for a session's FIRST summary:
+    // a re-embed is an upsert, and nothing in that path bumps a timestamp. So
+    // this under-reports a pass made entirely of re-embeds rather than
+    // over-reporting it — a count that decides "is it working" should fail
+    // toward the pessimistic answer, not the flattering one.
+    query<{ count: string }>(
+      `SELECT COUNT(*) as count FROM embeddings
+       WHERE chroma_collection = 'convo-sessions'
+         AND created_at > now() - ($1 || ' minutes')::interval`,
+      [String(windowMinutes)]
+    ),
   ])
 
   const n = (r: { rows: { count: string }[] }) => parseInt(r.rows[0]?.count ?? '0', 10)
@@ -134,6 +226,8 @@ export const getThroughput = async (windowMinutes: number): Promise<ThroughputRe
     embeddedTotal: n(embeddedTotal),
     embeddedInWindow: n(embeddedInWindow),
     arrivedInWindow: n(arrivedInWindow),
+    summariesPending: n(summariesPending),
+    summarizedInWindow: n(summarizedInWindow),
     windowMinutes,
     now: new Date(),
   })

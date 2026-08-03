@@ -41,13 +41,24 @@ const fmtDuration = seconds => {
 
 // A pending count alone cannot tell "working through it" from "stopped" from
 // "losing ground", so the state is what gets the pill and the rate explains it.
+//
+// Summarizing is a fourth thing it cannot tell apart, and it is the one most
+// likely to be running when someone opens this page to ask why nothing is
+// happening: the LLM pass over a session is the slowest step in the pipeline,
+// and while it runs the message rate is legitimately zero. That is healthy work
+// — `kind: 'good'` — not the amber the message rate alone used to earn it.
 const QUEUE_STATES = {
   'caught-up': { label: 'Caught up', kind: 'good' },
   draining: { label: 'Draining', kind: 'good' },
+  summarizing: { label: 'Summarizing', kind: 'good' },
   holding: { label: 'Holding steady', kind: 'warn' },
   'falling-behind': { label: 'Falling behind', kind: 'warn' },
   stalled: { label: 'Stalled', kind: 'warn' },
 }
+
+// Pluralises the noun only — the caller picks the formatter, because the pill
+// wants the abbreviated count and the detail line under it wants the exact one.
+const plural = (n, word) => `${word}${Number(n) === 1 ? '' : 's'}`
 
 const QueueThroughput = () => {
   const t = useApi('/api/throughput', { minutes: 60 })
@@ -60,9 +71,10 @@ const QueueThroughput = () => {
   if (t.error) return html`<div class="faint" style="margin-top:10px;font-size:13px">throughput unavailable</div>`
   if (!t.data) return null
 
-  const { state, rates, eta, window: w } = t.data
+  const { state, queue, rates, eta, window: w } = t.data
   const meta = QUEUE_STATES[state] ?? { label: state, kind: '' }
   const etaText = fmtDuration(eta.secondsRemaining)
+  const summariesPending = queue?.summariesPending ?? 0
 
   return html`
     <div class="m" style="margin-top:10px">
@@ -75,16 +87,28 @@ const QueueThroughput = () => {
         embedded</span
       >`}
       ${state === 'holding' && html`<span>${fmtNum(rates.embeddedPerMinute)}/min in and out</span>`}
+      ${state === 'summarizing' &&
+      html`<span
+        >summarizing ${fmtNum(summariesPending)} ${plural(summariesPending, 'session')} —
+        ${queue.pending === 0
+          ? 'no messages queued to embed'
+          : `no messages embedded in the last ${w.minutes}m`}</span
+      >`}
       ${state === 'stalled' &&
-      html`<span>nothing embedded in the last ${w.minutes}m</span>`}
+      html`<span>nothing embedded or summarized in the last ${w.minutes}m</span>`}
       ${etaText && state === 'draining' &&
       html`<span class="right faint nowrap">~${etaText} remaining</span>`}
     </div>
     <div class="faint" style="font-size:12px;margin-top:4px">
-      last ${w.minutes}m: ${fmtExact(w.embedded)} embedded, ${fmtExact(w.arrived)} arrived
+      last ${w.minutes}m: ${fmtExact(w.embedded)} embedded, ${fmtExact(w.arrived)} arrived,
+      ${fmtExact(w.summarized ?? 0)} summarized
       ${eta.finishesAt && state === 'draining'
         ? html` · done ${new Date(eta.finishesAt).toLocaleString()}`
         : ''}
+    </div>
+    <div class="faint" style="font-size:12px;margin-top:2px">
+      ${fmtExact(summariesPending)} ${plural(summariesPending, 'session')} awaiting a summary
+      ${(w.summarized ?? 0) > 0 ? ` · ${fmtNum(rates.summarizedPerMinute)}/min` : ''}
     </div>
   `
 }
