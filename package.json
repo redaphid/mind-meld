@@ -54,6 +54,8 @@
     "quality": "pnpm run test:coverage && pnpm run quality:knip && pnpm run quality:coverage",
     "quality:knip": "tsx scripts/quality/knip-ratchet.ts",
     "quality:coverage": "tsx scripts/quality/coverage-ratchet.ts",
+    "//quality:sw-shell": "Re-records quality/service-worker-shell.json. The CHECK runs in the normal test suite (src/quality/service-worker-freshness.test.ts); this is only the deliberate way to re-record after bumping VERSION in public/sw.js. Kept out of quality:update on purpose — see issue #113.",
+    "quality:sw-shell": "tsx scripts/quality/sw-shell-digest.ts",
     "quality:update": "pnpm run test:coverage && tsx scripts/quality/knip-ratchet.ts --update && tsx scripts/quality/coverage-ratchet.ts --update",
     "type-check": "tsc --noEmit"
   },

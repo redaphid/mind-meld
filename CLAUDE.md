@@ -60,7 +60,15 @@ the page.
 - Views: status, search (vector / full-text / hybrid), browse, session reader,
   logs, quarantine.
 - It is a PWA: installable, and the service worker keeps the last state readable
-  when the tunnel drops. Bump `VERSION` in `public/sw.js` when shell files change.
+  when the tunnel drops. Bump `VERSION` in `public/sw.js` when shell files
+  change — **enforced, not remembered** (issue #113): `src/quality/service-worker-freshness.test.ts`
+  hashes every asset in the `SHELL` list against `quality/service-worker-shell.json`
+  and fails when one moves without a bump. It also fails when a `public/js`
+  module is missing from `SHELL` (never precached) or a `SHELL` entry no longer
+  exists (`Promise.allSettled` swallows the 404). After bumping `VERSION`,
+  re-record with `pnpm run quality:sw-shell -- --update`; it refuses to write
+  while `VERSION` is unchanged, because re-recording is the second half of the
+  fix, not a way to silence the check.
 - Icons are generated, not hand-drawn: `pnpm run icons`.
 
 Reaching either service through the Cloudflare tunnel requires that hostname in
