@@ -43,6 +43,18 @@ export const LogsView = () => {
   const machineNames = [...new Set(writers.map(w => w.machine))]
   const services = [...new Set(writers.map(w => w.service))]
 
+  // "No lines match those filters" blames the filter for a mismatch that is
+  // structural: a machine that syncs conversations but runs no mindmeld service
+  // never writes a log row, so no amount of widening the other filters will
+  // produce one. Say which of the two it is (#112).
+  const emptyReason = () => {
+    const machine = query.machine ?? ''
+    if (!machine || machineNames.includes(machine)) return 'No log lines match those filters.'
+    return (data?.machines ?? []).some(m => m.machine === machine)
+      ? `${machine} syncs conversations into the index but ships no logs — only machines running a mindmeld service write log lines.`
+      : `No machine named ${machine} has ever shipped a log line.`
+  }
+
   return html`
     <form
       class="search-bar"
@@ -93,7 +105,14 @@ export const LogsView = () => {
         ${fmtNum(data.total)} entries${query.machine ? ` on ${query.machine}` : ''} · buffered
         ${data.sink?.queued ?? 0}
       </div>
-      ${data.entries.length === 0 && html`<${Empty}>No log lines match those filters.<//>`}
+      ${data.entries.length === 0 &&
+      html`<${Empty}>
+        ${emptyReason()}
+        ${query.machine &&
+        html`<div style="margin-top:12px">
+          <button class="btn sm" onClick=${() => setOpt('machine', '')}>Show all machines</button>
+        </div>`}
+      <//>`}
       ${data.entries.map(
         e => html`
           <div class="logline ${e.level}" key=${e.id}>

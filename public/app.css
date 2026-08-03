@@ -243,6 +243,10 @@ main {
   min-height: var(--tap);
 }
 .row:active { background: var(--surface-2); }
+/* A row that reports rather than navigates: same shape, no affordance, because
+   an entry with nothing behind it must not read as a link that failed. */
+.row.inert { cursor: default; }
+.row.inert:active { background: var(--surface); }
 .row .t { font-weight: 600; font-size: 15px; overflow-wrap: anywhere; }
 
 /* Titles are whole first messages and run to paragraphs. Clamping is display
