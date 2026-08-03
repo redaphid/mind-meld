@@ -1017,6 +1017,16 @@ paths:
                     type: integer
                   recovered:
                     type: integer
+                  unrecoverable:
+                    type: integer
+                    description: |
+                      Records retired rather than recovered: the payload holds no
+                      data to recover, only NUL bytes left by a write the
+                      filesystem never flushed (an unclean shutdown). Retrying
+                      one can only fail, so it is resolved — row and payload kept
+                      for inspection — and stops counting toward `pending`.
+                      Otherwise `quarantined` stays non-zero forever and the one
+                      number worth alerting on becomes noise.
                   pending:
                     type: integer
                     description: Records still unresolved after this run.

@@ -48,21 +48,50 @@ export const encodePayload = (payload: string) => Buffer.from(payload, 'utf8').t
 
 export const decodePayload = (payload: string) => Buffer.from(payload, 'base64').toString('utf8')
 
+// A run of NUL bytes is not a damaged record, it is the absence of one. An
+// unclean shutdown leaves this behind: the filesystem extended the file's
+// recorded length but never flushed the data blocks, so the tail reads as
+// zeros. Nothing was written there, so nothing can be read back — replaying it
+// fails identically every time, forever.
+//
+// That matters because `quarantined` is the number to alert on, and its whole
+// meaning is "data is waiting, not lost". A record that can never be recovered
+// pins that number above zero permanently, and a permanently-red alert is one
+// nobody reads — it would also hide the next real quarantine behind it. So this
+// is recognised on the way in and parked as resolved, with the row and its
+// payload kept intact for inspection.
+export const unrecoverableReason = (payload: string): string | null => {
+  if (payload.length === 0) return null
+  const nuls = (payload.match(/\u0000/g) ?? []).length
+  if (nuls === 0) return null
+  // Only when there is nothing else. A record that merely *contains* a NUL may
+  // still hold a recoverable message, and guessing it away would drop data.
+  if (/[^\u0000\s]/.test(payload)) return null
+  return `unrecoverable: ${nuls} NUL bytes and no content — an unflushed write, not a damaged record`
+}
+
 // Returns the quarantine row id, or null if even this failed.
 export const quarantine = async (input: QuarantineInput): Promise<number | null> => {
+  const unrecoverable = unrecoverableReason(input.payload)
   try {
     const result = await query<{ id: number }>(
+      // resolved_at is decided here rather than only on replay, because a full
+       // re-sync re-quarantines the same line: were the conflict branch to reset
+       // it to NULL unconditionally, every re-sync would resurrect a record that
+       // can never be recovered and the alert would come back from the dead.
       `INSERT INTO sync_quarantine (
          source, machine, file_path, record_key, line_number,
-         session_external_id, session_id, project_id, stage, payload_base64, error
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         session_external_id, session_id, project_id, stage, payload_base64, error,
+         resolved_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+         CASE WHEN $12 THEN NOW() ELSE NULL END)
        ON CONFLICT (source, file_path, record_key) DO UPDATE SET
          attempts = sync_quarantine.attempts + 1,
          last_attempt_at = NOW(),
          error = $11,
          payload_base64 = $10,
          session_id = COALESCE($7, sync_quarantine.session_id),
-         resolved_at = NULL
+         resolved_at = CASE WHEN $12 THEN NOW() ELSE NULL END
        RETURNING id`,
       [
         input.source,
@@ -75,7 +104,8 @@ export const quarantine = async (input: QuarantineInput): Promise<number | null>
         input.projectId ?? null,
         input.stage,
         encodePayload(input.payload),
-        message(input.error),
+        unrecoverable ? `${message(input.error)} — ${unrecoverable}` : message(input.error),
+        unrecoverable !== null,
       ]
     )
     return result.rows[0]?.id ?? null
@@ -192,7 +222,10 @@ const markAttempted = async (id: number, error: unknown) => {
   )
 }
 
-export type ReplayOutcome = { id: number; ok: boolean; error?: string }
+// `unrecoverable` is not a failure the caller should retry: it is the verdict
+// that retrying is pointless. Counted separately from `recovered` so a replay
+// summary cannot read as "5 still to go" when the answer is "5 never existed".
+export type ReplayOutcome = { id: number; ok: boolean; error?: string; unrecoverable?: boolean }
 
 // A quarantined record goes back in through exactly the path it failed on:
 // a 'parse' payload is re-parsed with parseClaudeLine, an 'insert' payload is
@@ -200,6 +233,15 @@ export type ReplayOutcome = { id: number; ok: boolean; error?: string }
 // write something a normal sync would not have.
 const replayRow = async (row: QuarantineRow): Promise<ReplayOutcome> => {
   if (!row.payload) return { id: row.id, ok: false, error: 'payload missing' }
+
+  // Rows quarantined before this was recognised, and any that slip through.
+  // Resolved, not deleted: the payload stays for inspection, it just stops
+  // being counted as work waiting to be done.
+  const unrecoverable = unrecoverableReason(row.payload)
+  if (unrecoverable) {
+    await markResolved(row.id)
+    return { id: row.id, ok: false, unrecoverable: true, error: unrecoverable }
+  }
 
   // A record quarantined before its session existed carries the project and the
   // session's external id instead; resolve it now that sync has caught up.
@@ -293,6 +335,7 @@ export const replayQuarantine = async (opts: { limit?: number; id?: number } = {
   return {
     attempted: outcomes.length,
     recovered: outcomes.filter(o => o.ok).length,
+    unrecoverable: outcomes.filter(o => o.unrecoverable).length,
     outcomes,
   }
 }
