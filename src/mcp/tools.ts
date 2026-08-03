@@ -41,6 +41,10 @@ Each hit carries:
 - snippet: the query-highlighted lead of the matched region
 - cursor (optional): deep-link into the match — { chunk_index } or { message_id }
 
+Sessions still waiting on summarization are searched too, and they have no title.
+Such a hit is headed by its matched text instead, marked as matched text — treat
+it as the line that matched, not as the session's topic.
+
 Searches THREE tiers (session summaries, chunk summaries, per-message vectors)
 and fuses them. After a hit:
 - getSession(session_id) → digest + chunk map, then getMessages(chunk range)
@@ -84,7 +88,7 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
       likeProject: z.array(z.string()).optional().describe('Boost results matching these project IDs'),
       unlikeProject: z.array(z.string()).optional().describe('Suppress results matching these project IDs'),
       includeAutomated: z.boolean().optional().describe('Include automated, non-interactive sessions (Slack monitoring, curiosity curation, MCP health checks, huddle transcripts). Excluded by default.'),
-      includeUnsummarized: z.boolean().optional().describe('Include sessions that have not been summarized yet. Excluded by default: an unsummarized session has no title and no session-level vector, so it can only arrive as an untriageable result. Pass true to reach the indexing backlog deliberately.'),
+      includeUnsummarized: z.boolean().optional().describe('DEPRECATED, no-op. Sessions that have not been summarized yet are searched by default now (issue #119); this parameter no longer gates anything and will be removed. Passing it changes nothing either way.'),
       dataClass: z.array(z.string()).optional().describe('Data classes to search (default ["coding"]). Sources are classified as coding, personal, meetings, etc. Pass ["*"] to search everything, or e.g. ["coding","personal"] to widen. An explicit source param bypasses this default.'),
     },
     async (params) => {
