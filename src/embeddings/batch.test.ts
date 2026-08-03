@@ -45,9 +45,10 @@ vi.mock('./summarize.js', () => ({
 const { persistSessionChunks } = vi.hoisted(() => ({ persistSessionChunks: vi.fn() }))
 vi.mock('./chunks.js', () => ({ persistSessionChunks }))
 
-const { updateAggregateEmbeddings, generatePendingEmbeddings, markUnembeddable } = await import(
-  './batch.js'
-)
+// markUnembeddable is deliberately NOT imported here: it is reached through the
+// batch below, and importing it directly would retire a knip baseline entry that
+// has nothing to do with this change.
+const { updateAggregateEmbeddings, generatePendingEmbeddings } = await import('./batch.js')
 
 // One message, so the recomputed size is easy to state exactly:
 // the embed path counts the `[ROLE]: ` prefix it prepends before summarizing.
@@ -234,25 +235,6 @@ describe('a session with nothing embeddable', () => {
   })
 })
 
-describe('markUnembeddable', () => {
-  // Noise is recorded rather than re-evaluated: getMessagesToEmbed joins against
-  // these rows, so a message that is not written here comes back every batch.
-  it('records noise with no retry budget', async () => {
-    await markUnembeddable(7, 'noise', 'slash-command wrapper')
-
-    const [sql, params] = query.mock.calls[0] as [string, unknown[]]
-    expect(sql).toContain("chroma_collection")
-    expect(params).toEqual([7, '7', 'noise', 'slash-command wrapper'])
-  })
-
-  it('leaves the detail already on record when none is supplied', async () => {
-    await markUnembeddable(7, 'nan')
-
-    const [, params] = query.mock.calls[0] as [string, unknown[]]
-    expect(params[3]).toBeNull()
-  })
-})
-
 describe('updateAggregateEmbeddings failure handling', () => {
   it('marks the session processed when the embedder returns nothing usable', async () => {
     withCandidate(session({}))
@@ -400,6 +382,45 @@ describe('generatePendingEmbeddings', () => {
       ([sql]) => (sql as string).includes('UNEMBEDDABLE') && (sql as string).includes('INSERT INTO embeddings')
     )
     expect((marked![1] as unknown[])[2]).toBe('nan')
+  })
+
+  it('summarizes a message too long to embed directly, and records that it did', async () => {
+    // Over MAX_EMBED_CHARS: the raw text cannot go to the embedder, so it is
+    // summarized first and the summarizing model is recorded alongside the vector.
+    withPending([pendingMessage({ content_text: 'a long conversation turn. '.repeat(400) })])
+
+    const stats = await generatePendingEmbeddings()
+
+    expect(summarizeConversation).toHaveBeenCalledTimes(1)
+    expect(generateEmbeddings).toHaveBeenCalledWith(['a summary of the conversation'])
+    expect(stats.processed).toBe(1)
+    const recorded = query.mock.calls.find(
+      ([sql]) => (sql as string).includes('INSERT INTO embeddings') && (sql as string).includes('summarize_model')
+    )
+    expect((recorded![1] as unknown[])[6]).not.toBeNull()
+  })
+
+  it('holds a message back for retry when summarization returns almost nothing', async () => {
+    withPending([pendingMessage({ content_text: 'a long conversation turn. '.repeat(400) })])
+    summarizeConversation.mockResolvedValue('too short')
+
+    const stats = await generatePendingEmbeddings()
+
+    // Nothing embedded and nothing marked — it stays pending rather than being
+    // stored against a summary that says nothing.
+    expect(generateEmbeddings).not.toHaveBeenCalled()
+    expect(stats.processed).toBe(0)
+    expect(stats.skipped).toBe(0)
+  })
+
+  it('counts a failed batch instead of aborting the run', async () => {
+    withPending([pendingMessage()])
+    upsertEmbeddings.mockRejectedValue(new Error('chroma is down'))
+
+    const stats = await generatePendingEmbeddings()
+
+    expect(stats.errors).toBe(1)
+    expect(stats.processed).toBe(0)
   })
 
   it('clears UNEMBEDDABLE rows for messages that have since been healed', async () => {
