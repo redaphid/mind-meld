@@ -368,7 +368,7 @@ const markSessionProcessed = async (
 export const AGGREGATE_BATCH_SIZE = 100;
 
 // Update session-level embeddings with summarization for long conversations
-// Now also re-embeds sessions where content_chars has grown
+// Now also re-embeds sessions where content_chars has changed in either direction
 export async function updateAggregateEmbeddings(): Promise<{
   sessionsUpdated: number;
   sessionsReembedded: number;
@@ -379,7 +379,8 @@ export async function updateAggregateEmbeddings(): Promise<{
 
   // Get sessions that need embedding:
   // 1. Sessions with no embedding yet
-  // 2. Sessions where content_chars > content_chars_at_embed (content has grown)
+  // 2. Sessions where content_chars differs from content_chars_at_embed
+  //    (content has changed — in EITHER direction)
   const sessions = await query<{
     id: number;
     external_id: string;
@@ -407,7 +408,13 @@ export async function updateAggregateEmbeddings(): Promise<{
        AND (s.ended_at IS NULL OR s.ended_at < NOW() - INTERVAL '30 minutes')  -- Defer still-active sessions: don't re-summarize a live conversation from scratch as it grows
        AND (
          e.id IS NULL  -- No embedding exists
-         OR s.content_chars > COALESCE(e.content_chars_at_embed, 0)  -- Content has grown
+         -- Difference, not growth (#93). content_chars_at_embed is a record of what
+         -- was embedded, not a high-water mark: a greater-than test never matched a
+         -- session whose content SHRANK (message deleted, session rewound, scaffolding
+         -- stripped), so Chroma kept serving a vector for text that no longer exists --
+         -- silently, and with no way back unless the session grew past its old size.
+         -- IS DISTINCT FROM is NULL-safe, so it covers a missing watermark too.
+         OR s.content_chars IS DISTINCT FROM e.content_chars_at_embed  -- Content changed
          OR COALESCE(s.content_chars, 0) = 0  -- content_chars not calculated yet
        )
      ORDER BY COALESCE(s.ended_at, s.started_at) DESC NULLS LAST  -- Newest first: recent sessions are the ones searches actually need
@@ -435,13 +442,21 @@ export async function updateAggregateEmbeddings(): Promise<{
         `session-${session.id}`,
       );
 
-      // If Chroma already has this embedding with sufficient content_chars,
+      // If Chroma already holds an embedding of exactly the content we have now,
       // just sync the Postgres record and skip the expensive summarize/embed
       if (chromaMetadata) {
         const chromaContentChars = chromaMetadata.content_chars as
           | number
           | undefined;
-        if (chromaContentChars && chromaContentChars >= session.content_chars) {
+        // Equality, not `>=` (#93). `>=` is the same growth-only assumption as the
+        // selection predicate above, at a second site — and this one sits DOWNSTREAM
+        // of it, so fixing only the query would not help: a shrunk session leaves
+        // Chroma holding the larger old count, `>=` short-circuits the re-embed the
+        // predicate just asked for, writes that stale count back as the watermark and
+        // leaves sessions.content_chars untouched. The row then comes back on the next
+        // pass, forever, making no progress and burning the whole drain budget.
+        // A count larger than ours means Chroma is stale, not sufficient.
+        if (chromaContentChars && chromaContentChars === session.content_chars) {
           // Record in Postgres so this session stops appearing in pending queries
           await query(
             `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed)
