@@ -52,7 +52,12 @@ export const useApi = (path, params, key) => {
       .then(data => setState({ data, error: null, loading: false }))
       .catch(err => {
         if (err.name === 'AbortError') return
-        setState({ data: null, error: err.message, loading: false })
+        // Keep whatever was last loaded. Views poll now, so a single failed
+        // refresh must not blank a screen that was working a second ago — the
+        // same reason the service worker serves a cached view when the tunnel
+        // drops. A view with no data yet still gets data: null and renders its
+        // error, because there is nothing else it could show.
+        setState(s => ({ data: s.data, error: err.message, loading: false }))
       })
 
     return () => controller.abort()

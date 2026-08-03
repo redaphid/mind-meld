@@ -199,13 +199,31 @@ const SourceLine = ({ source }) => html`
   </div>
 `
 
+// How often the live numbers refresh. The queue moves in the tens-to-hundreds
+// per minute, so a status read that only happens on navigation is stale within
+// seconds of opening the page — and this screen exists to answer "what is it
+// doing right now".
+const STATUS_REFRESH_MS = 10000
+
 export const OverviewView = () => {
   const status = useApi('/status')
   const activity = useApi('/api/activity', { days: 30 })
   const machines = useApi('/api/machines')
 
+  // Totals, embedding coverage, pending counts and the quarantine badge all
+  // come from /status, so refreshing it refreshes the whole screen. Activity is
+  // a 30-day rollup and machines change on a sync cycle; neither is worth a
+  // request every ten seconds.
+  useEffect(() => {
+    const id = setInterval(status.reload, STATUS_REFRESH_MS)
+    return () => clearInterval(id)
+  }, [status.reload])
+
   if (status.loading && !status.data) return html`<${Spinner} label="Reading status…" />`
-  if (status.error)
+  // Only surrender the screen when there is nothing to show. Once a refresh has
+  // succeeded even once, a later failure is reported in place (below) over the
+  // last known numbers rather than replacing them.
+  if (status.error && !status.data)
     return html`<${ErrorBox} error=${status.error} onRetry=${status.reload} />`
 
   const s = status.data
@@ -215,6 +233,12 @@ export const OverviewView = () => {
   const messages = Number(totals.messages ?? 0)
 
   return html`
+    ${status.error &&
+    html`<div class="m faint" style="margin-bottom:10px;font-size:12px">
+      <span style="color:var(--amber)">●</span>
+      <span>showing last known values — refresh failed: ${status.error}</span>
+    </div>`}
+
     <div class="stat-grid" style="margin-bottom:12px">
       <${Stat} n=${totals.sessions} label="Sessions" />
       <${Stat} n=${totals.messages} label="Messages" />

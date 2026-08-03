@@ -5,7 +5,7 @@
 // drops off the tunnel still shows the last state it saw instead of an error
 // page. Nothing that mutates — /mcp, /api/ingest — is ever cached.
 
-const VERSION = 'v9'
+const VERSION = 'v10'
 const SHELL_CACHE = `mindmeld-shell-${VERSION}`
 const DATA_CACHE = `mindmeld-data-${VERSION}`
 
@@ -59,6 +59,8 @@ self.addEventListener('activate', event => {
 const isData = url =>
   url.pathname.startsWith('/api/') || url.pathname === '/status' || url.pathname === '/logs'
 
+const isCode = url => url.pathname.endsWith('.js') || url.pathname.endsWith('.css')
+
 const networkFirst = async (request, cacheName) => {
   const cache = await caches.open(cacheName)
   try {
@@ -104,9 +106,20 @@ self.addEventListener('fetch', event => {
     return
   }
 
-  // The shell itself is revalidated on every load: a stale index.html would pin
-  // the app to an API contract the server may no longer speak.
-  if (request.mode === 'navigate' || url.pathname === '/index.html') {
+  // The shell is revalidated on every load: a stale index.html would pin the app
+  // to an API contract the server may no longer speak.
+  //
+  // That has to include the code, not just the document that loads it. There is
+  // no build step here, so filenames never change and index.html is byte-identical
+  // across deploys — it has no way to ask for a newer overview.js. Serving modules
+  // cache-first therefore made every deploy invisible until the *second* load, and
+  // on an installed PWA that is rarely closed the second load can be days away.
+  // That is how a feature shipped and verified on the server can still be missing
+  // from a phone. Offline is unaffected: networkFirst falls back to the cached copy,
+  // which is what keeps the last state readable when the tunnel drops.
+  //
+  // Icons and the manifest stay cache-first — a stale icon breaks nothing.
+  if (request.mode === 'navigate' || url.pathname === '/index.html' || isCode(url)) {
     event.respondWith(networkFirst(request, SHELL_CACHE))
     return
   }
