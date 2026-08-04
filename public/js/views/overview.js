@@ -3,20 +3,15 @@
 // machines are feeding the index, and any sync error worth acting on.
 
 import { html, useState, useEffect } from 'preact'
-import { useApi, apiGet } from '../api.js'
+import { useApi, apiGet, apiSend } from '../api.js'
 import { navigate } from '../router.js'
 import { Card, Stat, Spinner, ErrorBox, Pill, Bar } from '../ui.js'
 import { fmtNum, fmtExact, timeAgo, sourceLabel, pct } from '../util.js'
 
-// POST /api/sync answers 202 when it starts a run and 409 when one was already
-// in flight — neither is a failure, and both carry the run's state, so this
-// only treats an explicit error body as one.
-const requestRun = async () => {
-  const res = await fetch('/api/sync', { method: 'POST', headers: { accept: 'application/json' } })
-  const body = await res.json()
-  if (body.status === 'error') throw new Error(body.error)
-  return body
-}
+// POST /api/sync answers 202 when it starts a run, and 409 when one was already
+// in flight or ingestion is standing down. None of those is a failure and all
+// of them carry the state worth showing, which is exactly what apiSend assumes.
+const requestRun = () => apiSend('/api/sync')
 
 const runSummary = run => {
   if (run.error) return null
@@ -48,6 +43,9 @@ const fmtDuration = seconds => {
 // and while it runs the message rate is legitimately zero. That is healthy work
 // — `kind: 'good'` — not the amber the message rate alone used to earn it.
 const QUEUE_STATES = {
+  // Stopped, and stopped on purpose. The one queue state that is a decision
+  // rather than a measurement, so it gets the neutral pill: nothing is wrong.
+  'standing-down': { label: 'Standing down', kind: '' },
   'caught-up': { label: 'Caught up', kind: 'good' },
   draining: { label: 'Draining', kind: 'good' },
   summarizing: { label: 'Summarizing', kind: 'good' },
@@ -94,6 +92,8 @@ const QueueThroughput = () => {
           ? 'no messages queued to embed'
           : `no messages embedded in the last ${w.minutes}m`}</span
       >`}
+      ${state === 'standing-down' &&
+      html`<span>stopped by request — the next scheduled cycle picks it back up</span>`}
       ${state === 'stalled' &&
       html`<span>nothing embedded or summarized in the last ${w.minutes}m</span>`}
       ${etaText && state === 'draining' &&
@@ -113,18 +113,42 @@ const QueueThroughput = () => {
   `
 }
 
-// Drains pending embeddings on demand instead of waiting out the sync interval.
-// The run is detached server-side and takes minutes, so this polls rather than
-// holding a request open, and it picks up a run someone else started too.
+const clock = seconds => {
+  const s = Math.max(0, Math.round(seconds))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+// Drains pending embeddings on demand instead of waiting out the sync interval,
+// and stands them down on demand too.
+//
+// The stop button is the one that needs explaining. Ingestion is the heaviest
+// thing this machine does — the summarization pass holds the GPU for minutes at
+// a time — so starting a game or a ComfyUI render while the queue is grinding
+// means fighting it for the card. This hands it back without touching a
+// container, and deliberately without becoming an off switch: it stops the pass
+// in flight and expires by itself, so the next scheduled cycle runs as normal
+// whether or not anyone remembers to come back here.
+//
+// Both halves poll rather than holding a request open: a run is detached
+// server-side and takes minutes, and either state can be changed by someone
+// else, from another device.
 const IngestionRunner = ({ onFinished }) => {
   const [run, setRun] = useState(null)
+  const [standDown, setStandDown] = useState(null)
   const [error, setError] = useState(null)
   const [pressing, setPressing] = useState(false)
 
+  // One read answers both questions: /api/sync carries the run and the
+  // stand-down state together.
+  const read = async () => {
+    const body = await apiGet('/api/sync')
+    setRun(body.run)
+    setStandDown(body.standDown ?? null)
+    return body
+  }
+
   useEffect(() => {
-    apiGet('/api/sync')
-      .then(body => setRun(body.run))
-      .catch(() => {}) // an older server without this route just shows the button
+    read().catch(() => {}) // an older server without this route just shows the button
   }, [])
 
   useEffect(() => {
@@ -132,9 +156,8 @@ const IngestionRunner = ({ onFinished }) => {
     let live = true
     const id = setInterval(async () => {
       try {
-        const body = await apiGet('/api/sync')
+        const body = await read()
         if (!live) return
-        setRun(body.run)
         if (!body.run.running) onFinished?.()
       } catch (e) {
         if (live) setError(e.message)
@@ -146,11 +169,34 @@ const IngestionRunner = ({ onFinished }) => {
     }
   }, [run?.running])
 
-  const start = async () => {
+  // The countdown ticks locally off the server's own `secondsRemaining` rather
+  // than off `until` against the browser's clock — a phone whose clock is a
+  // minute out would otherwise show a minute that never arrives, or one that
+  // ends early. Reaching zero re-reads instead of assuming: the window may have
+  // been extended, or cleared, from somewhere else.
+  useEffect(() => {
+    if (!standDown?.standingDown) return
+    const id = setInterval(() => {
+      setStandDown(s => {
+        if (!s?.standingDown) return s
+        const secondsRemaining = s.secondsRemaining - 1
+        if (secondsRemaining <= 0) {
+          read().catch(() => {})
+          return { ...s, secondsRemaining: 0 }
+        }
+        return { ...s, secondsRemaining }
+      })
+    }, 1000)
+    return () => clearInterval(id)
+  }, [standDown?.standingDown, standDown?.until])
+
+  const press = async fn => {
     setError(null)
     setPressing(true)
     try {
-      setRun((await requestRun()).run)
+      const body = await fn()
+      if (body.run) setRun(body.run)
+      if (body.standDown !== undefined) setStandDown(body.standDown)
     } catch (e) {
       setError(e.message)
     } finally {
@@ -159,22 +205,55 @@ const IngestionRunner = ({ onFinished }) => {
   }
 
   const running = !!run?.running
+  const standing = !!standDown?.standingDown
 
   return html`
     <div style="margin-top:12px">
-      <button class="btn sm primary" disabled=${running || pressing} onClick=${start}>
+      <button
+        class="btn sm primary"
+        disabled=${running || pressing || standing}
+        onClick=${() => press(requestRun)}
+      >
         ${running ? 'Ingesting…' : 'Run ingestion now'}
       </button>
+      ${!standing &&
+      html`<button
+        class="btn sm"
+        style="margin-left:8px"
+        disabled=${pressing}
+        onClick=${() => press(() => apiSend('/api/pause', 'POST', { reason: 'stood down from the dashboard' }))}
+        title="Stops the pass that is running and hands the GPU back. The next scheduled cycle runs as normal."
+      >
+        Stop until next cycle
+      </button>`}
+      ${standing &&
+      html`<button
+        class="btn sm"
+        style="margin-left:8px"
+        disabled=${pressing}
+        onClick=${() => press(() => apiSend('/api/pause', 'DELETE'))}
+      >
+        Resume now
+      </button>`}
       ${running &&
       html`<span class="faint" style="margin-left:10px;font-size:13px">
         started ${timeAgo(run.startedAt)} — embedding pending messages
       </span>`}
       ${!running &&
+      !standing &&
       run?.finishedAt &&
       !run.error &&
       html`<span class="faint" style="margin-left:10px;font-size:13px">
         last run ${timeAgo(run.finishedAt)}: ${runSummary(run)}
       </span>`}
+      ${standing &&
+      html`<div class="m" style="margin-top:10px;font-size:13px">
+        <${Pill}>standing down<//>
+        <span class="faint">
+          stopping in-flight work — clears in ${clock(standDown.secondsRemaining)}, and the next
+          scheduled cycle runs as normal
+        </span>
+      </div>`}
       ${!running &&
       run?.error &&
       html`<div class="mono" style="color:var(--red);margin-top:8px;overflow-wrap:anywhere">

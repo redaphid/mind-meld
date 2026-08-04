@@ -76,6 +76,161 @@ Reaching either service through the Cloudflare tunnel requires that hostname in
 and `mcp` read the same variable). There is no authentication — see the
 trust-model note in `docs/openapi.yaml`.
 
+## Standing ingestion down (getting the GPU back)
+
+Embedding and summarization hold an Ollama slot for minutes at a time. When the
+same GPU is wanted for something else — a game, a ComfyUI render — the overview
+screen has a **Stop until next cycle** button next to *Run ingestion now*, and
+the same thing is `POST /api/pause` (`DELETE /api/pause` to resume immediately).
+
+It is deliberately **not** a pause switch:
+
+- The signal is a short deadline in `sync_control` (`init-db/022-sync-pause.sql`).
+  The queue does not run in the process serving the UI — it runs in the sync
+  workers, in their own containers — so Postgres is the only channel between the
+  button and the work.
+- Workers act on it at their next checkpoint: between embedding batches, before
+  each long-message summarization, and between summarized sessions. Whatever was
+  in flight is left pending, never half-written. An LLM call already issued
+  finishes first, so the stop lands in seconds to about a minute, not instantly.
+- The window is minutes (default 15, clamped 1–240) against an interval of an
+  hour, so **the next scheduled cycle runs as normal** with nobody having to
+  switch anything back on. The worst case of a forgotten press, or a worker
+  killed mid-pass, is one skipped cycle — it cannot leave the index off.
+- A stood-down cycle exits **0**, not 1. It is a button someone pressed, not a
+  failed run, and the container loop must not page anyone for it. The run summary
+  says `Stood down` so a thin cycle still explains itself.
+- The dashboard reports the queue as `standing-down`, which outranks every
+  rate-derived verdict — same class of fix as #109/#111: a queue stopped on
+  purpose must never read as `stalled`.
+
+Reading `sync_control` **fails open**. Migrations are applied by the `mcp`
+service on startup, so a sync worker can legitimately meet a database that has
+not got the table yet; a switch that cannot be read is not a switch that says
+stop.
+
+## Diagnosing throughput (do not trust `pending` on its own)
+
+`/status` and `/api/throughput` can report a five-figure backlog, a rate near
+zero and an ETA years out while the message queue is in fact **fully caught
+up**. Observed 2026-08-03: `pending: 32339`, `0.07 msg/min`, `state: draining`,
+ETA 2027-10-27 — while the embedder's own predicate returned **0** rows of real
+work. Nothing was slow; the number was wrong.
+
+### One definition of "pending" — `src/embeddings/pending.ts`
+
+This was the bug. The **counter** (`queue.pending` in `src/mcp/throughput.ts`,
+`pendingEmbeddings.messages` on `/status`) asked only: `content_text` is
+non-null, longer than 10 chars, no `convo-messages` row. The **embedder**
+(`getMessagesToEmbed`) additionally required *all* of:
+
+- `m.role <> 'tool'`
+- `s.deleted_at IS NULL` — not in a deleted session
+- `s.is_automated = false`
+- no `UNEMBEDDABLE` row — the marker written for noise, and for NaN-blocked
+  text past its retry budget
+
+Everything in that gap was **counted forever and worked never**. Of the 32,339
+above: 30,961 noise-marked `UNEMBEDDABLE`, 1,376 in deleted sessions, 2 tool
+messages — summing to exactly the reported backlog. Because the residue never
+shrank, `state` also stuck on `draining` and the ETA came from arrival noise.
+
+The predicate now lives in **one place**, `src/embeddings/pending.ts`, and both
+sides import it: `getMessagesToEmbed` / `updateAggregateEmbeddings` select the
+rows, `throughput.ts` and `/status` count them. A number the UI shows is the
+number a worker acts on, and that holds because it is the same SQL — not
+because two copies were checked against each other.
+
+**Do not restate either predicate.** If a new screen needs a pending count,
+import `pendingMessagesCount` / `pendingSessionsCount`; if it needs the rows,
+import `embeddableMessages` / `embeddableSessions`. The failure mode is silent
+and takes five figures to notice.
+
+Sessions carry one deliberate asymmetry worth knowing: a session that ended
+less than 30 minutes ago is excluded on **both** sides, because re-summarizing
+a live conversation as it grows is waste. It is deferred work, not queued work.
+
+To check the queue independently of any application code:
+
+```sql
+-- real remaining message work; 0 means caught up no matter what /status says
+SELECT COUNT(*) FROM messages m
+JOIN sessions s ON m.session_id = s.id
+LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'
+LEFT JOIN embeddings skip ON skip.message_id = m.id AND skip.chroma_collection = 'UNEMBEDDABLE'
+WHERE m.content_text IS NOT NULL AND LENGTH(m.content_text) > 10
+  AND m.role <> 'tool' AND s.deleted_at IS NULL AND s.is_automated = false
+  AND e.id IS NULL AND skip.id IS NULL;
+```
+
+Run it with `docker exec mindmeld-postgres psql -U mindmeld -d conversations`.
+A useful second question is *what shape* the residue is — a backlog whose
+"short, fast path" bucket averages ~80 chars is noise, not work.
+
+### The queue is global and nothing claims a row
+
+`runPendingEmbeddings` → `generatePendingEmbeddings` / `updateAggregateEmbeddings`
+select from a **global** queue with no `FOR UPDATE SKIP LOCKED` and no advisory
+lock anywhere in `src/embeddings/batch.ts`, `src/mcp/sync-run.ts` or
+`src/sync/orchestrator.ts`. Every process that runs a sync drains the same
+rows, so **workers duplicate each other's LLM work**. In a default deployment
+that is at least three: the `mcp` service (the HTTP/UI server runs the queue
+too, and can be the single largest GPU consumer), the `sync` worker, and any
+per-machine sync loop — which runs a *full global* pass once per machine
+folder, not a pass scoped to that machine.
+
+Measured over 90 minutes: 339 chunk summarization passes to cover 250 needed
+chunks (**1.36x redundancy**); one 8-chunk session received 24 passes; 37 of 45
+sessions were worked by more than one worker concurrently.
+
+When two workers land on the same session, the collision **destroys completed
+work**: `persistSessionChunks` upserts the `session_chunks` row with
+`ON CONFLICT DO UPDATE`, then inserts that chunk's `embeddings` row with a
+**bare INSERT**, which violates the unique `embeddings_session_chunk_idx`
+(`session_chunk_id, chroma_collection`). The loser's minutes of LLM output are
+thrown away and logged as `Failed to update session N embedding: duplicate
+key`. The session-level write in `batch.ts` does the same operation correctly
+with `ON CONFLICT DO UPDATE` — the chunk path just lacks it.
+
+Find duplicated work from the `logs` table:
+
+```sql
+WITH s AS (
+  SELECT machine || '/' || service AS who,
+         substring(message from 'for session ([0-9]+)') AS sess
+  FROM logs
+  WHERE message LIKE 'Summarizing chunk%'
+    AND logged_at > now() - interval '90 minutes'
+)
+SELECT sess, COUNT(DISTINCT who) AS workers, COUNT(*) AS chunk_passes
+FROM s WHERE sess IS NOT NULL
+GROUP BY sess HAVING COUNT(DISTINCT who) > 1
+ORDER BY chunk_passes DESC;
+```
+
+### Why summarization is genuinely slow
+
+Session summarization is the real cost, and it is legitimately expensive: a
+chunk pass measures 18–110s, a long session is ~8 chunks, so 5–10 minutes per
+session — serialized on one GPU shared with every other tenant on the host.
+`nvidia-smi` plus Ollama's `/api/ps` tell you whether the models resident in
+VRAM are even yours: a chat model you do not use sitting in VRAM means someone
+else is competing for the card. ~36 sessions/hour is a realistic ceiling, and
+duplicate work comes straight off it.
+
+### Traps that have cost real time
+
+- `OLLAMA_EMBEDDING_URL` (a second, flash-off Ollama on `:21434`) was removed in
+  1.7.0 — everything goes through `OLLAMA_URL`. It lingered in
+  `docker-compose.yml` long after the docs said it was gone, and cost debugging
+  time as a suspect. If an old `.env` or systemd unit still sets it, it is
+  ignored; it cannot cause an embedding problem.
+- Stack traces distinguish the workers: `/$bunfs/root/mindmeld` is the
+  Bun-compiled `sync` image, `/app/src/...` is the tsx-based `mcp` image. Both
+  appearing for one session is proof of concurrent duplicate work.
+- A summarizing queue looks stalled to message-rate metrics; see #109/#111 and
+  the ranked verdicts in `throughput.ts`.
+
 ## When sync cannot process a record
 
 Nothing is dropped. A record that fails to parse or insert goes to
@@ -200,6 +355,45 @@ Deploys are **semver-driven** — CI only builds images when `package.json`'s `v
 4. On the host: `docker compose pull && docker compose up -d`. Migrations auto-apply on `mcp` startup (`src/db/migrations.ts`).
 
 `/deploy` (`.claude/commands/deploy.md`) automates the push → tag → CI-watch → pull → restart, but it reads the existing version and does **not** bump it — edit `package.json` first.
+
+## Shared definitions over restated ones
+
+**When the same rule lives in two places, extract it into one — take the obvious
+refactor rather than leaving copies to be kept in step by hand.** Duplicated
+rules drift, and they drift silently: nothing fails, the two answers simply stop
+agreeing and the wrong one ends up on a screen.
+
+Take the refactor when you see:
+
+- the same SQL predicate in a thing that *selects* rows and a thing that
+  *counts* or *displays* them
+- the same magic number, threshold, model name, or status string in more than
+  one module
+- a literal repeated between code and its test, so the test would follow the
+  code into being wrong
+- a list that must match another list (assets, collections, migrations)
+
+The loudest signal: **if you are about to write a comment asserting that two
+pieces of code agree, make them the same piece of code instead.** That comment
+is a promise nothing enforces. Where sharing genuinely isn't possible, enforce
+the agreement mechanically — a test that hashes both sides — the way
+`quality/service-worker-shell.json` pins the service-worker `SHELL` list.
+
+What it costs when skipped, from this repo:
+
+- `src/embeddings/pending.ts` exists because "pending" was written twice, and
+  the copies diverged into a dashboard advertising a 32,339-message backlog and
+  an ETA 14 months out against **zero** real work. The comment above
+  `getThroughput` had claimed for months that the two predicates "deliberately
+  match". They never did.
+
+Two caveats, so this doesn't become cargo cult:
+
+- Keep the *reasoning* with the definition, not at the call sites — one place to
+  read, one place to update.
+- Don't merge things that merely look alike. Two predicates that answer
+  different questions should stay separate, with a comment saying why they
+  resemble each other and must not be unified.
 
 ## No Truncation Policy
 

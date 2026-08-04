@@ -32,9 +32,9 @@ export type SearchParams = {
   likeProject?: string[]
   unlikeProject?: string[]
   includeAutomated?: boolean
-  // A session with no summary has no real title and no session-tier vector, so
-  // it can only ever arrive as an untriageable row. Withheld by default; pass
-  // true to reach one deliberately (issue #95).
+  // Deprecated, no-op (issue #119). Unsummarized sessions are searched by
+  // default now, so there is nothing left for this to let in. Still accepted so
+  // existing callers do not break on an argument that used to matter.
   includeUnsummarized?: boolean
   dataClass?: string[]
 }
@@ -95,17 +95,24 @@ export type MatchedTier = 'session' | 'chunk' | 'message'
 
 export type SearchCursor = { chunk_index?: number; message_id?: number }
 
+// Search alone can answer 'snippet': it is the only surface that has a matched
+// region to put where a missing title would go (issue #119). resolveTitle still
+// returns just the three answers it can honestly derive from a session row, so
+// the shared TitleSource is left as it is rather than widened for everyone.
+export type SearchTitleSource = TitleSource | 'snippet'
+
 export type SearchResult = {
   session_id: number
   project_name: string
   project_path: string
   source: string
   data_class: string
-  // Null when the session has neither a source-supplied title nor a summary.
-  // `title_source` says which one this is, so a consumer can tell a real title
-  // from a derived one instead of guessing (issue #95).
+  // Null when the session has neither a source-supplied title nor a summary nor
+  // a matched region to stand in for one. `title_source` says which of those
+  // this is, so a consumer can tell a real title from a derived one instead of
+  // guessing (issue #95).
   title: string | null
-  title_source: TitleSource
+  title_source: SearchTitleSource
   date: Date
   score: number
   matched_tier: MatchedTier
@@ -332,6 +339,32 @@ const resolveTitleFields = (row: { title: string | null; summary: string | null 
   return { title, title_source: titleSource }
 }
 
+// Now that an unsummarized session can be returned (issue #119), a hit can reach
+// the caller with no title at all — and a row headed by nothing but an id cannot
+// be triaged. The matched region fills that slot: it is the reason the row is
+// here, so it is the most useful thing to show in place of a title.
+//
+// This is not #95 coming back. #95 was a *stored* title fabricated from the
+// first 200 characters of the first message, unrelated to any query and
+// indistinguishable from a real title once written. This is the text that
+// actually matched, computed per query, never persisted, and labelled
+// `title_source: 'snippet'` so no consumer can mistake it for a topic anyone
+// wrote. When there is no snippet either, the answer stays an honest null.
+//
+// The highlight markers are dropped here and kept in `snippet`: a renderer that
+// emphasises the title would otherwise nest `**` inside `**` and break both.
+const titleFromSnippet = (
+  resolved: { title: string | null; title_source: SearchTitleSource },
+  snippet: string | null
+): { title: string | null; title_source: SearchTitleSource } => {
+  // Rebuilt rather than returned as-is: callers spread this over a result, and
+  // handing back the argument object would carry every other field of it along.
+  const unchanged = { title: resolved.title, title_source: resolved.title_source }
+  if (resolved.title !== null || snippet === null) return unchanged
+  const plain = snippet.replaceAll('**', '').trim()
+  return plain.length > 0 ? { title: plain, title_source: 'snippet' } : unchanged
+}
+
 const baseResult = (s: SessionRow, score: number, tier: MatchedTier): SearchResult => ({
   session_id: s.id,
   project_name: s.project_name,
@@ -345,14 +378,23 @@ const baseResult = (s: SessionRow, score: number, tier: MatchedTier): SearchResu
   snippet: null,
 })
 
+// No summary filter here, deliberately (issue #119). Withholding unsummarized
+// sessions was meant to keep untriageable rows out, on the reasoning that such a
+// session has no title and no session-tier vector — but the second half of that
+// undoes the first: with no session-tier vector it can never reach the session
+// arm at all, so the filter only ever removed *message*-tier hits. Those are the
+// most triageable rows search produces: a query-highlighted snippet and a
+// cursor.message_id that opens the thread at the match. On the live index it hid
+// 60% of sessions and 43,735 already-embedded messages, and it hid them hardest
+// exactly when the summarizer was behind — i.e. when search was most needed to
+// explain why.
 const passesFilters = (
   session: SessionRow,
-  params: { source?: string; projectOnly?: boolean; includeUnsummarized?: boolean },
+  params: { source?: string; projectOnly?: boolean },
   sinceDate: Date | null,
   projectIds: number[],
   dataClasses: string[] | null
 ) => {
-  if (!params.includeUnsummarized && session.summary === null) return false
   if (dataClasses && !dataClasses.includes(session.data_class)) return false
   if (params.source && session.source_name !== params.source) return false
   if (sinceDate && session.started_at < sinceDate) return false
@@ -489,9 +531,10 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       `($3::timestamptz IS NULL OR s.started_at >= $3)`,
       `($4::boolean OR s.is_automated = false)`,
     ]
-    // Same rule as the semantic arms, applied in SQL: a session with no summary
-    // is not surfaced unless the caller asks for one.
-    if (!params.includeUnsummarized) conditions.push(`s.summary IS NOT NULL`)
+    // Same rule as the semantic arms: no `s.summary IS NOT NULL` here either.
+    // This arm is where it cost the most — every hit it produces is message-tier
+    // with a ts_headline window, so the rows it dropped were the ones carrying
+    // the literal matched text (issue #119).
     const values: unknown[] = [params.query, params.source ?? null, sinceDate, includeAutomated]
     let nextParam = 5
 
@@ -587,7 +630,10 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
 
   const results = Array.from(hitBySession.values()).map((hit) => {
     const score = (fused.get(hit.result.session_id) ?? 0) + (inProject.has(hit.result.session_id) ? PROJECT_BOOST : 0)
-    return { ...hit.result, score, snippet: buildSnippet(hit.rawSnippet, hit.headline) }
+    // The snippet is only known here — the FTS arm can upgrade an earlier arm's
+    // hit with its headline — so the title falls back to it here too.
+    const snippet = buildSnippet(hit.rawSnippet, hit.headline)
+    return { ...hit.result, score, snippet, ...titleFromSnippet(hit.result, snippet) }
   })
   results.sort((a, b) => b.score - a.score)
   return results.slice(0, limit)
@@ -605,16 +651,28 @@ export const formatSearchResults = (results: SearchResult[], projectIds: number[
         : r.cursor?.message_id != null
           ? `\n   Cursor: message ${r.cursor.message_id}`
           : ''
-      // No title is an honest answer: the session has no source-supplied title
-      // and has not been summarized yet. Naming the session and saying so beats
-      // handing a triaging LLM an instruction fragment as if it were a topic.
-      const heading = r.title ?? `Session ${r.session_id} (no title — not summarized yet)`
-      return `${i + 1}. **${heading}**${projectLabel}
+      // An unsummarized session has no title, and search no longer withholds it
+      // (issue #119). What it does have is the matched text, so that takes the
+      // headline slot — the hit stays triageable at a glance instead of reading
+      // as a bare id. It keeps its highlight markers and is deliberately *not*
+      // bolded like a real title, and it says what it is: a matched line is
+      // evidence, not a topic, and presenting a message fragment as a topic is
+      // precisely the damage #95 undid.
+      //
+      // With no snippet either, naming the session and admitting there is no
+      // title beats inventing one.
+      const showsSnippetAsTitle = r.title_source === 'snippet' && r.snippet !== null
+      const heading = showsSnippetAsTitle
+        ? `${r.snippet} — _matched text; session not summarized yet_`
+        : `**${r.title ?? `Session ${r.session_id} (no title — not summarized yet)`}**`
+      // Printing the snippet again under a headline that already is the snippet
+      // is noise in a surface whose whole promise is one terse line per hit.
+      const snippetLine = showsSnippetAsTitle ? '' : `\n   ${r.snippet ?? '(no snippet)'}`
+      return `${i + 1}. ${heading}${projectLabel}
    Session ID: ${r.session_id}
    Project: ${r.project_name} (${r.source}, ${r.data_class})
    Date: ${r.date.toISOString().split('T')[0]}
-   Score: ${r.score.toFixed(3)} | Matched: ${r.matched_tier}${cursor}
-   ${r.snippet ?? '(no snippet)'}`
+   Score: ${r.score.toFixed(3)} | Matched: ${r.matched_tier}${cursor}${snippetLine}`
     })
     .join('\n\n')
 

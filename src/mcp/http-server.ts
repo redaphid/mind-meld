@@ -17,6 +17,14 @@ import { getSessionDigest, getMessages, getMessageById } from './session.js'
 import { createMcpServer } from './tools.js'
 import { getSyncStatus } from '../sync/orchestrator.js'
 import { startSyncRun, getSyncRunState } from './sync-run.js'
+import { pendingMessagesCount, pendingSessionsCount } from '../embeddings/pending.js'
+import {
+  readStandDown,
+  standDown,
+  resumeSync,
+  clampMinutes,
+  DEFAULT_STAND_DOWN_MINUTES,
+} from '../sync/stand-down.js'
 import { getThroughput, clampWindow } from './throughput.js'
 import { getCollectionStats } from '../db/chroma.js'
 import { config } from '../config.js'
@@ -198,21 +206,23 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
       LIMIT 10
     `)
 
-    const pendingMessages = await query<{ count: string }>(`
-      SELECT COUNT(*) as count FROM messages m
-      LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'
-      WHERE m.content_text IS NOT NULL AND LENGTH(m.content_text) > 10 AND e.id IS NULL
-    `)
+    // Both counts use the embedder's own predicate (src/embeddings/pending.ts),
+    // so what this screen calls pending is what a worker will actually pick up.
+    // Counting anything looser advertised a 32k backlog against zero real work.
+    const pendingMessagesQuery = pendingMessagesCount()
+    const pendingMessages = await query<{ count: string }>(
+      pendingMessagesQuery.sql,
+      pendingMessagesQuery.params,
+    )
 
-    const pendingSessions = await query<{ count: string }>(`
-      SELECT COUNT(*) as count FROM sessions s
-      LEFT JOIN embeddings e ON e.chroma_collection = 'convo-sessions' AND e.chroma_id = 'session-' || s.id::text
-      WHERE s.deleted_at IS NULL
-        AND s.message_count > 0
-        AND (e.id IS NULL OR s.content_chars > COALESCE(e.content_chars_at_embed, 0))
-    `)
+    const pendingSessionsQuery = pendingSessionsCount(config.chroma.collections.sessions)
+    const pendingSessions = await query<{ count: string }>(
+      pendingSessionsQuery.sql,
+      pendingSessionsQuery.params,
+    )
 
     const quarantined = await countPending()
+    const standDownState = await readStandDown()
 
     const latestSession = await query<{
       started_at: string
@@ -261,6 +271,8 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
         sessions: parseInt(pendingSessions.rows[0]?.count ?? '0', 10),
       },
       quarantined,
+      // Why the queue may be sitting still on purpose.
+      standDown: standDownState,
       chroma: { collections: chromaCollections },
       latestSession: latest
         ? {
@@ -504,6 +516,10 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
       cwd,
       projectOnly: boolParam(req.query.projectOnly),
       includeAutomated: boolParam(req.query.includeAutomated),
+      // Deprecated and inert (issue #119) — still forwarded rather than dropped
+      // at the door, so a caller that sends it gets the same answer as before
+      // instead of a 400 on an argument that used to be required to see half
+      // the index. /api/sessions below is a different filter; it still applies.
       includeUnsummarized: boolParam(req.query.includeUnsummarized),
       dataClass: dataClass?.length ? dataClass : undefined,
     })
@@ -639,7 +655,57 @@ app.get('/api/throughput', apiRoute('Throughput', async (req, res) => {
 // is read back from GET /api/sync. A press while one is already running is not
 // an error the caller made — 409 carries the running run's state so the UI can
 // just show it.
+// Stand ingestion down: stop the pass that is running and let the next
+// scheduled cycle start normally. This is the "I want the GPU back" button —
+// the embedding and summarization passes hold an Ollama slot for minutes, and
+// they run in the sync workers, so the signal goes through Postgres and the
+// workers act on it at their next checkpoint (a batch, or a session).
+//
+// Deliberately time-boxed, never indefinite. `minutes` is clamped to
+// 1..MAX_STAND_DOWN_MINUTES and defaults to a window long enough to stop the
+// pass in flight but far shorter than the sync interval, so nobody can leave
+// the index switched off by forgetting about it.
+app.post('/api/pause', apiRoute('Stand down', async (req, res) => {
+  const minutes = clampMinutes(req.body?.minutes ?? DEFAULT_STAND_DOWN_MINUTES)
+  const state = await standDown(minutes, typeof req.body?.reason === 'string' ? req.body.reason : null)
+  res.json({
+    status: 'ok',
+    standDown: state,
+    message:
+      `Ingestion is standing down for ${minutes} minute${minutes === 1 ? '' : 's'}. ` +
+      'The pass in flight stops at its next checkpoint; the next scheduled cycle runs as normal.',
+  })
+}))
+
+// Back to work now, rather than waiting out the window.
+app.delete('/api/pause', apiRoute('Resume', async (_req, res) => {
+  res.json({
+    status: 'ok',
+    standDown: await resumeSync(),
+    message: 'Ingestion resumed. The next cycle runs on schedule; press "Run ingestion now" to start one immediately.',
+  })
+}))
+
+app.get('/api/pause', apiRoute('Stand down state', async (_req, res) => {
+  res.json({ status: 'ok', standDown: await readStandDown() })
+}))
+
 app.post('/api/sync', apiRoute('Sync run', async (_req, res) => {
+  // Starting a drain during a stand-down would immediately stop itself at the
+  // first checkpoint, which reads as a button that silently does nothing. Say
+  // so instead, and hand back the state the UI needs to offer "resume".
+  const standing = await readStandDown()
+  if (standing.standingDown) {
+    res.status(409).json({
+      status: 'ok',
+      started: false,
+      run: getSyncRunState(),
+      standDown: standing,
+      message: 'Ingestion is standing down — resume it first to run a pass now.',
+    })
+    return
+  }
+
   const { started, state } = startSyncRun()
   res.status(started ? 202 : 409).json({
     status: 'ok',
@@ -651,8 +717,10 @@ app.post('/api/sync', apiRoute('Sync run', async (_req, res) => {
   })
 }))
 
+// Carries the stand-down state alongside the run so the UI needs one poll, not
+// two, to answer "is it working and is it allowed to be".
 app.get('/api/sync', apiRoute('Sync run state', async (_req, res) => {
-  res.json({ status: 'ok', run: getSyncRunState() })
+  res.json({ status: 'ok', run: getSyncRunState(), standDown: await readStandDown() })
 }))
 
 app.post('/api/ingest', async (req: any, res: any) => {

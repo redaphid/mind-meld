@@ -15,6 +15,7 @@ const result = (over: Partial<FullSyncResult> = {}): FullSyncResult => ({
   },
   history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
   embeddings: { messagesEmbedded: 100, sessionsUpdated: 5 },
+  stoodDown: false,
   errors: [],
   ...over,
 });
@@ -76,6 +77,25 @@ describe('buildRunReport summary', () => {
       result({ history: { entries: 40, malformedLines: 2, invalidTimestamps: 1 } })
     ).lines.join('\n');
     expect(text).toContain('History: 40 entries (2 malformed, 1 unusable timestamps)');
+  });
+
+  // A stand-down is a button someone pressed, not a fault. If it exited
+  // nonzero, the container loop around `mindmeld sync` would report every
+  // deliberate stop as a failing run — turning the one control that exists for
+  // relaxing the queue into a source of alerts.
+  it('exits zero when the cycle stood down, and says so', () => {
+    const report = buildRunReport(
+      result({ stoodDown: true, embeddings: { messagesEmbedded: 12, sessionsUpdated: 0 } })
+    );
+    expect(report.exitCode).toBe(0);
+    const text = report.lines.join('\n');
+    expect(text).toContain('Stood down');
+    expect(text).toContain('next scheduled cycle');
+  });
+
+  // A stand-down explains a thin run; it must not excuse a broken one.
+  it('still exits nonzero when a stood-down cycle also recorded an error', () => {
+    expect(buildRunReport(result({ stoodDown: true, errors: ['boom'] })).exitCode).toBe(1);
   });
 
   // Errors were previously only visible as a count in logs nobody read; the

@@ -30,6 +30,33 @@ export const apiGet = async (path, params, signal) => {
   return body
 }
 
+// Writes: POST/DELETE against the same surface.
+//
+// Unlike apiGet this does not treat a non-2xx status as failure by itself. The
+// mutating routes answer 409 for states that are perfectly normal and carry
+// exactly the information the caller needs — "a run is already in flight",
+// "ingestion is standing down" — and each of those bodies is `status: 'ok'`. So
+// the body's own verdict decides, and only an explicit error (or a response
+// that is not JSON at all) throws.
+export const apiSend = async (path, method = 'POST', body) => {
+  const res = await fetch(path, {
+    method,
+    headers: { accept: 'application/json', ...(body ? { 'content-type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  const text = await res.text()
+
+  let parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    throw new Error(`${res.status} ${res.statusText}: ${text.slice(0, 200)}`)
+  }
+
+  if (parsed.status === 'error') throw new Error(parsed.error ?? `${res.status} ${res.statusText}`)
+  return parsed
+}
+
 // key: any serialisable value. Changing it refetches; a null key means "not
 // ready yet", which keeps a view from firing a request with missing params.
 export const useApi = (path, params, key) => {

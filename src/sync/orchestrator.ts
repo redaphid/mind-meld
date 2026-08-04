@@ -3,6 +3,7 @@ import { generatePendingEmbeddings, updateAggregateEmbeddings, AGGREGATE_BATCH_S
 import { ensureEmbeddingModel } from '../embeddings/ollama.js';
 import { ensureSummarizeModel } from '../embeddings/summarize.js';
 import { query } from '../db/postgres.js';
+import { shouldStandDown, STAND_DOWN_NOTICE } from './stand-down.js';
 
 const MAX_AGGREGATE_DRAIN_MS = 50 * 60 * 1000;
 
@@ -26,6 +27,10 @@ export interface FullSyncResult {
     messagesEmbedded: number;
     sessionsUpdated: number;
   };
+  // Someone asked ingestion to stand down and this cycle stopped early (or
+  // never started). Not an error: the work is still pending and the next
+  // scheduled cycle picks it up.
+  stoodDown: boolean;
   errors: string[];
 }
 
@@ -56,10 +61,29 @@ export async function runFullSync(options?: {
     claudeCode: { projectsProcessed: 0, sessionsProcessed: 0, messagesInserted: 0, skipped: 0, quarantined: 0 },
     history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
     embeddings: { messagesEmbedded: 0, sessionsUpdated: 0 },
+    stoodDown: false,
     errors: [],
   };
 
   const sourcesToSync = options?.sources ?? ['claude_code'];
+
+  // A cycle that starts inside the stand-down window skips outright. The window
+  // is minutes and the interval is an hour, so this only ever catches the cycle
+  // the press was aimed at -- pressing the button five seconds before the timer
+  // fires should not be the one case where it does nothing.
+  const finish = () => {
+    const endTime = new Date();
+    result.endTime = endTime;
+    result.durationMs = endTime.getTime() - startTime.getTime();
+    result.errors = errors;
+    return result;
+  };
+
+  if (await shouldStandDown()) {
+    console.log(STAND_DOWN_NOTICE);
+    result.stoodDown = true;
+    return finish();
+  }
 
   // Sync Claude Code
   if (sourcesToSync.includes('claude_code')) {
@@ -106,6 +130,7 @@ export async function runFullSync(options?: {
       console.log('\n--- Generating Embeddings ---');
       const embeddingStats = await generatePendingEmbeddings();
       result.embeddings.messagesEmbedded = embeddingStats.processed;
+      if (embeddingStats.stoodDown) result.stoodDown = true;
 
       console.log('\n--- Updating Aggregate Embeddings ---');
       // Drain the backlog batch-by-batch instead of one batch per sync cycle,
@@ -114,6 +139,10 @@ export async function runFullSync(options?: {
       while (true) {
         const aggregateStats = await updateAggregateEmbeddings();
         result.embeddings.sessionsUpdated += aggregateStats.sessionsUpdated;
+        if (aggregateStats.stoodDown) {
+          result.stoodDown = true;
+          break;
+        }
         if (aggregateStats.sessionsFetched < AGGREGATE_BATCH_SIZE) break;
         if (Date.now() - drainStart > MAX_AGGREGATE_DRAIN_MS) {
           console.log('Aggregate drain time budget reached; remaining backlog resumes next cycle');
@@ -127,10 +156,7 @@ export async function runFullSync(options?: {
     }
   }
 
-  const endTime = new Date();
-  result.endTime = endTime;
-  result.durationMs = endTime.getTime() - startTime.getTime();
-  result.errors = errors;
+  finish();
 
   // The per-run summary (and the exit-code verdict derived from it) lives in
   // buildRunReport; the CLI prints it so the report and the exit code cannot

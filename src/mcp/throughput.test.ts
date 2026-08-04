@@ -2,7 +2,16 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 vi.mock('../db/postgres.js', () => ({ query: vi.fn() }))
 
+// Mocked so the count-by-count mocking below stays a description of the six
+// throughput queries and nothing else — the stand-down read is a different
+// question this endpoint merely reports alongside them.
+vi.mock('../sync/stand-down.js', () => ({
+  readStandDown: vi.fn(async () => ({ standingDown: false })),
+}))
+
 import { query } from '../db/postgres.js'
+import { readStandDown } from '../sync/stand-down.js'
+import { pendingMessagesCount, pendingSessionsCount } from '../embeddings/pending.js'
 import {
   summarizeThroughput,
   clampWindow,
@@ -46,6 +55,31 @@ describe('summarizeThroughput', () => {
       expect(r.eta.finishesAt).toBe(
         new Date(NOW.getTime() + Math.round((1000 / 9) * 60) * 1000).toISOString()
       )
+    })
+  })
+
+  // Same family of bug as #109 and #111: a queue that is not moving because
+  // somebody told it not to move is not a fault, and the dashboard must not
+  // send them to diagnose the button they just pressed.
+  describe('when ingestion has been stood down', () => {
+    it('outranks every rate-derived verdict, including a stall', () => {
+      const r = report({ embeddedInWindow: 0, arrivedInWindow: 30, standingDown: true })
+      expect(r.state).toBe('standing-down')
+    })
+
+    // The rates look back over an hour; the switch is a fact about right now. A
+    // queue that was draining until the button was pressed thirty seconds ago
+    // is not draining.
+    it('outranks a window that was still draining when the button was pressed', () => {
+      expect(report({ embeddedInWindow: 600, arrivedInWindow: 60, standingDown: true }).state).toBe(
+        'standing-down'
+      )
+    })
+
+    it('offers no ETA, because nothing is being worked off', () => {
+      const r = report({ standingDown: true })
+      expect(r.eta.secondsRemaining).toBeNull()
+      expect(r.eta.finishesAt).toBeNull()
     })
   })
 
@@ -202,6 +236,14 @@ describe('getThroughput', () => {
 
   beforeEach(() => {
     vi.mocked(query).mockReset()
+    vi.mocked(readStandDown).mockResolvedValue({ standingDown: false } as never)
+  })
+
+  it('reports the live stand-down state, not just the historical rates', async () => {
+    counts('500', '9000', '300', '60', '42', '7')
+    vi.mocked(readStandDown).mockResolvedValue({ standingDown: true } as never)
+
+    expect((await getThroughput(60)).state).toBe('standing-down')
   })
 
   it('maps pending, total, embedded, arrived, summaries-pending and summarized in that order', async () => {
@@ -216,17 +258,18 @@ describe('getThroughput', () => {
     expect(r.state).toBe('draining')
   })
 
-  it('counts pending summaries the way /status does, so the two screens agree', async () => {
+  // Agreement with /status and with the workers is now structural: all three
+  // call the builders in src/embeddings/pending.ts. Asserting the issued SQL IS
+  // those builders' output catches someone re-inlining a copy — the exact bug
+  // that let this endpoint advertise 32,339 pending against zero real work.
+  it('counts pending from the shared embedder predicate, not a restatement of it', async () => {
     counts('0', '0', '0', '0', '0', '0')
 
     await getThroughput(60)
 
-    // Not a formatting assertion: /status's pending-sessions query is the
-    // definition, and a divergence here is the bug the note in throughput.ts
-    // exists to prevent.
-    const sql = vi.mocked(query).mock.calls.map(([text]) => text).join('\n---\n')
-    expect(sql).toContain("e.chroma_collection = 'convo-sessions' AND e.chroma_id = 'session-' || s.id::text")
-    expect(sql).toContain('s.content_chars > COALESCE(e.content_chars_at_embed, 0)')
+    const issued = vi.mocked(query).mock.calls.map(([text]) => text)
+    expect(issued).toContain(pendingMessagesCount().sql)
+    expect(issued).toContain(pendingSessionsCount('convo-sessions').sql)
   })
 
   it('passes the window to the database as well as into the arithmetic', async () => {
@@ -235,8 +278,12 @@ describe('getThroughput', () => {
     await getThroughput(15)
 
     // Every windowed query must be parameterised with the same window the
-    // rates are divided by — including the session-summary one.
-    const windowed = vi.mocked(query).mock.calls.filter(([, params]) => params !== undefined)
+    // rates are divided by — including the session-summary one. The two pending
+    // counts carry params of their own now (healing budget, collection), so the
+    // windowed ones are selected by their interval rather than by having params.
+    const windowed = vi
+      .mocked(query)
+      .mock.calls.filter(([text]) => String(text).includes("minutes')::interval"))
     expect(windowed).toHaveLength(3)
     for (const [, params] of windowed) expect(params).toEqual(['15'])
   })

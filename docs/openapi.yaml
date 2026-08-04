@@ -355,11 +355,13 @@ paths:
             default: false
         - name: includeUnsummarized
           in: query
+          deprecated: true
           description: |
-            Include sessions that have not been summarized yet. Excluded by
-            default: such a session has no title and no session-level vector, so
-            it can only arrive as an untriageable result. Pass true to reach the
-            indexing backlog deliberately (issue #95).
+            No-op, kept for one release so existing callers do not break. Sessions
+            that have not been summarized yet are searched by default now: the
+            filter could only ever remove message-tier hits — the ones carrying a
+            highlighted snippet and a cursor — and on the live index it withheld
+            60% of sessions (issue #119).
           schema:
             type: boolean
             default: false
@@ -1071,24 +1073,40 @@ paths:
         | `falling-behind` | backlog grew over the window |
         | `summarizing` | no messages embedded, but sessions were summarized — the slow phase is running |
         | `stalled` | work is queued and **neither** phase advanced in the window |
+        | `standing-down` | ingestion was told to stop (`POST /api/pause`) — not a fault |
 
-        Ranking, highest first: an embedding verdict (`draining` /
-        `falling-behind` / `holding`) outranks `summarizing`, because only it
-        carries a rate an ETA can come from; `summarizing` outranks both
-        `stalled` and `caught-up`, because naming the phase that is running
-        beats a verdict drawn from the phase that is not.
+        Ranking, highest first: `standing-down` outranks everything, because it
+        is a fact about right now while every other verdict is derived from
+        rates over the last hour — a queue that was draining until the button
+        was pressed thirty seconds ago is not draining. Below it, an embedding
+        verdict (`draining` / `falling-behind` / `holding`) outranks
+        `summarizing`, because only it carries a rate an ETA can come from; and
+        `summarizing` outranks both `stalled` and `caught-up`, because naming
+        the phase that is running beats a verdict drawn from the phase that is
+        not.
 
         `eta` is null unless the backlog is actually shrinking: computed from a
         non-positive drain rate it would be infinite or negative, and rendering
         either as a finish time is worse than admitting there isn't one. There is
         no ETA for summarization.
 
-        `pending` and `summariesPending` use the same definitions as `/status`
-        (`pendingEmbeddings.messages` and `pendingEmbeddings.sessions`), so the
-        two screens cannot disagree about how much work is left. Note that
-        `summariesPending` counts some sessions the embedder itself skips
-        (warmups, automated and still-active ones), so it does not reach zero on
-        a live instance — which is why a state is never derived from it alone.
+        `pending` and `summariesPending` are built from the embedder's own
+        predicate (`src/embeddings/pending.ts`), which `/status` and the sync
+        workers also import — so what this endpoint calls pending is what a
+        worker will actually pick up, and the two screens cannot disagree.
+
+        This was not always true, and the difference was large: counting every
+        message over 10 characters without a vector once reported a backlog of
+        32,339 against zero real work, because it included noise already marked
+        unembeddable, messages in deleted sessions, and tool messages the
+        embedder never touches. A residue that never drains also pins `state` to
+        `draining` and produces an ETA years out. If you are reading a
+        suspiciously large `pending`, check that nothing has re-inlined a looser
+        copy of the predicate.
+
+        `summariesPending` excludes sessions that ended within the last 30
+        minutes: re-summarizing a live conversation as it grows is waste, so the
+        embedder defers them. That is deferred work, not queued work.
       parameters:
         - name: minutes
           in: query
@@ -1114,7 +1132,16 @@ paths:
                     const: ok
                   state:
                     type: string
-                    enum: [caught-up, draining, holding, falling-behind, summarizing, stalled]
+                    enum:
+                      [
+                        standing-down,
+                        caught-up,
+                        draining,
+                        holding,
+                        falling-behind,
+                        summarizing,
+                        stalled,
+                      ]
                   queue:
                     type: object
                     required: [pending, embedded, summariesPending]
@@ -1126,8 +1153,10 @@ paths:
                       summariesPending:
                         type: integer
                         description: >-
-                          Sessions still owed a summary embedding. Same
-                          definition as `/status`'s `pendingEmbeddings.sessions`.
+                          Sessions still owed a summary embedding, and which the
+                          embedder will actually pick up. Same definition as
+                          `/status`'s `pendingEmbeddings.sessions`, because both
+                          import it from `src/embeddings/pending.ts`.
                   rates:
                     type: object
                     required:
@@ -1193,7 +1222,9 @@ paths:
         Returns as soon as the run is accepted, never when it finishes: a drain
         takes minutes. Poll `GET /api/sync` for progress. Only one run exists at
         a time — a request while one is in flight is answered `409` with that
-        run's state, which is a report, not a failure.
+        run's state, which is a report, not a failure. A request while ingestion
+        is standing down (`POST /api/pause`) is answered `409` too, since the run
+        would stop at its first checkpoint.
       responses:
         '202':
           description: A run was started.
@@ -1202,7 +1233,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/SyncRunResponse'
         '409':
-          description: A run was already in flight; its state is returned unchanged.
+          description: |
+            A run was already in flight, or ingestion is standing down. The
+            state is returned unchanged; `standDown.standingDown` distinguishes
+            the two.
           content:
             application/json:
               schema:
@@ -1230,6 +1264,116 @@ paths:
                     const: ok
                   run:
                     $ref: '#/components/schemas/SyncRun'
+                  standDown:
+                    $ref: '#/components/schemas/StandDown'
+
+  /api/pause:
+    post:
+      tags: [Monitoring]
+      operationId: standDownIngestion
+      summary: Stand ingestion down until the next cycle
+      description: |
+        Stops the ingestion pass that is running and hands the GPU back.
+
+        Embedding and summarization hold an Ollama slot for minutes at a time,
+        which is a problem when the same GPU is wanted for something else. This
+        is the way to stand that work down without touching a container.
+
+        It is **not** a pause switch, deliberately. The signal is a short
+        deadline written to the database — the sync workers run in their own
+        containers, so Postgres is the only channel — and workers act on it at
+        their next checkpoint: between embedding batches, and between summarized
+        sessions. Whatever was in flight is left pending, never half-written.
+
+        The window is minutes, clamped to 1..240 and defaulting to 15. It is far
+        shorter than the sync interval, so the next scheduled cycle runs as
+        normal whether or not anyone comes back to switch it on again. The worst
+        case of a forgotten press, or of a worker killed mid-pass, is one skipped
+        cycle — this cannot leave the index switched off.
+
+        `DELETE /api/pause` resumes immediately instead of waiting the window
+        out.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                minutes:
+                  type: integer
+                  minimum: 1
+                  maximum: 240
+                  default: 15
+                  description: |
+                    How long the signal stays live. Clamped, not rejected, at
+                    both ends.
+                reason:
+                  type: string
+                  description: Free text, shown in the UI. E.g. "playing a game".
+      responses:
+        '200':
+          description: Ingestion is standing down.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, standDown]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  standDown:
+                    $ref: '#/components/schemas/StandDown'
+                  message:
+                    type: string
+
+    delete:
+      tags: [Monitoring]
+      operationId: resumeIngestion
+      summary: Resume ingestion now
+      description: |
+        Clears the stand-down deadline rather than waiting it out. Workers pick
+        the queue back up at their next checkpoint; the next scheduled cycle runs
+        in full. Trigger a pass immediately with `POST /api/sync`.
+      responses:
+        '200':
+          description: Ingestion resumed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, standDown]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  standDown:
+                    $ref: '#/components/schemas/StandDown'
+                  message:
+                    type: string
+
+    get:
+      tags: [Monitoring]
+      operationId: getStandDown
+      summary: Is ingestion standing down
+      description: |
+        Also carried by `GET /api/sync` and `GET /status`, so a dashboard does
+        not need a separate poll for it.
+      responses:
+        '200':
+          description: Current stand-down state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, standDown]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  standDown:
+                    $ref: '#/components/schemas/StandDown'
 
   /mcp:
     post:
@@ -1424,22 +1568,40 @@ components:
           $ref: '#/components/schemas/IndexTotals'
         pendingEmbeddings:
           type: object
-          description: Work the embedding backfill still owes.
+          description: |
+            Work the embedding backfill still owes — specifically, work a worker
+            will actually pick up. Both counts come from the embedder's own
+            predicate (`src/embeddings/pending.ts`), which the sync workers and
+            `/api/throughput` import too.
           required: [messages, sessions]
           properties:
             messages:
               type: integer
-              description: Messages with indexable text and no `convo-messages` embedding.
+              description: |
+                Messages with indexable text and no `convo-messages` embedding,
+                excluding what the embedder will never touch: tool messages,
+                deleted and automated sessions, and anything already marked
+                unembeddable (noise, or text that failed past its retry budget).
+                Counting those too once reported 32,339 pending against zero
+                real work.
             sessions:
               type: integer
               description: |
                 Sessions with no `convo-sessions` embedding, or whose content has
-                grown since the embedding was made.
+                grown since the embedding was made. Excludes warmups, deleted and
+                automated sessions, and any session that ended within the last 30
+                minutes — the embedder defers those rather than re-summarizing a
+                live conversation as it grows, so they are not queued work yet.
         quarantined:
           type: integer
           description: |
             Records sync could not process, kept for replay in
             `/api/quarantine`. Non-zero means data is waiting, not lost.
+        standDown:
+          allOf: [{ $ref: '#/components/schemas/StandDown' }]
+          description: |
+            Why the queue may be sitting still on purpose — see
+            `POST /api/pause`.
         chroma:
           type: object
           required: [collections]
@@ -1671,10 +1833,50 @@ components:
             The source's STORED class — for an existing source this may differ
             from the `dataClass` sent, since ingest never reclassifies.
 
+    StandDown:
+      type: object
+      required: [standingDown, until, since, reason, secondsRemaining]
+      description: |
+        Whether ingestion has been told to stand down, and for how much longer.
+        A deadline rather than a flag: `standingDown` is true only while `until`
+        is still ahead, so the signal expires on its own.
+      properties:
+        standingDown:
+          type: boolean
+        until:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the signal lapses. Null when nothing is standing down.
+        since:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the button was pressed.
+        reason:
+          type: string
+          nullable: true
+        secondsRemaining:
+          type: integer
+          description: |
+            Floored at 0. Count this down rather than deriving it from `until`
+            against a client clock — the workers, this server and the database
+            keep three clocks that only approximately agree, and this one is
+            measured against the database's.
+
     SyncRun:
       type: object
       required:
-        [running, startedAt, finishedAt, messagesEmbedded, sessionsUpdated, durationMs, error]
+        [
+          running,
+          startedAt,
+          finishedAt,
+          messagesEmbedded,
+          sessionsUpdated,
+          durationMs,
+          stoodDown,
+          error,
+        ]
       properties:
         running:
           type: boolean
@@ -1696,6 +1898,11 @@ components:
         durationMs:
           type: integer
           nullable: true
+        stoodDown:
+          type: boolean
+          description: |
+            The run ended because ingestion was stood down, not because it ran
+            out of work. Not an error — the remaining work is still pending.
         error:
           type: string
           nullable: true
@@ -1717,6 +1924,11 @@ components:
           type: string
         run:
           $ref: '#/components/schemas/SyncRun'
+        standDown:
+          allOf: [{ $ref: '#/components/schemas/StandDown' }]
+          description: |
+            Present on the `409` that refuses to start a run because ingestion
+            is standing down.
 
     ValidationError:
       type: object
@@ -1807,22 +2019,26 @@ components:
           type: integer
         title:
           description: |
-            The session's title, resolved and returned whole. Null when the
-            session has no source-supplied title and has not been summarized
-            yet — a title is never fabricated from message content, because a
-            misleading title is worse for triage than an absent one. Use
-            `snippet` and `titleSource` in that case.
+            The session's title, resolved and returned whole. When the session has
+            no source-supplied title and has not been summarized yet, this is the
+            matched text instead (`titleSource: snippet`, highlight markers
+            stripped — they stay in `snippet`), so an untitled hit is still
+            triageable. Null only when there is no matched text either. A title is
+            never fabricated from unrelated message content, because a misleading
+            title is worse for triage than an absent one.
           oneOf:
             - type: 'null'
             - type: string
         titleSource:
           description: |
             How the title was obtained. `source` means the origin system supplied
-            it; `summary` means it was derived from the session summary; `none`
-            means the session has neither and `title` is null. A title is never
-            fabricated from message content (issue #95).
+            it; `summary` means it was derived from the session summary; `snippet`
+            means the session has neither and `title` holds the region this query
+            matched, not a topic (issue #119); `none` means it has none of those
+            and `title` is null. A title is never fabricated from message content
+            unrelated to the query (issue #95).
           type: string
-          enum: [source, summary, none]
+          enum: [source, summary, snippet, none]
         project:
           type: string
         projectPath:

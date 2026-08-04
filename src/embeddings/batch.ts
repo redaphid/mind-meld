@@ -9,13 +9,18 @@ import {
 import { generateEmbeddings, ensureEmbeddingModel } from "./ollama.js";
 import { summarizeConversation, ensureSummarizeModel, combineSummaries } from "./summarize.js";
 import { persistSessionChunks, SessionMessage } from "./chunks.js";
+import { embeddableMessages, embeddableSessions } from "./pending.js";
 import { classifyNoise } from "./classify.js";
-import { notWarmup } from '../mcp/title.js';
+import { shouldStandDown, STAND_DOWN_NOTICE } from '../sync/stand-down.js';
 
 export interface BatchEmbeddingStats {
   processed: number;
   skipped: number;
   errors: number;
+  // True when the pass ended because someone stood ingestion down, rather than
+  // because it ran out of work. The difference decides whether the caller keeps
+  // draining and whether the run reads as finished or interrupted.
+  stoodDown: boolean;
 }
 
 interface MessageToEmbed {
@@ -59,33 +64,17 @@ interface GetMessagesResult {
 async function getMessagesToEmbed(limit: number, maxChars?: number): Promise<GetMessagesResult> {
   // Fetch more than needed since we filter in JS — noise rate is ~10-15%
   const overfetch = Math.ceil(limit * 1.3);
-  const charFilter = maxChars ? `AND LENGTH(m.content_text) <= ${maxChars}` : "";
+  // $1 is the LIMIT, so the shared predicate's own params start at $2. This is
+  // the same fragment /status and /api/throughput count with — see pending.ts
+  // for why that sharing is load-bearing rather than tidiness.
+  const embeddable = embeddableMessages(2, maxChars);
   const result = await query<MessageToEmbed>(
     `SELECT m.id, m.session_id, m.content_text, m.role, m.timestamp,
             p.path as project_path, src.name as source_name, m.model
-     FROM messages m
-     JOIN sessions s ON m.session_id = s.id
-     JOIN projects p ON s.project_id = p.id
-     JOIN sources src ON p.source_id = src.id
-     LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'
-     LEFT JOIN embeddings skip ON skip.message_id = m.id
-       AND skip.chroma_collection = 'UNEMBEDDABLE'
-       AND NOT (
-         skip.failure_reason = 'nan'
-         AND skip.retry_count < $2
-         AND skip.updated_at < NOW() - make_interval(days => $3)
-       )
-     WHERE m.content_text IS NOT NULL
-       AND LENGTH(m.content_text) > 10
-       AND m.role != 'tool'
-       AND s.deleted_at IS NULL
-       AND s.is_automated = false
-       AND e.id IS NULL
-       AND skip.id IS NULL
-       ${charFilter}
+     ${embeddable.sql}
      ORDER BY m.id
      LIMIT $1`,
-    [overfetch, config.healing.retryLimit, config.healing.cooldownDays],
+    [overfetch, ...embeddable.params],
   );
 
   const kept: MessageToEmbed[] = [];
@@ -122,6 +111,7 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
     processed: 0,
     skipped: 0,
     errors: 0,
+    stoodDown: false,
   };
 
   // Log how many NaN-blocked messages are eligible for healing
@@ -148,6 +138,15 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
   let shortExhausted = false;
 
   while (hasMore) {
+    // Between batches: the cheapest place to stop, with nothing half-written.
+    // Already-noticed stands down without re-announcing it.
+    if (stats.stoodDown) break;
+    if (await shouldStandDown()) {
+      console.log(`[embeddings] ${STAND_DOWN_NOTICE}`);
+      stats.stoodDown = true;
+      break;
+    }
+
     // Prioritize short messages (no summarization needed, ~100x faster)
     // Re-check for short messages every iteration in case new ones were synced
     let messagesToEmbed: MessageToEmbed[];
@@ -193,6 +192,28 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
       const skippedIndices = new Set<number>();
       for (let i = 0; i < messagesToEmbed.length; i++) {
         const m = messagesToEmbed[i];
+
+        // A batch of long messages is a batch of LLM calls -- minutes of GPU,
+        // one message at a time. Checking only between batches would make the
+        // button take as long as the batch it interrupts, so the expensive path
+        // checks before each call. Everything from the press onward is left
+        // untouched and still pending, not half-done: `skippedIndices` is the
+        // same path a failed summarization takes, and it means "retry later".
+        if (
+          !stats.stoodDown &&
+          m.content_text.length > MAX_EMBED_CHARS &&
+          (await shouldStandDown())
+        ) {
+          console.log(`[embeddings] ${STAND_DOWN_NOTICE}`);
+          stats.stoodDown = true;
+        }
+        if (stats.stoodDown) {
+          skippedIndices.add(i);
+          texts.push("");
+          wasSummarized.push(false);
+          continue;
+        }
+
         if (m.content_text.length > MAX_EMBED_CHARS) {
           try {
             const summary = await summarizeConversation([m.content_text]);
@@ -373,7 +394,16 @@ export async function updateAggregateEmbeddings(): Promise<{
   sessionsUpdated: number;
   sessionsReembedded: number;
   sessionsFetched: number;
+  stoodDown: boolean;
 }> {
+  // Asked before the model check and before the query: this is the slowest
+  // phase in the pipeline, so the cheapest pass through it is the one that
+  // never starts.
+  if (await shouldStandDown()) {
+    console.log(`[aggregates] ${STAND_DOWN_NOTICE}`);
+    return { sessionsUpdated: 0, sessionsReembedded: 0, sessionsFetched: 0, stoodDown: true };
+  }
+
   // Ensure summarization model is available
   await ensureSummarizeModel();
 
@@ -396,35 +426,33 @@ export async function updateAggregateEmbeddings(): Promise<{
             s.message_count, s.total_input_tokens + s.total_output_tokens as total_tokens,
             s.content_chars, s.started_at,
             e.content_chars_at_embed as existing_content_chars
-     FROM sessions s
-     JOIN projects p ON s.project_id = p.id
-     JOIN sources src ON p.source_id = src.id
-     LEFT JOIN embeddings e ON e.chroma_collection = $1 AND e.chroma_id = 'session-' || s.id::text
-     WHERE s.message_count > 0
-       AND ${notWarmup('s')}  -- Exclude noise sessions (NULL-safe: an untitled session is not a warmup)
-       AND s.deleted_at IS NULL  -- Skip soft-deleted noise (filtered out of search anyway)
-       AND s.is_automated = false  -- Skip automated sessions (filtered out of search anyway)
-       AND (s.ended_at IS NULL OR s.ended_at < NOW() - INTERVAL '30 minutes')  -- Defer still-active sessions: don't re-summarize a live conversation from scratch as it grows
-       AND (
-         e.id IS NULL  -- No embedding exists
-         OR s.content_chars > COALESCE(e.content_chars_at_embed, 0)  -- Content has grown
-         OR COALESCE(s.content_chars, 0) = 0  -- content_chars not calculated yet
-       )
+     ${embeddableSessions('$1')}
      ORDER BY COALESCE(s.ended_at, s.started_at) DESC NULLS LAST  -- Newest first: recent sessions are the ones searches actually need
      LIMIT $2`,
     [config.chroma.collections.sessions, AGGREGATE_BATCH_SIZE],
   );
 
   if (sessions.rows.length === 0) {
-    return { sessionsUpdated: 0, sessionsReembedded: 0, sessionsFetched: 0 };
+    return { sessionsUpdated: 0, sessionsReembedded: 0, sessionsFetched: 0, stoodDown: false };
   }
 
   let newEmbeddings = 0;
   let reembeddings = 0;
+  let stoodDown = false;
 
   console.log(`Processing ${sessions.rows.length} session embeddings...`);
 
   for (const session of sessions.rows) {
+    // One session is one LLM pass over a whole conversation -- the longest
+    // uninterruptible step there is. Between sessions is therefore the finest
+    // granularity this phase can honestly offer, and each completed session is
+    // fully written before the next check.
+    if (await shouldStandDown()) {
+      console.log(`[aggregates] ${STAND_DOWN_NOTICE}`);
+      stoodDown = true;
+      break;
+    }
+
     const isReembed = session.existing_content_chars !== null;
     let actualContentChars = 0;
 
@@ -591,5 +619,6 @@ export async function updateAggregateEmbeddings(): Promise<{
     sessionsUpdated: newEmbeddings,
     sessionsReembedded: reembeddings,
     sessionsFetched: sessions.rows.length,
+    stoodDown,
   };
 }

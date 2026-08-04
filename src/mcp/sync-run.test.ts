@@ -33,6 +33,7 @@ describe('startSyncRun', () => {
       const { started, state } = startSyncRun(async () => ({
         messagesEmbedded: 3,
         sessionsUpdated: 1,
+        stoodDown: false,
       }))
 
       expect(started).toBe(true)
@@ -43,7 +44,7 @@ describe('startSyncRun', () => {
     })
 
     it('records what the run produced once it finishes', async () => {
-      startSyncRun(async () => ({ messagesEmbedded: 42, sessionsUpdated: 7 }))
+      startSyncRun(async () => ({ messagesEmbedded: 42, sessionsUpdated: 7, stoodDown: false }))
       await awaitSyncRun()
 
       const state = getSyncRunState()
@@ -68,14 +69,14 @@ describe('startSyncRun', () => {
       startSyncRun(async () => {
         runs++
         await gate
-        return { messagesEmbedded: 1, sessionsUpdated: 0 }
+        return { messagesEmbedded: 1, sessionsUpdated: 0, stoodDown: false }
       })
     })
 
     it('refuses to start a second one', () => {
       const second = startSyncRun(async () => {
         runs++
-        return { messagesEmbedded: 99, sessionsUpdated: 99 }
+        return { messagesEmbedded: 99, sessionsUpdated: 99, stoodDown: false }
       })
 
       expect(second.started).toBe(false)
@@ -90,6 +91,7 @@ describe('startSyncRun', () => {
       const second = startSyncRun(async () => ({
         messagesEmbedded: 5,
         sessionsUpdated: 2,
+        stoodDown: false,
       }))
       expect(second.started).toBe(true)
 
@@ -116,7 +118,7 @@ describe('startSyncRun', () => {
     })
 
     it('leaves the runner free to try again', () => {
-      expect(startSyncRun(async () => ({ messagesEmbedded: 0, sessionsUpdated: 0 })).started).toBe(
+      expect(startSyncRun(async () => ({ messagesEmbedded: 0, sessionsUpdated: 0, stoodDown: false })).started).toBe(
         true
       )
     })
@@ -145,6 +147,7 @@ describe('the default ingestion run', () => {
         sessionsUpdated: 4,
         sessionsReembedded: 0,
         sessionsFetched: 3, // short of AGGREGATE_BATCH_SIZE, so the drain stops
+        stoodDown: false,
       })
       startSyncRun()
       await awaitSyncRun()
@@ -169,9 +172,9 @@ describe('the default ingestion run', () => {
       } as any)
       // Two full batches, then a short one that ends the drain.
       vi.mocked(updateAggregateEmbeddings)
-        .mockResolvedValueOnce({ sessionsUpdated: 100, sessionsReembedded: 0, sessionsFetched: 100 })
-        .mockResolvedValueOnce({ sessionsUpdated: 100, sessionsReembedded: 0, sessionsFetched: 100 })
-        .mockResolvedValueOnce({ sessionsUpdated: 7, sessionsReembedded: 0, sessionsFetched: 7 })
+        .mockResolvedValueOnce({ sessionsUpdated: 100, sessionsReembedded: 0, sessionsFetched: 100, stoodDown: false })
+        .mockResolvedValueOnce({ sessionsUpdated: 100, sessionsReembedded: 0, sessionsFetched: 100, stoodDown: false })
+        .mockResolvedValueOnce({ sessionsUpdated: 7, sessionsReembedded: 0, sessionsFetched: 7, stoodDown: false })
       startSyncRun()
       await awaitSyncRun()
     })

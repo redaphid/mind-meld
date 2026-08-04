@@ -23,10 +23,18 @@ export type SyncRunState = {
   messagesEmbedded: number
   sessionsUpdated: number
   durationMs: number | null
+  // The run ended because ingestion was stood down, not because it ran out of
+  // work. Shown rather than swallowed: a manual run that stops after eight
+  // seconds should say why.
+  stoodDown: boolean
   error: string | null
 }
 
-export type SyncRunResult = { messagesEmbedded: number; sessionsUpdated: number }
+export type SyncRunResult = {
+  messagesEmbedded: number
+  sessionsUpdated: number
+  stoodDown: boolean
+}
 
 // A button anyone can press repeatedly, driving work that takes minutes and
 // holds a serialized Ollama slot. Two concurrent drains would fight over the
@@ -40,6 +48,7 @@ let state: SyncRunState = {
   messagesEmbedded: 0,
   sessionsUpdated: 0,
   durationMs: null,
+  stoodDown: false,
   error: null,
 }
 
@@ -55,12 +64,17 @@ const MAX_AGGREGATE_DRAIN_MS = 5 * 60 * 1000
 
 const runPendingEmbeddings = async (): Promise<SyncRunResult> => {
   const embedded = await generatePendingEmbeddings()
+  let stoodDown = embedded.stoodDown
 
   let sessionsUpdated = 0
   const drainStart = Date.now()
-  while (true) {
+  while (!stoodDown) {
     const aggregate = await updateAggregateEmbeddings()
     sessionsUpdated += aggregate.sessionsUpdated
+    if (aggregate.stoodDown) {
+      stoodDown = true
+      break
+    }
     if (aggregate.sessionsFetched < AGGREGATE_BATCH_SIZE) break
     if (Date.now() - drainStart > MAX_AGGREGATE_DRAIN_MS) {
       console.log('[sync-run] aggregate drain budget reached; backlog resumes next run')
@@ -68,7 +82,7 @@ const runPendingEmbeddings = async (): Promise<SyncRunResult> => {
     }
   }
 
-  return { messagesEmbedded: embedded.processed, sessionsUpdated }
+  return { messagesEmbedded: embedded.processed, sessionsUpdated, stoodDown }
 }
 
 // Returns as soon as the run is accepted, never when it finishes: a drain takes
@@ -88,6 +102,7 @@ export const startSyncRun = (
     messagesEmbedded: 0,
     sessionsUpdated: 0,
     durationMs: null,
+    stoodDown: false,
     error: null,
   }
 
@@ -128,6 +143,7 @@ export const resetSyncRunState = () => {
     messagesEmbedded: 0,
     sessionsUpdated: 0,
     durationMs: null,
+    stoodDown: false,
     error: null,
   }
   inFlight = null
