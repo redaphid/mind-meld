@@ -5,7 +5,7 @@ import {
   decodeProjectPath,
 } from '../parsers/claude-messages.js';
 import { discoverProjects, discoverSessionFiles } from './claude-code.js';
-import { canonicalizeProjectPath } from '../utils/project-path.js';
+import { canonicalizeProjectPath, lastPathSegment } from '../utils/project-path.js';
 
 // `verify` answers the question sync itself cannot: does the database actually
 // hold what the files on disk hold? It walks every session file, parses it with
@@ -123,7 +123,7 @@ export async function verifyClaudeCode(options?: {
   console.log(`Verifying ${projectPaths.length} projects under ${basePath}...`);
 
   for (const projectPath of projectPaths) {
-    const projectDirName = projectPath.split('/').pop()!;
+    const projectDirName = lastPathSegment(projectPath);
     const decodedPath = decodeProjectPath(projectDirName);
 
     if (options?.projectFilter && !decodedPath.includes(options.projectFilter)) {
