@@ -17,6 +17,7 @@ import { getSessionDigest, getMessages, getMessageById } from './session.js'
 import { createMcpServer } from './tools.js'
 import { getSyncStatus } from '../sync/orchestrator.js'
 import { startSyncRun, getSyncRunState } from './sync-run.js'
+import { pendingMessagesCount, pendingSessionsCount } from '../embeddings/pending.js'
 import { getThroughput, clampWindow } from './throughput.js'
 import { getCollectionStats } from '../db/chroma.js'
 import { config } from '../config.js'
@@ -198,19 +199,20 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
       LIMIT 10
     `)
 
-    const pendingMessages = await query<{ count: string }>(`
-      SELECT COUNT(*) as count FROM messages m
-      LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'
-      WHERE m.content_text IS NOT NULL AND LENGTH(m.content_text) > 10 AND e.id IS NULL
-    `)
+    // Both counts use the embedder's own predicate (src/embeddings/pending.ts),
+    // so what this screen calls pending is what a worker will actually pick up.
+    // Counting anything looser advertised a 32k backlog against zero real work.
+    const pendingMessagesQuery = pendingMessagesCount()
+    const pendingMessages = await query<{ count: string }>(
+      pendingMessagesQuery.sql,
+      pendingMessagesQuery.params,
+    )
 
-    const pendingSessions = await query<{ count: string }>(`
-      SELECT COUNT(*) as count FROM sessions s
-      LEFT JOIN embeddings e ON e.chroma_collection = 'convo-sessions' AND e.chroma_id = 'session-' || s.id::text
-      WHERE s.deleted_at IS NULL
-        AND s.message_count > 0
-        AND (e.id IS NULL OR s.content_chars > COALESCE(e.content_chars_at_embed, 0))
-    `)
+    const pendingSessionsQuery = pendingSessionsCount(config.chroma.collections.sessions)
+    const pendingSessions = await query<{ count: string }>(
+      pendingSessionsQuery.sql,
+      pendingSessionsQuery.params,
+    )
 
     const quarantined = await countPending()
 
