@@ -66,6 +66,22 @@ export const canonicalizeProjectPath = (input: string | null | undefined): strin
   return p
 }
 
+// Split a path into segments, tolerating either separator.
+//
+// `node:path.join` emits '\' on Windows and '/' everywhere else, while paths
+// read out of transcripts can carry either regardless of the host. A bare
+// `split('/')` therefore returns the WHOLE path as one segment on Windows: the
+// project directory name becomes `C:\...\projects\-home-u-proj`, which is then
+// stored as the project's dirName and matches nothing. It fails silently —
+// sync still runs, it just indexes under a garbage key.
+//
+// One definition, because this was written four times and three of them had the
+// bug (see the "shared definitions over restated ones" note in CLAUDE.md).
+export const pathSegments = (path: string): string[] => path.replace(/\\/g, '/').split('/')
+
+// The final segment of a path — the file or directory name — on either platform.
+export const lastPathSegment = (path: string): string => pathSegments(path).pop()!
+
 // Claude Code names a project directory by replacing every character of the
 // cwd that is not [A-Za-z0-9] with '-'. This is the forward (lossless-to-
 // verify, lossy-to-invert) direction of that encoding, used to check a cwd

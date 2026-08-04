@@ -10,7 +10,12 @@ import {
   parseHistoryFile,
   type ParsedSession,
 } from '../parsers/claude-messages.js';
-import { resolveProjectPath, isWindowsHostOs } from '../utils/project-path.js';
+import {
+  resolveProjectPath,
+  isWindowsHostOs,
+  pathSegments,
+  lastPathSegment,
+} from '../utils/project-path.js';
 
 export interface SyncStats {
   projectsProcessed: number;
@@ -113,7 +118,7 @@ export async function discoverSessionFiles(projectPath: string): Promise<Discove
 // a reader traverses it.
 export function parentExternalIdFromRawPath(rawFilePath: string | null | undefined): string | null {
   if (!rawFilePath) return null;
-  const segments = rawFilePath.replace(/\\/g, '/').split('/');
+  const segments = pathSegments(rawFilePath);
   const markers = segments.reduce<number[]>(
     (found, segment, index) => (segment === 'subagents' ? [...found, index] : found),
     []
@@ -344,7 +349,7 @@ export async function syncClaudeCode(options?: {
   console.log(`Found ${projectPaths.length} projects`);
 
   for (const projectPath of projectPaths) {
-    const projectDirName = projectPath.split('/').pop()!;
+    const projectDirName = lastPathSegment(projectPath);
     // The decode is a lossy GUESS (hyphens and dots are ambiguous, #22) and is
     // never stored as a path anymore — it survives only for the project
     // filter and as a name guess until a cwd proves the real directory.
@@ -408,7 +413,7 @@ export async function syncClaudeCode(options?: {
           const fileStat = await stat(sessionFile);
 
           // Check if already synced with same modification time (per-file check)
-          const fileName = sessionFile.split('/').pop()!.replace('.jsonl', '');
+          const fileName = lastPathSegment(sessionFile).replace('.jsonl', '');
           const isAgent = fileName.startsWith('agent-');
           const sessionExternalId = isAgent ? fileName : fileName;
 

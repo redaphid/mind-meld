@@ -1083,12 +1083,23 @@ paths:
         either as a finish time is worse than admitting there isn't one. There is
         no ETA for summarization.
 
-        `pending` and `summariesPending` use the same definitions as `/status`
-        (`pendingEmbeddings.messages` and `pendingEmbeddings.sessions`), so the
-        two screens cannot disagree about how much work is left. Note that
-        `summariesPending` counts some sessions the embedder itself skips
-        (warmups, automated and still-active ones), so it does not reach zero on
-        a live instance — which is why a state is never derived from it alone.
+        `pending` and `summariesPending` are built from the embedder's own
+        predicate (`src/embeddings/pending.ts`), which `/status` and the sync
+        workers also import — so what this endpoint calls pending is what a
+        worker will actually pick up, and the two screens cannot disagree.
+
+        This was not always true, and the difference was large: counting every
+        message over 10 characters without a vector once reported a backlog of
+        32,339 against zero real work, because it included noise already marked
+        unembeddable, messages in deleted sessions, and tool messages the
+        embedder never touches. A residue that never drains also pins `state` to
+        `draining` and produces an ETA years out. If you are reading a
+        suspiciously large `pending`, check that nothing has re-inlined a looser
+        copy of the predicate.
+
+        `summariesPending` excludes sessions that ended within the last 30
+        minutes: re-summarizing a live conversation as it grows is waste, so the
+        embedder defers them. That is deferred work, not queued work.
       parameters:
         - name: minutes
           in: query
@@ -1424,17 +1435,30 @@ components:
           $ref: '#/components/schemas/IndexTotals'
         pendingEmbeddings:
           type: object
-          description: Work the embedding backfill still owes.
+          description: |
+            Work the embedding backfill still owes — specifically, work a worker
+            will actually pick up. Both counts come from the embedder's own
+            predicate (`src/embeddings/pending.ts`), which the sync workers and
+            `/api/throughput` import too.
           required: [messages, sessions]
           properties:
             messages:
               type: integer
-              description: Messages with indexable text and no `convo-messages` embedding.
+              description: |
+                Messages with indexable text and no `convo-messages` embedding,
+                excluding what the embedder will never touch: tool messages,
+                deleted and automated sessions, and anything already marked
+                unembeddable (noise, or text that failed past its retry budget).
+                Counting those too once reported 32,339 pending against zero
+                real work.
             sessions:
               type: integer
               description: |
                 Sessions with no `convo-sessions` embedding, or whose content has
-                grown since the embedding was made.
+                grown since the embedding was made. Excludes warmups, deleted and
+                automated sessions, and any session that ended within the last 30
+                minutes — the embedder defers those rather than re-summarizing a
+                live conversation as it grows, so they are not queued work yet.
         quarantined:
           type: integer
           description: |
