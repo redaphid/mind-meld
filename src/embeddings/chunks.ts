@@ -24,8 +24,21 @@ export interface PersistedChunk {
   contentChars: number;
 }
 
-const formatForSummary = (m: SessionMessage): string =>
+export const formatForSummary = (m: SessionMessage): string =>
   `[${m.role.toUpperCase()}]: ${m.content_text}`;
+
+// The separator between messages inside one chunk. Exported so nothing has to
+// restate it — a benchmark or CLI that re-joins messages its own way is
+// measuring an input the pipeline never produces.
+export const CHUNK_JOIN = "\n\n---\n\n";
+
+// Messages -> the exact chunk texts the summarizer receives. This is the one
+// definition of "what a chunk is": production and any offline harness must go
+// through it, or they diverge silently and the harness measures nothing real.
+export const buildChunkTexts = (messages: SessionMessage[]): string[] =>
+  chunkMessagesWithIndices(messages.map(formatForSummary), CHUNK_SIZE_CHARS).map(
+    (c) => c.messages.join(CHUNK_JOIN),
+  );
 
 // Persist chunk-level summaries + embeddings for a session. Returns the
 // persisted chunks so callers can combine their summaries into a session-level
@@ -76,7 +89,7 @@ export const persistSessionChunks = async (
 
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
-    const chunkText = chunk.messages.join("\n\n---\n\n");
+    const chunkText = chunk.messages.join(CHUNK_JOIN);
     const startMessageId = messages[chunk.startIndex].id;
     const endMessageId = messages[chunk.endIndex].id;
 
