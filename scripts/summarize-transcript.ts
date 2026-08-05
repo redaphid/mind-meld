@@ -5,19 +5,22 @@
 // so what you measure here is what the pipeline produces. Swap SUMMARIZE_MODEL
 // to compare models on identical input.
 //
-//   pnpm run summarize:transcript -- <file> [--out summary.txt] [--verbose]
+//   pnpm run summarize:transcript -- tmp/transcript.json [--out tmp/summary.txt] [--verbose]
 //
 // Input formats (auto-detected):
 //   .json   array of {role, content_text}
 //   .jsonl  one {role, content_text} per line
 //   .txt    raw text, treated as a single user message
 //
+// Keep transcripts and summaries in tmp/ — it is gitignored. They are verbatim
+// conversation content, and this repository is public.
+//
 // Dump a real session to compare against production:
 //   docker exec mindmeld-postgres psql -U mindmeld -d conversations -tAc \
 //     "SELECT json_agg(json_build_object('role', role, 'content_text', content_text)
 //        ORDER BY sequence_num) FROM messages
 //      WHERE session_id = 123 AND content_text IS NOT NULL AND LENGTH(content_text) > 0" \
-//     > transcript.json
+//     > tmp/transcript.json
 // MUST be first: config.ts reads process.env at module load, and only
 // src/index.ts loads dotenv. Without this the CLI silently ignores .env and runs
 // on the code defaults (qwen3:8b, a 120s timeout) instead of your configuration.
