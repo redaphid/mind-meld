@@ -29,16 +29,26 @@ import { readFileSync, writeFileSync } from "node:fs"
 import { buildChunkTexts, type SessionMessage } from "../src/embeddings/chunks.js"
 import { combineSummaries, summarizeChunk, SUMMARIZE_MODEL } from "../src/embeddings/summarize.js"
 
+const USAGE =
+  "usage: summarize-transcript.ts tmp/transcript.json [--out tmp/summary.txt] [--verbose]"
+
 const args = process.argv.slice(2)
-const file = args.find((a) => !a.startsWith("--"))
 const verbose = args.includes("--verbose")
 const outIndex = args.indexOf("--out")
 const out = outIndex === -1 ? null : args[outIndex + 1]
 
-if (!file) {
-  console.error("usage: summarize-transcript.ts <file.json|.jsonl|.txt> [--out summary.txt] [--verbose]")
+// The value after --out is positional-looking, so skip it explicitly. Otherwise
+// `--out summary.txt transcript.json` resolves the INPUT to summary.txt — the
+// script would read the output file and then overwrite it.
+const file = args.filter((a, i) => !a.startsWith("--") && i !== outIndex + 1)[0]
+
+const fail = (message: string): never => {
+  console.error(`${message}\n${USAGE}`)
   process.exit(2)
 }
+
+if (!file) fail("No input file given.")
+if (outIndex !== -1 && !out) fail("--out needs a path.")
 
 const raw = readFileSync(file, "utf8")
 
@@ -54,7 +64,10 @@ const parse = (): SessionMessage[] => {
 }
 
 const messages = parse().filter((m) => m.content_text && m.content_text.length > 0)
+if (messages.length === 0) fail(`No messages with content in ${file}.`)
+
 const chunks = buildChunkTexts(messages)
+if (chunks.length === 0) fail(`${file} produced no chunks.`)
 
 const log = (s: string) => verbose && console.error(s)
 log(`model=${SUMMARIZE_MODEL} messages=${messages.length} chunks=${chunks.length}`)
