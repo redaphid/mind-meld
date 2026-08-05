@@ -15,13 +15,7 @@ import {
   type SessionMessage,
 } from "./chunk-text.js";
 
-// Re-exported so existing importers of chunks.js keep working.
 export type { SessionMessage } from "./chunk-text.js";
-export {
-  formatForSummary,
-  CHUNK_JOIN,
-  buildChunkTexts,
-} from "./chunk-text.js";
 
 export interface PersistedChunk {
   id: number;

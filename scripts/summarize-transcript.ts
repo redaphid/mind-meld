@@ -26,7 +26,7 @@
 // on the code defaults (qwen3:8b, a 120s timeout) instead of your configuration.
 import "dotenv/config"
 import { readFileSync, writeFileSync } from "node:fs"
-import { buildChunkTexts, type SessionMessage } from "../src/embeddings/chunks.js"
+import { buildChunkTexts, type SessionMessage } from "../src/embeddings/chunk-text.js"
 import { combineSummaries, summarizeChunk, SUMMARIZE_MODEL } from "../src/embeddings/summarize.js"
 
 const USAGE =
