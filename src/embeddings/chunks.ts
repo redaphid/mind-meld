@@ -9,11 +9,19 @@ import {
   SHORT_CONVERSATION_CHARS,
 } from "./summarize.js";
 
-export interface SessionMessage {
-  id: number;
-  role: string;
-  content_text: string;
-}
+import {
+  formatForSummary,
+  CHUNK_JOIN,
+  type SessionMessage,
+} from "./chunk-text.js";
+
+// Re-exported so existing importers of chunks.js keep working.
+export type { SessionMessage } from "./chunk-text.js";
+export {
+  formatForSummary,
+  CHUNK_JOIN,
+  buildChunkTexts,
+} from "./chunk-text.js";
 
 export interface PersistedChunk {
   id: number;
@@ -23,22 +31,6 @@ export interface PersistedChunk {
   summary: string;
   contentChars: number;
 }
-
-export const formatForSummary = (m: SessionMessage): string =>
-  `[${m.role.toUpperCase()}]: ${m.content_text}`;
-
-// The separator between messages inside one chunk. Exported so nothing has to
-// restate it — a benchmark or CLI that re-joins messages its own way is
-// measuring an input the pipeline never produces.
-export const CHUNK_JOIN = "\n\n---\n\n";
-
-// Messages -> the exact chunk texts the summarizer receives. This is the one
-// definition of "what a chunk is": production and any offline harness must go
-// through it, or they diverge silently and the harness measures nothing real.
-export const buildChunkTexts = (messages: SessionMessage[]): string[] =>
-  chunkMessagesWithIndices(messages.map(formatForSummary), CHUNK_SIZE_CHARS).map(
-    (c) => c.messages.join(CHUNK_JOIN),
-  );
 
 // Persist chunk-level summaries + embeddings for a session. Returns the
 // persisted chunks so callers can combine their summaries into a session-level

@@ -4,7 +4,7 @@ import {
   formatForSummary,
   CHUNK_JOIN,
   type SessionMessage,
-} from "./chunks.js"
+} from "./chunk-text.js"
 import { chunkMessagesWithIndices, CHUNK_SIZE_CHARS } from "./summarize.js"
 
 const msg = (id: number, role: string, content_text: string): SessionMessage => ({
