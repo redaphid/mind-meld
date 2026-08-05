@@ -11,17 +11,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$SCRIPT_DIR"
 
-# Override Docker-internal hostnames for local execution
-export POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
+# Override Docker-internal hostnames for local execution. 127.0.0.1, never
+# `localhost`: Ollama binds IPv4 only, so a `localhost` resolving to ::1 first
+# gets ECONNREFUSED from a server that is up.
+export POSTGRES_HOST="${POSTGRES_HOST:-127.0.0.1}"
 export POSTGRES_PORT="${POSTGRES_PORT:-5433}"
-export CHROMA_HOST="${CHROMA_HOST:-localhost}"
+export CHROMA_HOST="${CHROMA_HOST:-127.0.0.1}"
 export CHROMA_PORT="${CHROMA_PORT:-8001}"
 
-# Resolve Docker hostnames to localhost (`.env` may have `postgres`/`chroma`/`host.docker.internal`)
-[[ "$POSTGRES_HOST" == "postgres" ]] && export POSTGRES_HOST=localhost
-[[ "$CHROMA_HOST" == "chroma" ]] && export CHROMA_HOST=localhost
-export OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}"
-[[ "$OLLAMA_URL" == *"host.docker.internal"* ]] && export OLLAMA_URL="http://localhost:11434"
+# Resolve Docker hostnames to the host (`.env` may have `postgres`/`chroma`/`host.docker.internal`)
+[[ "$POSTGRES_HOST" == "postgres" ]] && export POSTGRES_HOST=127.0.0.1
+[[ "$CHROMA_HOST" == "chroma" ]] && export CHROMA_HOST=127.0.0.1
+export OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
+[[ "$OLLAMA_URL" == *"host.docker.internal"* ]] && export OLLAMA_URL="http://127.0.0.1:11434"
 
 PGHOST="$POSTGRES_HOST"
 PGPORT="$POSTGRES_PORT"
