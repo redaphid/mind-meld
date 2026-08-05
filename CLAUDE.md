@@ -59,6 +59,13 @@ the page.
 
 - Views: status, search (vector / full-text / hybrid), browse, session reader,
   logs, quarantine.
+- Search and browse rows climb the same ladder the MCP tools do — title →
+  session summary → section summaries → messages (`public/js/disclosure.js`),
+  each rung fetched only when opened and rendered in place, so drilling never
+  loses your position in the list. A search hit opens one rung deeper: at its
+  matched section, or at its matched message. The bottom rung is shared with
+  the full-page reader (`public/js/messages.js`) so "reading messages" behaves
+  identically wherever you arrived from.
 - It is a PWA: installable, and the service worker keeps the last state readable
   when the tunnel drops. Bump `VERSION` in `public/sw.js` when shell files
   change — **enforced, not remembered** (issue #113): `src/quality/service-worker-freshness.test.ts`

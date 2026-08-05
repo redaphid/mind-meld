@@ -5,7 +5,8 @@
 import { html, useState, useEffect, useRef } from 'preact'
 import { useApi } from '../api.js'
 import { useRoute, navigate } from '../router.js'
-import { Spinner, ErrorBox, Empty, SessionRow, Pill } from '../ui.js'
+import { Spinner, ErrorBox, Empty, Pill } from '../ui.js'
+import { DisclosureRow, DisclosureHint } from '../disclosure.js'
 import { sourceLabel } from '../util.js'
 
 const MODES = [
@@ -166,26 +167,21 @@ export const SearchView = () => {
             >Nothing matched. Try the ${params.mode === 'text' ? 'vector' : 'full-text'} mode, or a
             broader time range.<//
           >`
-        : data.results.map(
-            r => html`
-              <${SessionRow}
-                key=${`${r.sessionId}-${r.matchedTier}`}
-                session=${r}
-                snippet=${r.snippet}
-                tier=${r.matchedTier}
-                score=${r.score}
-                onClick=${() =>
-                  navigate(
-                    `session/${r.sessionId}`,
-                    r.cursor?.messageId
-                      ? { msg: r.cursor.messageId }
-                      : r.cursor?.chunkIndex != null
-                        ? { chunk: r.cursor.chunkIndex }
-                        : {}
-                  )}
-              />
-            `
-          )}
+        : html`
+            <${DisclosureHint} />
+            ${data.results.map(
+              r => html`
+                <${DisclosureRow}
+                  key=${`${r.sessionId}-${r.matchedTier}`}
+                  session=${r}
+                  snippet=${r.snippet}
+                  tier=${r.matchedTier}
+                  score=${r.score}
+                  cursor=${r.cursor}
+                />
+              `
+            )}
+          `}
     `}
   `
 }
