@@ -9,11 +9,13 @@ import {
   SHORT_CONVERSATION_CHARS,
 } from "./summarize.js";
 
-export interface SessionMessage {
-  id: number;
-  role: string;
-  content_text: string;
-}
+import {
+  formatForSummary,
+  CHUNK_JOIN,
+  type SessionMessage,
+} from "./chunk-text.js";
+
+export type { SessionMessage } from "./chunk-text.js";
 
 export interface PersistedChunk {
   id: number;
@@ -23,9 +25,6 @@ export interface PersistedChunk {
   summary: string;
   contentChars: number;
 }
-
-const formatForSummary = (m: SessionMessage): string =>
-  `[${m.role.toUpperCase()}]: ${m.content_text}`;
 
 // Persist chunk-level summaries + embeddings for a session. Returns the
 // persisted chunks so callers can combine their summaries into a session-level
@@ -76,7 +75,7 @@ export const persistSessionChunks = async (
 
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
-    const chunkText = chunk.messages.join("\n\n---\n\n");
+    const chunkText = chunk.messages.join(CHUNK_JOIN);
     const startMessageId = messages[chunk.startIndex].id;
     const endMessageId = messages[chunk.endIndex].id;
 

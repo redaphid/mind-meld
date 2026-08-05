@@ -33,6 +33,7 @@
     "sync": "tsx src/index.ts sync",
     "sync:claude": "tsx src/index.ts sync --source claude_code",
     "sync:embeddings": "tsx src/index.ts embeddings",
+    "summarize:transcript": "tsx scripts/summarize-transcript.ts",
     "verify": "tsx src/index.ts verify",
     "compute:centroids": "tsx scripts/compute-centroids.ts",
     "mark:warmups": "tsx scripts/mark-warmups.ts",

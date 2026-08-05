@@ -38,5 +38,17 @@ logs/
 tmp/
 *.tmp
 
+# Dumped conversation content. summarize-transcript.ts reads a transcript and
+# writes a summary; both are verbatim conversation text and this repo is public.
+# tmp/ already covers the documented paths — these catch the stray dump in the
+# repo root before `git add .` does.
+transcript*.json
+transcript*.jsonl
+summary*.txt
+
+# Session handoff notes. Working state for whoever picks the thread up next —
+# local paths, machine specifics, half-finished debugging. Not project docs.
+HANDOFF.md
+
 # Test coverage
 coverage/
