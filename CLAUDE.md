@@ -282,7 +282,25 @@ SELECT * FROM v_tool_stats;
 
 ## Development
 
+**Run `pnpm install` first, and again whenever a check fails on a missing
+module.** `node_modules` here drifts from `package.json` — the sync worker runs
+from source on the host while the containers ship their own bundled deps, so
+nothing forces a reinstall when dependencies change under you. It presents as a
+type error in a file you did not touch:
+
+```
+src/__tests__/workflows.test.ts(15,23): error TS2307: Cannot find module 'yaml'
+```
+
+That is a stale install, not a broken import — `yaml` was listed in
+`package.json` the whole time. `pnpm install` fixed it, adding `yaml`, `knip`,
+and `@vitest/coverage-v8` and removing four packages that were no longer
+declared. Reach for `pnpm install` before you debug the import.
+
 ```bash
+# Install/refresh dependencies — do this first
+pnpm install
+
 # Reset database
 pnpm run db:reset
 

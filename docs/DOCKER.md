@@ -147,27 +147,28 @@ pnpm run sync:embeddings
 
 | File | Use |
 | --- | --- |
-| `docker-compose.yml` | Default. Pulls published GHCR images. No `sync` service. Requires `WSL_CLAUDE_PATH` and `MACHINE_NAME_WSL` in `.env` — see below |
+| `docker-compose.yml` | Default. Pulls published GHCR images. No `sync` service |
 | `docker-compose.local.yml` | Builds from source, includes a containerized `sync`, requires explicit `DATA_DIR`/`POSTGRES_PASSWORD`/paths (it uses `${VAR:?}`, so it fails fast rather than defaulting) |
 | `docker-compose.dev.yml` | Overlay that builds the images instead of pulling: `docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build` |
 
-### `sync-wsl` requires configuration, by design
+### Adding a sync service for another machine
 
-`docker-compose.yml`'s `sync-wsl` service mounts a WSL distro's Claude Code
-home. Both `WSL_CLAUDE_PATH` and `MACHINE_NAME_WSL` use the `${VAR:?message}`
-form, so `docker compose up` **stops with that message** if either is unset.
+The base file indexes no Claude Code home of its own. To index one, add a
+service built on the `mindmeld-sync` image with the home bind-mounted at
+`/root/.claude:ro` and a `MACHINE_NAME` of your own.
 
-That is deliberate, and it is not a style preference. Docker *creates* a
-missing bind-mount source directory and mounts it empty: the sync would then
-walk zero projects, log nothing alarming, and exit 0 — an index that is
-quietly dead for weeks. A defaulted `MACHINE_NAME` is worse still, because it
-stamps new rows with a name none of the existing rows carry, silently splitting
-one machine into two under `/logs/<machine>`. A container that refuses to start
-is a five-second fix; neither of those is.
+Use the `${VAR:?message}` form for both, not a default. Docker *creates* a
+missing bind-mount source directory and mounts it empty: the sync then walks
+zero projects, logs nothing alarming, and exits 0 — an index that is quietly
+dead for weeks. A defaulted `MACHINE_NAME` is worse, because it stamps new rows
+with a name none of the existing rows carry, silently splitting one machine
+into two under `/logs/<machine>`. A container that refuses to start is a
+five-second fix; neither of those is.
 
-Compose interpolates the whole file, so this applies even if you never intend
-to run `sync-wsl`. If you have no WSL distro to index, set them to anything —
-or delete the service.
+Note that compose interpolates the whole file, so a `${VAR:?}` in any service
+blocks every compose command until it is set — including commands that target
+an unrelated service, and including services excluded by a profile. An override
+file cannot rescue it; interpolation happens before the merge.
 
 > The dev overlay still declares a `sync` service that the base file no longer
 > has. Compose will happily create it from the overlay alone — with no

@@ -7,6 +7,13 @@
 #
 # That's it! Paths auto-detect on macOS. Linux users: see .env.example for paths.
 
+# Pinned, not derived. Compose otherwise names the project after the directory
+# you invoked it from, while every service below hardcodes its container_name —
+# so reaching this repo by a second path (a symlink, a worktree, a clone under
+# another name) makes `up -d` try to CREATE containers whose names are already
+# taken, and it fails with a name conflict instead of recreating them.
+name: mindmeld
+
 services:
   postgres:
     image: ghcr.io/redaphid/mindmeld-postgres:latest
@@ -51,43 +58,6 @@ services:
   # process via scripts/sync-host.sh (launchd: com.example.mindmeld-sync),
   # reaching Ollama over the fast host->tunnel path and Postgres/Chroma via their
   # published ports. On a Linux host where Ollama is local, restore this service.
-
-  # WSL-native Claude Code home (distinct from the Windows-side path the `sync`
-  # service above watches via CLAUDE_CODE_PATH). Same DB/Chroma, same schedule.
-  sync-wsl:
-    image: ghcr.io/redaphid/mindmeld-sync:latest
-    container_name: mindmeld-sync-wsl
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-      chroma:
-        condition: service_healthy
-    environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mindmeld}
-      CHROMA_HOST: chroma
-      CHROMA_PORT: 8000
-      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
-      OLLAMA_TIMEOUT_MS: ${OLLAMA_TIMEOUT_MS:-300000}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
-      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
-      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-50}
-      SUMMARIZE_MODEL: ${SUMMARIZE_MODEL:-qwen3:4b-instruct}
-      SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-3600}
-      # Stamped onto every project this sync indexes, so /logs/<machine> can
-      # tell this WSL distro apart from the Windows host and the laptop — they
-      # all use the same /home/<user> shape, so paths alone cannot. Required,
-      # not defaulted: a default would silently stamp a different name than
-      # every existing row, splitting one machine into two in the data.
-      MACHINE_NAME: ${MACHINE_NAME_WSL:?MACHINE_NAME_WSL is required — set it in .env to the name this WSL distro is already known by, or /logs/<machine> will split this machine in two}
-    volumes:
-      # Your WSL home's .claude directory. Required, not defaulted: Docker
-      # creates a missing bind-mount source, mounts it empty, and the sync then
-      # walks zero projects and exits 0 — an index that is quietly dead for
-      # weeks. Refusing to start is the cheaper failure.
-      - ${WSL_CLAUDE_PATH:?WSL_CLAUDE_PATH is required — set it in .env to your WSL home's .claude directory, or this service indexes nothing while appearing healthy}:/root/.claude:ro
 
   centroid-compute:
     image: ghcr.io/redaphid/mindmeld-centroids:latest
