@@ -76,6 +76,10 @@ services:
       CHROMA_PORT: 8000
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_MAX_CONCURRENCY: ${OLLAMA_MAX_CONCURRENCY:-1}
+      # Centroids are averages of existing vectors, so the embedding model must
+      # match the one that produced them; vectors from two models are not
+      # comparable.
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
       CENTROID_INTERVAL_SECONDS: ${CENTROID_INTERVAL_SECONDS:-25200}
 
   warmup-filter:
@@ -112,6 +116,12 @@ services:
       CHROMA_PORT: 8000
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_MAX_CONCURRENCY: ${OLLAMA_MAX_CONCURRENCY:-1}
+      # This service drains the embedding queue too, so it needs the same model
+      # config as any sync worker. Without these it silently used the defaults in
+      # src/config.ts while a host sync read .env — two workers on one queue
+      # summarizing the same sessions with different models.
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
+      SUMMARIZE_MODEL: ${SUMMARIZE_MODEL:-qwen3:4b-instruct}
       MCP_PORT: 3000
       # Reported as `thisMachine` by /logs; without it this falls back to the
       # container id, which tells nobody anything.

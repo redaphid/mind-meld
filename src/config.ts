@@ -114,7 +114,12 @@ export const config = {
     model: getEnv("EMBEDDING_MODEL", "bge-m3"),
     dimensions: getEnvInt("EMBEDDING_DIMENSIONS", 1024),
     batchSize: getEnvInt("EMBEDDING_BATCH_SIZE", 100),
-    summarizeModel: getEnv("SUMMARIZE_MODEL", "qwen3:8b"),
+    // The one default. docker-compose.yml repeats the literal because compose
+    // cannot read it from here — keep them in step, and prefer changing this one
+    // first. An -instruct build is required: a `thinking` model emits its
+    // reasoning untagged through /api/generate, and neither `think: false`, the
+    // /no_think prefix, nor stripThinking removes it.
+    summarizeModel: getEnv("SUMMARIZE_MODEL", "qwen3:4b-instruct"),
   },
 
   // Source paths
