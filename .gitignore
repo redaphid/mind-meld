@@ -46,5 +46,9 @@ transcript*.json
 transcript*.jsonl
 summary*.txt
 
+# Session handoff notes. Working state for whoever picks the thread up next —
+# local paths, machine specifics, half-finished debugging. Not project docs.
+HANDOFF.md
+
 # Test coverage
 coverage/
