@@ -32,10 +32,15 @@ RUN chmod +x /app/mindmeld
 # Default to hourly sync (3600 seconds)
 ENV SYNC_INTERVAL_SECONDS=3600
 
-# Run sync in a loop
+# Run sync in a loop. The sleep is unconditional, and here that matters more
+# than anywhere else: this entrypoint is DESIGNED to exit nonzero. src/index.ts
+# sets process.exitCode from the run report so a data-dropping run cannot report
+# success (#29), and a single quarantined record is enough. Chaining the sleep
+# behind `&&` therefore turned any sync error into a full-speed retry loop with
+# no backoff at all.
 CMD while true; do \
-      echo "=== Sync starting at $(date -Iseconds) ===" && \
-      /app/mindmeld sync && \
-      echo "=== Sync complete, sleeping ${SYNC_INTERVAL_SECONDS}s ===" && \
+      echo "=== Sync starting at $(date -Iseconds) ==="; \
+      /app/mindmeld sync || echo "=== Sync FAILED ==="; \
+      echo "=== Sleeping ${SYNC_INTERVAL_SECONDS}s ==="; \
       sleep ${SYNC_INTERVAL_SECONDS}; \
     done

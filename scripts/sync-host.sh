@@ -9,21 +9,31 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-# Point at the published host ports. dotenv does not override already-set vars,
+# Point at the published DB ports. dotenv does not override already-set vars,
 # so these win over the in-container hostnames baked into .env.
 #
-# 127.0.0.1, never `localhost`: Ollama binds IPv4 only (127.0.0.1:11434, nothing
-# on ::1), so a `localhost` that resolves to IPv6 first fails against a server
-# that is up and healthy. Same literal for the DB ports, for the same reason.
+# 127.0.0.1, never `localhost`: these services bind IPv4 only, so a `localhost`
+# that resolves to ::1 first fails against a server that is up and healthy.
 export POSTGRES_HOST=127.0.0.1
 export POSTGRES_PORT=5433
 export CHROMA_HOST=127.0.0.1
 export CHROMA_PORT=8001
 
-# OLLAMA_URL is deliberately NOT exported here. Unlike the hostnames above it
-# has no in-container form to beat, and config.ts already defaults it to
-# http://127.0.0.1:11434 — exporting it only shadowed .env, leaving no way to
-# aim the host worker at a local Ollama when the tunnel on 11434 is down.
+# OLLAMA_URL is deliberately NOT exported. config.ts already defaults it to the
+# same host-shaped value, and exporting it only shadowed .env — leaving no way
+# to aim this worker at a local Ollama when the tunnel on 11434 is down.
+#
+# The catch: .env's OLLAMA_URL is shared with docker-compose, where the default
+# is container-shaped (host.docker.internal). That name does not resolve on the
+# host, and every summarization would fail one connection error at a time for
+# as long as the loop runs. Refuse to start instead.
+case "${OLLAMA_URL:-}" in
+  *docker.internal*)
+    echo "sync-host: OLLAMA_URL=${OLLAMA_URL} is container-shaped; the host cannot resolve it." >&2
+    echo "sync-host: set a host-reachable URL (e.g. http://127.0.0.1:11435) in .env." >&2
+    exit 1
+    ;;
+esac
 
 INTERVAL="${SYNC_INTERVAL_SECONDS:-3600}"
 while true; do
