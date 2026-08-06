@@ -48,8 +48,14 @@ quality
 vitest.config.ts
 knip.jsonc
 
-# Operator-side helper scripts, not container entrypoints.
+# Operator-side helper scripts. Two of them ARE container entrypoints — the
+# centroids and warmups images run `pnpm compute:centroids` / `pnpm
+# mark:warmups`, and excluding these left both crash-looping on
+# ERR_MODULE_NOT_FOUND. src/quality/dockerfile-entrypoints.test.ts keeps the
+# two lists in step.
 scripts
+!scripts/compute-centroids.ts
+!scripts/mark-warmups.ts
 *.sh
 
 # Logs

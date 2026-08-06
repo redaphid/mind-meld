@@ -19,7 +19,11 @@ export POSTGRES_HOST=127.0.0.1
 export POSTGRES_PORT=5433
 export CHROMA_HOST=127.0.0.1
 export CHROMA_PORT=8001
-export OLLAMA_URL=http://127.0.0.1:11434
+
+# OLLAMA_URL is deliberately NOT exported here. Unlike the hostnames above it
+# has no in-container form to beat, and config.ts already defaults it to
+# http://127.0.0.1:11434 — exporting it only shadowed .env, leaving no way to
+# aim the host worker at a local Ollama when the tunnel on 11434 is down.
 
 INTERVAL="${SYNC_INTERVAL_SECONDS:-3600}"
 while true; do
