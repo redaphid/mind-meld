@@ -9,6 +9,15 @@ Mindmeld syncs conversations from Claude Code into a unified PostgreSQL + Chroma
 | PostgreSQL | **5433** | Metadata + full-text search |
 | Chroma     | **8001** | Vector embeddings          |
 | MCP        | **3847** | HTTP API for Claude Code   |
+| UI         | **3848** | Browser app (proxies to MCP) |
+| Ollama     | **11434**| SSH tunnel to the remote GPU box |
+| Ollama     | **11435**| Local fallback Ollama on this machine |
+
+11434 must stay unbound locally: the tunnel's `ssh -L` uses
+`ExitOnForwardFailure=yes`, so a local Ollama squatting on it makes the tunnel
+exit 255 on every retry, forever. Run any local Ollama on 11435 instead
+(`OLLAMA_HOST=127.0.0.1:11435`) and point `OLLAMA_URL` at it while the remote
+box is down.
 
 ## Local Development Setup
 

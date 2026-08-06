@@ -16,10 +16,14 @@ COPY . .
 # Default to 7 hours (25200 seconds)
 ENV CENTROID_INTERVAL_SECONDS=25200
 
-# Run centroid computation in a loop
+# Run centroid computation in a loop. The sleep is unconditional: chaining it
+# behind `&&` meant a failing pass skipped its own backoff and respawned at
+# ~3.5Hz, burning a core instead of waiting out the interval.
+# These scripts do not attach the DB log sink, so `docker logs` is the only
+# place a permanently failing pass shows up — it will not reach /logs.
 CMD while true; do \
-      echo "=== Centroid computation starting at $(date -Iseconds) ===" && \
-      pnpm compute:centroids && \
-      echo "=== Centroid computation complete, sleeping ${CENTROID_INTERVAL_SECONDS}s ===" && \
+      echo "=== Centroid computation starting at $(date -Iseconds) ==="; \
+      pnpm compute:centroids || echo "=== Centroid computation FAILED ==="; \
+      echo "=== Sleeping ${CENTROID_INTERVAL_SECONDS}s ==="; \
       sleep ${CENTROID_INTERVAL_SECONDS}; \
     done

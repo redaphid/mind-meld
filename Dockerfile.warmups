@@ -16,10 +16,14 @@ COPY . .
 # Default to 6 hours (21600 seconds)
 ENV WARMUP_INTERVAL_SECONDS=21600
 
-# Run warmup detection in a loop
+# Run warmup detection in a loop. The sleep is unconditional: chaining it
+# behind `&&` meant a failing pass skipped its own backoff and respawned at
+# ~3.5Hz, burning a core instead of waiting out the interval.
+# These scripts do not attach the DB log sink, so `docker logs` is the only
+# place a permanently failing pass shows up — it will not reach /logs.
 CMD while true; do \
-      echo "=== Warmup detection starting at $(date -Iseconds) ===" && \
-      pnpm mark:warmups && \
-      echo "=== Warmup detection complete, sleeping ${WARMUP_INTERVAL_SECONDS}s ===" && \
+      echo "=== Warmup detection starting at $(date -Iseconds) ==="; \
+      pnpm mark:warmups || echo "=== Warmup detection FAILED ==="; \
+      echo "=== Sleeping ${WARMUP_INTERVAL_SECONDS}s ==="; \
       sleep ${WARMUP_INTERVAL_SECONDS}; \
     done
