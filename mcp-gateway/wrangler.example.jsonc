@@ -1,0 +1,38 @@
+// Copy to wrangler.jsonc and fill in your values. wrangler.jsonc is
+// gitignored because this repository is public and these values name real
+// infrastructure (hostnames, Access AUD tags, allowed emails).
+{
+  "name": "mcp-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "kv_namespaces": [
+    {
+      // The OAuth provider's storage: grants, tokens, registered clients.
+      "binding": "OAUTH_KV",
+      "id": "<your-kv-namespace-id>"
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "mcp-gateway.example.com",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    // Origins are <service>.<ORIGIN_DOMAIN>/mcp
+    "ORIGIN_DOMAIN": "example.com",
+    // Which <service> names are proxyable — the allowlist, comma-separated
+    "MCP_SERVICES": "mindmeld",
+    // Your Cloudflare Zero Trust team domain
+    "ACCESS_TEAM_DOMAIN": "<team>.cloudflareaccess.com",
+    // AUD tag of the Access app protecting <gateway-host>/authorize
+    "ACCESS_AUD": "<access-app-aud>",
+    // Who may authorize; both comma-separated, either may be empty,
+    // but with neither set the gateway denies everyone
+    "ALLOWED_EMAILS": "<you@example.com>",
+    "ALLOWED_EMAIL_DOMAINS": "example.com"
+  }
+  // Secrets, set with `wrangler secret put`:
+  //   CF_ACCESS_CLIENT_ID      Access service token id (ends in .access)
+  //   CF_ACCESS_CLIENT_SECRET  Access service token secret
+}
