@@ -8,6 +8,13 @@ vi.mock('../embeddings/batch.js', () => ({
   updateAggregateEmbeddings: vi.fn(),
   AGGREGATE_BATCH_SIZE: 100,
 }))
+// The spool drain runs first in the default runner; unconfigured (the test
+// default) it is a no-op, which is also the production default.
+vi.mock('../sync/ingest-spool.js', () => ({
+  drainIngestSpool: vi
+    .fn()
+    .mockResolvedValue({ configured: false, drained: 0, quarantined: 0, errors: [] }),
+}))
 
 import {
   generatePendingEmbeddings,

@@ -3,6 +3,7 @@ import {
   updateAggregateEmbeddings,
   AGGREGATE_BATCH_SIZE,
 } from '../embeddings/batch.js'
+import { drainIngestSpool } from '../sync/ingest-spool.js'
 
 // A manually triggered ingestion pass, for the "Run ingestion now" button in
 // the UI and for POST /api/sync.
@@ -15,6 +16,11 @@ import {
 // waiting out SYNC_INTERVAL_SECONDS, and it is the half that actually talks to
 // Ollama, which makes it the useful thing to press after changing where Ollama
 // lives.
+//
+// It also drains the edge ingest spool first (when INGEST_SPOOL_* is set),
+// because in a containers-only deployment this service may be the only process
+// that ever runs a sync pass — without this, spooled conversations would wait
+// for a host-side loop that deployment doesn't have.
 
 export type SyncRunState = {
   running: boolean
@@ -22,11 +28,19 @@ export type SyncRunState = {
   finishedAt: string | null
   messagesEmbedded: number
   sessionsUpdated: number
+  spoolDrained: number
+  spoolQuarantined: number
   durationMs: number | null
   error: string | null
 }
 
-export type SyncRunResult = { messagesEmbedded: number; sessionsUpdated: number }
+export type SyncRunResult = {
+  messagesEmbedded: number
+  sessionsUpdated: number
+  spoolDrained?: number
+  spoolQuarantined?: number
+  error?: string
+}
 
 // A button anyone can press repeatedly, driving work that takes minutes and
 // holds a serialized Ollama slot. Two concurrent drains would fight over the
@@ -39,6 +53,8 @@ let state: SyncRunState = {
   finishedAt: null,
   messagesEmbedded: 0,
   sessionsUpdated: 0,
+  spoolDrained: 0,
+  spoolQuarantined: 0,
   durationMs: null,
   error: null,
 }
@@ -54,6 +70,12 @@ export const getSyncRunState = (): SyncRunState => ({ ...state })
 const MAX_AGGREGATE_DRAIN_MS = 5 * 60 * 1000
 
 const runPendingEmbeddings = async (): Promise<SyncRunResult> => {
+  // Spool first: fast, GPU-free, and what it lands is exactly what the
+  // embedding pass below should then pick up. drainIngestSpool never throws
+  // for a payload — bad ones go to sync_quarantine — so errors here are
+  // transport-level and reported without aborting the embedding half.
+  const spool = await drainIngestSpool()
+
   const embedded = await generatePendingEmbeddings()
 
   let sessionsUpdated = 0
@@ -68,7 +90,13 @@ const runPendingEmbeddings = async (): Promise<SyncRunResult> => {
     }
   }
 
-  return { messagesEmbedded: embedded.processed, sessionsUpdated }
+  return {
+    messagesEmbedded: embedded.processed,
+    sessionsUpdated,
+    spoolDrained: spool.drained,
+    spoolQuarantined: spool.quarantined,
+    ...(spool.errors.length > 0 ? { error: spool.errors.join('; ') } : {}),
+  }
 }
 
 // Returns as soon as the run is accepted, never when it finishes: a drain takes
@@ -87,6 +115,8 @@ export const startSyncRun = (
     finishedAt: null,
     messagesEmbedded: 0,
     sessionsUpdated: 0,
+    spoolDrained: 0,
+    spoolQuarantined: 0,
     durationMs: null,
     error: null,
   }
@@ -127,6 +157,8 @@ export const resetSyncRunState = () => {
     finishedAt: null,
     messagesEmbedded: 0,
     sessionsUpdated: 0,
+    spoolDrained: 0,
+    spoolQuarantined: 0,
     durationMs: null,
     error: null,
   }
