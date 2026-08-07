@@ -206,6 +206,64 @@ duplicate work comes straight off it.
 - A summarizing queue looks stalled to message-rate metrics; see #109/#111 and
   the ranked verdicts in `throughput.ts`.
 
+## Standing ingestion down (giving the GPU back)
+
+Embedding and summarization hold an Ollama slot for minutes at a time, and until
+1.20.0 the only way to get the GPU back for a game or a render was to stop
+containers. The switch is now a row in `sync_control`
+(`init-db/022-sync-pause.sql`), because the queue does not run in the process
+serving the UI — it runs in the sync workers, and Postgres is the only thing
+they both hold.
+
+```
+GET  /api/stand-down            # state, with secondsRemaining
+POST /api/stand-down            # {minutes, reason} — clamped 1..240, default 15
+POST /api/stand-down/resume     # clear the deadline early
+```
+
+Also a button on the overview. Three things about the design are deliberate and
+should not be "simplified" away:
+
+- **It is a deadline, not a pause flag.** A worker stands down only while
+  `stand_down_until` is in the future. The worst case of a forgotten press, or
+  of a worker killed mid-pass, is one skipped cycle — it cannot freeze the index.
+- **It gates the embedding phase, not the file sync.** Reading transcripts into
+  Postgres never touches the GPU, so conversations keep being indexed while
+  standing down; only their vectors wait.
+- **Standing down is not an error.** `FullSyncResult.standDown` is its own
+  field and is deliberately kept out of `errors`, because a run that records an
+  error exits nonzero and monitoring would read an intentional yield as a failed
+  sync.
+
+`shouldStandDown()` fails **open**: the table arrives in a migration applied by
+`mcp` on startup, so a worker can legitimately meet a database that has not got
+it yet, and a switch that cannot be read is not a switch that says stop.
+
+Checkpoints are at batch boundaries in `generatePendingEmbeddings` and
+per-session in `updateAggregateEmbeddings` — the latter is the one that matters,
+since a session is 5-10 minutes of GPU.
+
+## Why nothing is moving: `/api/system`
+
+"Nothing is happening" has several causes that look identical from a pending
+count, so the overview probes each one (`src/mcp/system-status.ts`):
+
+- **The Ollama gate.** `OLLAMA_URL` is not Ollama — it is the GPU-gating proxy
+  described above, and its `/_gate` endpoint distinguishes "holding your work
+  because a game has the card" from "broken". A plain Ollama 404s that path,
+  reported as `present: false`, not as an error.
+- **GPU load** comes from the gate's `other_vram_mb`, because no mindmeld
+  container has GPU access and nothing inside one can run `nvidia-smi`.
+- **CPU** is `os.loadavg()`, which is the Docker VM's load and not the host's —
+  and is `[0,0,0]` on Windows, hence `loadAvailable`. "Idle" and "not measured"
+  must not draw the same empty bar.
+
+`/api/summaries` covers the slow phase, including how many distinct workers are
+summarizing the same session — non-zero duplication is the global-unclaimed-queue
+problem above, made visible. `/api/embedding-series` is the same pipeline over
+time, bucketed; a single averaged rate cannot tell a steady drain from a burst
+two hours ago.
+
 ## When sync cannot process a record
 
 Nothing is dropped. A record that fails to parse or insert goes to

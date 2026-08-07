@@ -15,6 +15,7 @@ const result = (over: Partial<FullSyncResult> = {}): FullSyncResult => ({
   },
   history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
   embeddings: { messagesEmbedded: 100, sessionsUpdated: 5 },
+  standDown: false,
   errors: [],
   ...over,
 });

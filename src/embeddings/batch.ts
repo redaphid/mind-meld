@@ -11,6 +11,7 @@ import { summarizeConversation, ensureSummarizeModel, combineSummaries } from ".
 import { persistSessionChunks, SessionMessage } from "./chunks.js";
 import { embeddableMessages, embeddableSessions } from "./pending.js";
 import { classifyNoise } from "./classify.js";
+import { shouldStandDown, STAND_DOWN_NOTICE } from "../sync/stand-down.js";
 
 export interface BatchEmbeddingStats {
   processed: number;
@@ -132,6 +133,14 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
   let shortExhausted = false;
 
   while (hasMore) {
+    // The stand-down checkpoint for the fast phase. Between batches rather than
+    // inside one: a batch is seconds, and abandoning it mid-flight would waste
+    // embeddings already paid for.
+    if (await shouldStandDown()) {
+      console.log(STAND_DOWN_NOTICE);
+      break;
+    }
+
     // Prioritize short messages (no summarization needed, ~100x faster)
     // Re-check for short messages every iteration in case new ones were synced
     let messagesToEmbed: MessageToEmbed[];
@@ -396,6 +405,14 @@ export async function updateAggregateEmbeddings(): Promise<{
   console.log(`Processing ${sessions.rows.length} session embeddings...`);
 
   for (const session of sessions.rows) {
+    // The checkpoint that actually matters. Summarizing one session is 5-10
+    // minutes of GPU, so checking once per session is the difference between
+    // yielding promptly and holding the card for the rest of the batch.
+    if (await shouldStandDown()) {
+      console.log(STAND_DOWN_NOTICE);
+      break;
+    }
+
     const isReembed = session.existing_content_chars !== null;
     let actualContentChars = 0;
 

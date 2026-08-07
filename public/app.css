@@ -618,3 +618,80 @@ label.check input { width: 18px; height: 18px; min-height: 0; accent-color: var(
   font-size: 13px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
+
+/* Embedding activity chart.
+   Two scales in one picture: messages (bars + line) on the main plot, sessions
+   on the strip below it. See public/js/chart.js for why they cannot share an
+   axis. The SVG is stretched with preserveAspectRatio="none", so every stroke
+   that must stay honest uses vector-effect="non-scaling-stroke". */
+.chart-wrap { margin-top: 4px; }
+
+.chart {
+  display: block;
+  width: 100%;
+  height: 132px;
+  overflow: visible;
+}
+
+.chart .ch-embedded { fill: var(--accent); }
+.chart .ch-arrived {
+  fill: none;
+  stroke: var(--blue);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  opacity: 0.9;
+}
+.chart .ch-summarized { fill: var(--amber); }
+/* Hit targets sit above everything so a tap anywhere in a column gets that
+   bucket's <title>; they must never paint over the data. */
+.chart .ch-hit { fill: transparent; }
+
+.chart-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--faint);
+  margin-top: 2px;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 8px;
+}
+.chart-legend > span { display: inline-flex; align-items: center; gap: 5px; }
+.chart-legend i {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex: none;
+}
+.chart-legend i.sw-embedded { background: var(--accent); }
+.chart-legend i.sw-arrived { background: var(--blue); }
+.chart-legend i.sw-summarized { background: var(--amber); }
+
+/* Segmented control — the chart's window picker. Sits in a card heading, so it
+   inherits no text-transform and stays visually quiet until pressed. */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.seg button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  min-height: 28px;
+}
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button.active { background: var(--surface-2); color: var(--accent); }
