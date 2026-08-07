@@ -111,6 +111,134 @@ describe('drainIngestSpool draining', () => {
     const stats = await drainIngestSpool()
     expect(stats.errors).toEqual(['ingest spool list failed: HTTP 500'])
   })
+
+  // A truncated page must not leave its tail for the next cycle — the loop
+  // re-lists until the spool comes back empty.
+  it('keeps listing until the spool is empty', async () => {
+    fetchMock
+      .mockResolvedValueOnce(respond(200, { keys: [{ id: 'a.json' }], truncated: true }))
+      .mockResolvedValueOnce(respond(200, validPayload))
+      .mockResolvedValueOnce(respond(204))
+      .mockResolvedValueOnce(respond(200, { keys: [{ id: 'b.json' }], truncated: false }))
+      .mockResolvedValueOnce(respond(200, validPayload))
+      .mockResolvedValueOnce(respond(204))
+      .mockResolvedValueOnce(respond(200, { keys: [], truncated: false }))
+    ingestMock.mockResolvedValue({})
+
+    const stats = await drainIngestSpool()
+
+    expect(stats.drained).toBe(2)
+    expect(stats.errors).toEqual([])
+  })
+})
+
+// The spool lives behind a tunnel and an Access edge, so every request can fail
+// in two different ways — an HTTP status, or no response at all. Neither may
+// lose an object: what is not acknowledged stays in R2 for the next cycle.
+describe('drainIngestSpool transport failures', () => {
+  it('records the spool being unreachable when the listing never answers', async () => {
+    fetchMock.mockRejectedValueOnce(new Error('tunnel down'))
+
+    const stats = await drainIngestSpool()
+
+    expect(stats).toMatchObject({ configured: true, drained: 0, quarantined: 0 })
+    expect(stats.errors[0]).toContain('ingest spool unreachable')
+    expect(stats.errors[0]).toContain('tunnel down')
+  })
+
+  // One object erroring is not the page erroring: the rest of the listing is
+  // still drainable, and leaving it for the next cycle delays real data.
+  it('records a failed object fetch and carries on with the rest of the page', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        respond(200, { keys: [{ id: 'bad.json' }, { id: 'ok.json' }], truncated: false })
+      )
+      .mockResolvedValueOnce(respond(500))
+      .mockResolvedValueOnce(respond(200, validPayload))
+      .mockResolvedValueOnce(respond(204))
+      .mockResolvedValueOnce(respond(200, { keys: [], truncated: false }))
+    ingestMock.mockResolvedValue({})
+
+    const stats = await drainIngestSpool()
+
+    expect(stats.drained).toBe(1)
+    expect(stats.errors).toEqual(['ingest spool fetch of bad.json failed: HTTP 500'])
+    // bad.json was never ingested and never acknowledged, so it waits in R2.
+    expect(ingestMock).toHaveBeenCalledOnce()
+    expect(fetchMock.mock.calls.filter(c => c[1]?.method === 'DELETE')).toHaveLength(1)
+  })
+
+  // A dead transport will kill every remaining object the same way; one error
+  // is the useful report, a page of identical ones is noise.
+  it('stops the pass when the transport dies mid-page', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        respond(200, { keys: [{ id: 'a.json' }, { id: 'b.json' }], truncated: false })
+      )
+      .mockRejectedValueOnce(new Error('socket hang up'))
+
+    const stats = await drainIngestSpool()
+
+    expect(stats.errors).toHaveLength(1)
+    expect(stats.errors[0]).toContain('ingest spool unreachable')
+    // Two calls total: the listing and the one fetch that died. b.json was not
+    // attempted.
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+})
+
+// Acknowledging is the last step and the only one whose failure is survivable
+// by design: the conversation is already in Postgres, so a lost DELETE costs a
+// re-ingest that the upsert keys absorb.
+describe('drainIngestSpool acknowledgement', () => {
+  it('counts the drain but records a failed acknowledge', async () => {
+    fetchMock
+      .mockResolvedValueOnce(respond(200, { keys: [{ id: 'a.json' }], truncated: false }))
+      .mockResolvedValueOnce(respond(200, validPayload))
+      .mockResolvedValueOnce(respond(500))
+    ingestMock.mockResolvedValue({})
+
+    const stats = await drainIngestSpool()
+
+    expect(stats.drained).toBe(1)
+    expect(stats.errors).toEqual(['ingest spool acknowledge of a.json failed: HTTP 500'])
+    // The pass made no progress, so it ends rather than re-listing the same
+    // object forever.
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  // Another worker already acknowledged it. That is the outcome we wanted, not
+  // an error — and it counts as progress so the loop keeps going.
+  it('treats a 404 from the acknowledge as done', async () => {
+    fetchMock
+      .mockResolvedValueOnce(respond(200, { keys: [{ id: 'a.json' }], truncated: false }))
+      .mockResolvedValueOnce(respond(200, validPayload))
+      .mockResolvedValueOnce(respond(404))
+      .mockResolvedValueOnce(respond(200, { keys: [], truncated: false }))
+    ingestMock.mockResolvedValue({})
+
+    const stats = await drainIngestSpool()
+
+    expect(stats.drained).toBe(1)
+    expect(stats.errors).toEqual([])
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it('stops the pass when the acknowledge never answers', async () => {
+    fetchMock
+      .mockResolvedValueOnce(respond(200, { keys: [{ id: 'a.json' }], truncated: false }))
+      .mockResolvedValueOnce(respond(200, validPayload))
+      .mockRejectedValueOnce(new Error('connection reset'))
+    ingestMock.mockResolvedValue({})
+
+    const stats = await drainIngestSpool()
+
+    // Ingested, so the data is safe; the object stays spooled and next cycle
+    // re-ingests it onto the same keys.
+    expect(stats.drained).toBe(1)
+    expect(stats.errors[0]).toContain('ingest spool unreachable')
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
 })
 
 describe('drainIngestSpool failure handling', () => {
