@@ -23,10 +23,18 @@ import OAuthProvider, {
   type AuthRequest,
   type OAuthHelpers,
 } from '@cloudflare/workers-oauth-provider'
+// The same repo's schema for POST /api/ingest — the acceptor validates with
+// the exact definition the host enforces at drain time (see ingest-schema.ts
+// for why it lives apart from the ingest logic).
+import { IngestPayloadSchema } from '../../src/mcp/ingest-schema'
 
 export interface Env {
   OAUTH_KV: KVNamespace
   OAUTH_PROVIDER: OAuthHelpers
+  // Durable spool for pushed conversations (see the /ingest routes): payloads
+  // are accepted at the edge and drained by the host's sync loop, so a
+  // producer never loses data to the origin being down.
+  INGEST_SPOOL: R2Bucket
 
   // Origins are <service>.<ORIGIN_DOMAIN>, e.g. "example.com".
   ORIGIN_DOMAIN: string
@@ -40,6 +48,13 @@ export interface Env {
   // The AUD tag of the Access application protecting /authorize. Verifying it
   // is what stops a token minted for some *other* Access app being replayed.
   ACCESS_AUD: string
+  // The AUD tag of the Access application protecting /ingest — a separate
+  // app because its policy is Service Auth (machines), not identity (humans).
+  INGEST_ACCESS_AUD: string
+  // Service-token client ids allowed to read and acknowledge the spool
+  // (comma-separated). Empty or unset means any valid service token may
+  // drain; set it, because spooled payloads are conversation content.
+  DRAIN_CLIENTS?: string
 
   // Who may complete an authorization. Both are comma-separated and both are
   // optional individually, but with neither set the gateway denies everyone —
@@ -114,9 +129,16 @@ const decodeSegment = (segment: string): Uint8Array => {
 const decodeJson = (segment: string): any =>
   JSON.parse(new TextDecoder().decode(decodeSegment(segment)))
 
-type AccessIdentity = { email: string; sub: string }
+// A human (email, from an identity policy) or a machine (commonName, the
+// service-token client id from a Service Auth policy) — Access signs both
+// shapes with the same keys, distinguished by which claims are present.
+type AccessIdentity = { email?: string; sub: string; commonName?: string }
 
-const verifyAccessJwt = async (token: string, env: Env): Promise<AccessIdentity | null> => {
+const verifyAccessJwt = async (
+  token: string,
+  env: Env,
+  expectedAud: string
+): Promise<AccessIdentity | null> => {
   const parts = token.split('.')
   if (parts.length !== 3) return null
 
@@ -151,14 +173,19 @@ const verifyAccessJwt = async (token: string, env: Env): Promise<AccessIdentity 
     : payload.aud
       ? [payload.aud]
       : []
-  if (!audience.includes(env.ACCESS_AUD)) return null
+  if (!audience.includes(expectedAud)) return null
 
   if (payload.iss !== `https://${env.ACCESS_TEAM_DOMAIN}`) return null
 
   const email: string | undefined = payload.email ?? payload.identity?.email
-  if (!email) return null
+  const commonName: string | undefined = payload.common_name
+  if (!email && !commonName) return null
 
-  return { email: String(email).toLowerCase(), sub: String(payload.sub ?? email) }
+  return {
+    email: email ? String(email).toLowerCase() : undefined,
+    commonName: commonName ? String(commonName) : undefined,
+    sub: String(payload.sub || email || commonName),
+  }
 }
 
 // Fails closed: an empty configuration permits nobody, because the failure
@@ -187,9 +214,125 @@ const page = (title: string, body: string, status: number): Response =>
     { status, headers: { 'content-type': 'text/html; charset=utf-8' } }
   )
 
+// ---------------------------------------------------------------------------
+// The producer-facing half: /ingest/<service> and its spool
+// ---------------------------------------------------------------------------
+// Push ingestion had one data-loss window: a producer that fires once at the
+// origin and finds it down (tunnel out, host rebooting) has nowhere durable
+// to put the conversation. File sync never had this problem because the files
+// are the queue. These routes give push the same property: the edge accepts
+// and validates the payload into R2, and the host's sync loop drains it on
+// its own schedule — POST to spool, GET/DELETE under /spool to drain.
+//
+// Access gates the whole path with a Service Auth policy (machines, not
+// humans), and the JWT is verified here for the same reason /authorize
+// verifies it: the rest of the hostname is deliberately bypassed.
+
+const INGEST_ID = /^[A-Za-z0-9.-]{1,200}$/
+
+const handleIngest = async (request: Request, env: Env, url: URL): Promise<Response> => {
+  const jwt = request.headers.get('Cf-Access-Jwt-Assertion')
+  const identity = jwt ? await verifyAccessJwt(jwt, env, env.INGEST_ACCESS_AUD) : null
+  if (!identity) {
+    return Response.json(
+      {
+        error: 'unauthorized',
+        detail:
+          'Reach /ingest through Cloudflare Access with a service token (CF-Access-Client-Id / CF-Access-Client-Secret headers).',
+      },
+      { status: 401 }
+    )
+  }
+
+  const segments = url.pathname.split('/').filter(Boolean) // ['ingest', service, 'spool'?, id?]
+  const service = segments[1]?.toLowerCase()
+  if (!service || !list(env.MCP_SERVICES).includes(service)) {
+    return Response.json({ error: 'unknown_service' }, { status: 404 })
+  }
+  const prefix = `${service}/`
+
+  // POST /ingest/<service> — validate and spool. 202 means accepted for
+  // processing: schema errors are rejected here with the shared Zod schema,
+  // but semantic errors the edge cannot see (a new source without a
+  // dataClass) surface at drain time, in sync_quarantine.
+  if (segments.length === 2 && request.method === 'POST') {
+    const raw = await request.text()
+    if (raw.length > 32 * 1024 * 1024) {
+      return Response.json({ error: 'too_large', detail: 'Payloads are capped at 32MB.' }, { status: 413 })
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      return Response.json({ error: 'invalid_json' }, { status: 400 })
+    }
+    const check = IngestPayloadSchema.safeParse(parsed)
+    if (!check.success) {
+      return Response.json(
+        {
+          error: 'invalid_payload',
+          issues: check.error.issues.map(i => ({ path: i.path.join('.'), message: i.message })),
+        },
+        { status: 400 }
+      )
+    }
+    // Key order is arrival order, so a lexicographic list drains oldest-first.
+    const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomUUID()}.json`
+    await env.INGEST_SPOOL.put(prefix + id, raw, {
+      httpMetadata: { contentType: 'application/json' },
+      customMetadata: { producer: identity.commonName ?? identity.email ?? 'unknown' },
+    })
+    return Response.json({ status: 'accepted', id }, { status: 202 })
+  }
+
+  // /ingest/<service>/spool[/<id>] — the host's drain. Gated separately from
+  // push because these read conversation content back out: any valid service
+  // token may spool, only DRAIN_CLIENTS may drain.
+  if (segments[2] === 'spool') {
+    const drains = list(env.DRAIN_CLIENTS)
+    if (drains.length > 0 && !(identity.commonName && drains.includes(identity.commonName.toLowerCase()))) {
+      return Response.json(
+        { error: 'forbidden', detail: 'This credential may push but not drain.' },
+        { status: 403 }
+      )
+    }
+
+    if (segments.length === 3 && request.method === 'GET') {
+      const listing = await env.INGEST_SPOOL.list({ prefix, limit: 100 })
+      return Response.json({
+        keys: listing.objects.map(o => ({
+          id: o.key.slice(prefix.length),
+          size: o.size,
+          uploaded: o.uploaded.toISOString(),
+        })),
+        truncated: listing.truncated,
+      })
+    }
+
+    const id = segments[3]
+    if (segments.length === 4 && id && INGEST_ID.test(id)) {
+      if (request.method === 'GET') {
+        const obj = await env.INGEST_SPOOL.get(prefix + id)
+        if (!obj) return Response.json({ error: 'not_found' }, { status: 404 })
+        return new Response(obj.body, { headers: { 'content-type': 'application/json' } })
+      }
+      if (request.method === 'DELETE') {
+        await env.INGEST_SPOOL.delete(prefix + id)
+        return new Response(null, { status: 204 })
+      }
+    }
+  }
+
+  return Response.json({ error: 'not_found' }, { status: 404 })
+}
+
 const defaultHandler = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
+
+    if (url.pathname === '/ingest' || url.pathname.startsWith('/ingest/')) {
+      return handleIngest(request, env, url)
+    }
 
     if (url.pathname !== '/authorize') {
       // Deliberately says nothing about which services exist: this hostname is
@@ -233,8 +376,11 @@ const defaultHandler = {
       )
     }
 
-    const identity = await verifyAccessJwt(jwt, env)
-    if (!identity) return page('Not signed in', `<p>Your Access session is not valid here.</p>`, 401)
+    const identity = await verifyAccessJwt(jwt, env, env.ACCESS_AUD)
+    // /authorize is for humans: a service token passing Access here would
+    // still have no email, and grants are issued to people.
+    if (!identity?.email)
+      return page('Not signed in', `<p>Your Access session is not valid here.</p>`, 401)
 
     if (!permitted(identity.email, env)) {
       return page('No access', `<p>${identity.email} is not permitted to use this gateway.</p>`, 403)

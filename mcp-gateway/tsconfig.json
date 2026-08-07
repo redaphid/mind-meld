@@ -10,5 +10,5 @@
     "noEmit": true,
     "verbatimModuleSyntax": true
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "../src/mcp/ingest-schema.ts"]
 }

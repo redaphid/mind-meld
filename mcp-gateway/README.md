@@ -73,6 +73,31 @@ Then in claude.ai: Settings → Connectors → Add custom connector →
 `https://<gateway-host>/mcp/<service>`. Discovery, registration and the
 Access-backed login all follow from there.
 
+## The ingest spool
+
+Push ingestion (`POST /api/ingest` on an origin) had one data-loss window
+file sync never had: a producer that fires once at a dead origin has nowhere
+durable to put the conversation. The gateway closes it:
+
+```
+producer ── POST /ingest/<service> ──> R2 spool ── drained by ──> origin's sync loop
+```
+
+- `POST /ingest/<service>` validates against the origin repo's own Zod schema
+  (`src/mcp/ingest-schema.ts` — one definition, both sides) and spools the raw
+  payload into R2. `202` means accepted for processing; semantic errors the
+  edge cannot see (a new source without a `dataClass`) surface at drain time
+  in the origin's `sync_quarantine`.
+- `GET /ingest/<service>/spool`, `GET`/`DELETE `
+  `/ingest/<service>/spool/<id>` are the drain the host's sync pass uses
+  (`src/sync/ingest-spool.ts` in this repo).
+
+The whole `/ingest` path sits behind its own Access app with a Service Auth
+policy: any valid service token may push, but only the client ids named in
+`DRAIN_CLIENTS` may read the spool back — spooled payloads are conversation
+content. The host configures `INGEST_SPOOL_URL` / `INGEST_SPOOL_CLIENT_ID` /
+`INGEST_SPOOL_CLIENT_SECRET` (see `.env.example`).
+
 ## Verifying
 
 ```bash

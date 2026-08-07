@@ -14,6 +14,7 @@ const result = (over: Partial<FullSyncResult> = {}): FullSyncResult => ({
     quarantined: 0,
   },
   history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
+  spool: { configured: false, drained: 0, quarantined: 0 },
   embeddings: { messagesEmbedded: 100, sessionsUpdated: 5 },
   standDown: false,
   errors: [],

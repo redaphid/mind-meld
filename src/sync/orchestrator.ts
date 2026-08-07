@@ -1,4 +1,5 @@
 import { syncClaudeCode, syncClaudeHistory } from './claude-code.js';
+import { drainIngestSpool } from './ingest-spool.js';
 import { generatePendingEmbeddings, updateAggregateEmbeddings, AGGREGATE_BATCH_SIZE } from '../embeddings/batch.js';
 import { ensureEmbeddingModel } from '../embeddings/ollama.js';
 import { ensureSummarizeModel } from '../embeddings/summarize.js';
@@ -22,6 +23,13 @@ export interface FullSyncResult {
     entries: number;
     malformedLines: number;
     invalidTimestamps: number;
+  };
+  // The edge ingest spool (src/sync/ingest-spool.ts). `configured: false`
+  // means this machine has no spool env set, which is normal, not idle.
+  spool: {
+    configured: boolean;
+    drained: number;
+    quarantined: number;
   };
   embeddings: {
     messagesEmbedded: number;
@@ -59,6 +67,7 @@ export async function runFullSync(options?: {
     durationMs: 0,
     claudeCode: { projectsProcessed: 0, sessionsProcessed: 0, messagesInserted: 0, skipped: 0, quarantined: 0 },
     history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
+    spool: { configured: false, drained: 0, quarantined: 0 },
     embeddings: { messagesEmbedded: 0, sessionsUpdated: 0 },
     standDown: false,
     errors: [],
@@ -103,6 +112,30 @@ export async function runFullSync(options?: {
         errors.push(error);
       }
     }
+  }
+
+  // Drain the edge ingest spool — push ingestion's equivalent of reading
+  // files off disk. Like file sync it is NOT gated by stand-down: it writes
+  // to Postgres and never touches the GPU. Spool errors are real run errors
+  // (a producer's data is waiting in R2), but drainIngestSpool itself never
+  // throws for a payload — bad payloads land in sync_quarantine.
+  try {
+    const spool = await drainIngestSpool();
+    result.spool = {
+      configured: spool.configured,
+      drained: spool.drained,
+      quarantined: spool.quarantined,
+    };
+    errors.push(...spool.errors);
+    if (spool.configured && (spool.drained > 0 || spool.quarantined > 0)) {
+      console.log(
+        `\n--- Ingest spool: ${spool.drained} drained, ${spool.quarantined} quarantined ---`
+      );
+    }
+  } catch (e) {
+    const error = `Ingest spool drain failed: ${e}`;
+    console.error(error);
+    errors.push(error);
   }
 
   // Generate embeddings.

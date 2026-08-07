@@ -16,6 +16,12 @@ import { config } from '../config.js'
 import { parseClaudeLine, type ParsedMessage } from '../parsers/claude-messages.js'
 import { queries } from '../db/postgres.js'
 import { normalizeText } from '../utils/text-encoding.js'
+import { IngestPayloadSchema } from '../mcp/ingest-schema.js'
+
+// Rows from the edge ingest spool (src/sync/ingest-spool.ts) hold a whole
+// IngestPayload conversation, not a Claude transcript line, and replay must
+// dispatch on that or it would feed JSON conversations to parseClaudeLine.
+export const SPOOL_QUARANTINE_SOURCE = 'ingest_spool'
 
 export type QuarantineStage = 'parse' | 'insert'
 
@@ -241,6 +247,25 @@ const replayRow = async (row: QuarantineRow): Promise<ReplayOutcome> => {
   if (unrecoverable) {
     await markResolved(row.id)
     return { id: row.id, ok: false, unrecoverable: true, error: unrecoverable }
+  }
+
+  // Spooled ingests replay through exactly the path they failed on: the same
+  // schema, the same ingestConversation. The session-resolution below is
+  // Claude-transcript machinery and does not apply — an IngestPayload carries
+  // its whole conversation with it.
+  if (row.source === SPOOL_QUARANTINE_SOURCE) {
+    try {
+      // Imported here, not at the top: ingest.ts reaches the chroma and
+      // ollama clients through search.ts, and quarantining must stay loadable
+      // (and testable) with nothing but Postgres behind it.
+      const { ingestConversation } = await import('../mcp/ingest.js')
+      await ingestConversation(IngestPayloadSchema.parse(JSON.parse(row.payload)))
+      await markResolved(row.id)
+      return { id: row.id, ok: true }
+    } catch (e) {
+      await markAttempted(row.id, e)
+      return { id: row.id, ok: false, error: message(e) }
+    }
   }
 
   // A record quarantined before its session existed carries the project and the
