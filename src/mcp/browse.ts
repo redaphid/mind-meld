@@ -5,6 +5,7 @@
 import { query } from '../db/postgres.js'
 import { UNKNOWN_MACHINE } from './machines.js'
 import { resolveTitle, type TitleSource } from './title.js'
+import { LAST_ACTIVITY_SQL } from './last-activity.js'
 
 export type ProjectSummary = {
   id: number
@@ -36,7 +37,7 @@ export const listProjects = async (): Promise<ProjectSummary[]> => {
             COALESCE(p.machine, $1) AS machine,
             COUNT(DISTINCT s.id) AS sessions,
             COALESCE(SUM(s.message_count), 0) AS messages,
-            MAX(s.started_at) AS last_activity_at
+            MAX(${LAST_ACTIVITY_SQL}) AS last_activity_at
      FROM projects p
      JOIN sources src ON src.id = p.source_id
      LEFT JOIN sessions s ON s.project_id = p.id AND s.deleted_at IS NULL
@@ -143,7 +144,7 @@ export const listSessions = async (
      JOIN projects p ON p.id = s.project_id
      JOIN sources src ON src.id = p.source_id
      WHERE ${clauses.join(' AND ')}
-     ORDER BY s.started_at DESC NULLS LAST, s.id DESC
+     ORDER BY ${LAST_ACTIVITY_SQL} DESC NULLS LAST, s.id DESC
      LIMIT ${limitParam} OFFSET ${offsetParam}`,
     params
   )
@@ -189,8 +190,8 @@ export const getActivity = async (days: number): Promise<ActivityDay[]> => {
             COALESCE(SUM(s.message_count), 0) AS messages
      FROM span
      LEFT JOIN sessions s
-       ON s.started_at >= span.day
-      AND s.started_at < span.day + INTERVAL '1 day'
+       ON ${LAST_ACTIVITY_SQL} >= span.day
+      AND ${LAST_ACTIVITY_SQL} < span.day + INTERVAL '1 day'
       AND s.deleted_at IS NULL
      GROUP BY span.day
      ORDER BY span.day ASC`,
