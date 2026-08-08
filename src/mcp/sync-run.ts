@@ -78,6 +78,24 @@ const runPendingEmbeddings = async (): Promise<SyncRunResult> => {
 
   const embedded = await generatePendingEmbeddings()
 
+  // An embedding pass that stopped because nothing would embed means something
+  // upstream is refusing work — almost always the GPU gate holding a 503. The
+  // aggregate drain below is the same Ollama through the same gate, only far
+  // slower (a session is 5-10 minutes of summarization), so continuing buys
+  // five minutes of guaranteed failure while this run holds the single-flight
+  // lock and the button stays greyed out. Report the reason and finish.
+  if (embedded.stalled) {
+    const reason = `ingestion stopped early: ${embedded.stalled}`
+    console.warn(`[sync-run] ${reason}`)
+    return {
+      messagesEmbedded: embedded.processed,
+      sessionsUpdated: 0,
+      spoolDrained: spool.drained,
+      spoolQuarantined: spool.quarantined,
+      error: [...spool.errors, reason].join('; '),
+    }
+  }
+
   let sessionsUpdated = 0
   const drainStart = Date.now()
   while (true) {
@@ -132,15 +150,28 @@ export const startSyncRun = (
     }
   }
 
+  const fail = (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error('[sync-run] failed:', message)
+    settle({ error: message })
+  }
+
   // Never rejects: an unhandled rejection here would take the whole HTTP
   // server down for a failure the caller can simply read off the state.
-  inFlight = run()
-    .then(result => settle(result))
-    .catch(error => {
-      const message = error instanceof Error ? error.message : String(error)
-      console.error('[sync-run] failed:', message)
-      settle({ error: message })
-    })
+  //
+  // The try/catch is not redundant with the .catch. A runner that throws
+  // *synchronously* never returns a promise, so `.catch` is never attached and
+  // `running` would stay true for the lifetime of the process — the lock is
+  // process-local and has no timeout, so nothing would ever clear it and the
+  // button would never come back. Releasing it is unconditional either way.
+  try {
+    inFlight = run()
+      .then(result => settle(result))
+      .catch(fail)
+  } catch (error) {
+    fail(error)
+    inFlight = Promise.resolve()
+  }
 
   return { started: true, state: getSyncRunState() }
 }

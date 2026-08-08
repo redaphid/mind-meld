@@ -17,6 +17,11 @@ export interface BatchEmbeddingStats {
   processed: number;
   skipped: number;
   errors: number;
+  // Why the run stopped before draining the queue, or null when it drained (or
+  // yielded to the stand-down switch, which is not a failure). Non-null means
+  // the queue still has work and something upstream would not do it — the one
+  // outcome a caller must not treat as "caught up".
+  stalled: string | null;
 }
 
 interface MessageToEmbed {
@@ -100,6 +105,26 @@ async function getMessagesToEmbed(limit: number, maxChars?: number): Promise<Get
   };
 }
 
+// How many consecutive batches may change nothing before the run gives up.
+//
+// The queue is a global `ORDER BY m.id` select and nothing claims a row, so a
+// batch that embeds nothing leaves the identical 100 rows pending — and the
+// next iteration selects them again. Before this bound the loop had no exit at
+// all for that case: `hasMore` was assigned once and never reassigned, and the
+// catch below merely counted the error and continued. Observed 2026-08-07 with
+// the GPU gate answering 503 to every embed: 39 iterations in 90 minutes, the
+// error count past 3500, against 260 genuinely-pending messages. Worse, the run
+// holds the single-flight lock in mcp/sync-run.ts for as long as it spins, so
+// "Run ingestion now" stayed greyed out reading "Ingesting…" for 75+ minutes
+// with zero progress.
+//
+// A few retries first, because a 503 from the gate is genuinely transient and
+// the next batch may well succeed. Then the run ENDS, carrying the reason.
+// Ending is the safe direction: the queue is durable, nothing is lost, and the
+// next cycle or button press resumes from exactly the same rows. Spinning is
+// the unsafe one — it burns the GPU budget, floods the logs, and wedges the UI.
+export const MAX_STALLED_BATCHES = 3;
+
 // Generate embeddings for pending messages
 // Checks Chroma directly to determine what needs embedding (missing or outdated char count)
 export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> {
@@ -107,6 +132,7 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
     processed: 0,
     skipped: 0,
     errors: 0,
+    stalled: null,
   };
 
   // Log how many NaN-blocked messages are eligible for healing
@@ -127,12 +153,14 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
   await ensureSummarizeModel();
 
   const batchSize = config.embeddings.batchSize;
-  let hasMore = true;
   let totalProcessed = 0;
   const MAX_EMBED_CHARS = 8000;
   let shortExhausted = false;
+  // Consecutive batches that changed nothing, and why the last one failed.
+  let stalledBatches = 0;
+  let lastStallReason = "";
 
-  while (hasMore) {
+  for (;;) {
     // The stand-down checkpoint for the fast phase. Between batches rather than
     // inside one: a batch is seconds, and abandoning it mid-flight would waste
     // embeddings already paid for.
@@ -170,13 +198,25 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
 
     if (messagesToEmbed.length === 0) {
       if (exhausted) break; // truly nothing left
-      continue; // all noise — keep going, more messages at higher IDs
+      // All noise — but getMessagesToEmbed has just marked every one of those
+      // rows UNEMBEDDABLE, so the queue did shrink. That is progress, and the
+      // next select starts past them at higher IDs.
+      stalledBatches = 0;
+      lastStallReason = "";
+      continue;
     }
 
     totalProcessed += messagesToEmbed.length;
     console.log(
       `Batch: ${messagesToEmbed.length} messages need embedding (${totalProcessed} total)...`,
     );
+
+    // A row leaves the pending queue exactly two ways — embedded (`processed`)
+    // or marked UNEMBEDDABLE (`skipped`) — so the sum of those two IS the
+    // queue's drain counter. Comparing it across the batch is what separates
+    // "this batch did some work" from "this batch changed nothing, and the next
+    // select will return exactly these rows again".
+    const drainedBefore = stats.processed + stats.skipped;
 
     try {
       // Prepare texts for embedding - summarize if too long for embedding context
@@ -310,7 +350,31 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
     } catch (e) {
       console.error("Batch embedding failed:", e);
       stats.errors++;
+      lastStallReason = e instanceof Error ? e.message : String(e);
     }
+
+    if (stats.processed + stats.skipped === drainedBefore) {
+      stalledBatches++;
+      if (stalledBatches >= MAX_STALLED_BATCHES) {
+        stats.stalled =
+          `${messagesToEmbed.length} messages still pending after ${MAX_STALLED_BATCHES} batches that embedded nothing` +
+          (lastStallReason ? `; last error: ${lastStallReason}` : "");
+        console.error(`Stopping embedding run: ${stats.stalled}`);
+        break;
+      }
+      // Bounded linear backoff on top of whatever fetchWithRetry already waited
+      // for a Retry-After, so a gate that opens mid-run is still picked up.
+      const waitMs = config.ollama.retryDelayMs * stalledBatches;
+      console.warn(
+        `Batch embedded nothing (${stalledBatches}/${MAX_STALLED_BATCHES}), waiting ${Math.round(waitMs / 1000)}s before retrying the same rows...`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+      continue;
+    }
+    // Progress: the streak resets, and so does the error that would otherwise
+    // be reported against a later, unrelated stall.
+    stalledBatches = 0;
+    lastStallReason = "";
 
     // Small delay to avoid overwhelming Ollama
     await new Promise((resolve) => setTimeout(resolve, 100));
