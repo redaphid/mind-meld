@@ -5,258 +5,53 @@
 // A policy that lives only in a document is not enforced. This test scans every
 // git-tracked file and fails the build when a personal-data pattern appears.
 //
-// Two independent checks:
+// The detection itself lives in ./personal-data.mjs, shared with the
+// pre-commit hook (.githooks/pre-commit) so the two cannot drift. This file
+// owns the whole-repo sweep and the behavioural pins; the module owns the
+// rules. Three tiers, described in full in the module header:
 //
-//   1. STRUCTURAL — path shapes whose user/distro segment is a real name rather
-//      than a documented placeholder. This needs no list of secrets to work, so
-//      it catches values nobody has thought to add to a denylist yet.
+//   1. STRUCTURAL — path/machine shapes whose user segment is a real name.
+//   2. TERM       — exact tokens, as SHA-256 hashes in quality/personal-terms.json.
+//   3. IDENTIFIER — content quoted out of `dataClass: personal` records.
 //
-//   2. TERM — exact tokens listed in quality/personal-terms.json. That file
-//      holds SHA-256 hashes, never plaintext, so the guard does not reproduce
-//      the very values it exists to keep out of the repo.
+// The sweep below runs tiers 1 and 2 only. Tier 3 is pinned by unit tests here
+// and enforced on staged additions by the hook, but is NOT yet run over the
+// whole repo, because the repo does not currently pass it: docs/openapi.yaml
+// carries `Uber Eats` and `Kia` example queries lifted from the operator's
+// phone records. Turn the sweep on the moment those are replaced with invented
+// queries — the wiring is one line, marked below.
 //
 // Failures report FILE AND LINE ONLY. They never echo the offending text —
 // printing it into CI logs would re-publish the leak while reporting it.
 
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  decodeText,
+  hash,
+  isSkipListed,
+  loadTermHashes,
+  scanIdentifiers,
+  scanStructural,
+  scanTerms,
+} from './personal-data.mjs';
 
 const repoRoot = join(import.meta.dirname, '..', '..');
 
-/** Segments that are obviously stand-ins rather than a real person or machine. */
-const PLACEHOLDERS = new Set([
-  'you', 'your-username', 'your-user', 'user', 'username', 'users', 'me', 'u',
-  'someone', 'somebody', 'alice', 'bob', 'example', 'test', 'dev', 'demo',
-  'root', 'node', 'runner', 'ubuntu', 'distro', 'your-distro', 'name',
-  'localhost',
-]);
-
-/**
- * Machine names that describe a platform or a role rather than a device. These
- * are only accepted where a machine name is expected — keeping them out of
- * PLACEHOLDERS means `/home/windows` is still a finding.
- */
-const GENERIC_MACHINE_NAMES = new Set([
-  'wsl', 'windows', 'linux', 'macos', 'mac', 'darwin', 'docker', 'container',
-  'ci', 'local', 'localhost', 'host', 'hostname', 'server', 'machine',
-  'default', 'unknown', 'none',
-]);
-
-/**
- * Trailing role words in an mDNS label: `ollama-host.local` names the job a
- * box does, not the box. Device-type words (`macbook`, `laptop`) are NOT here
- * — those pair with a personal name far more often than not.
- */
-const HOST_ROLE_WORDS = new Set(['host', 'hostname', 'server']);
-
-/** `pnpm@latest`, `image@stable` — a dist-tag after `@` is a version, not a box. */
-const DIST_TAGS = new Set([
-  'latest', 'stable', 'next', 'beta', 'alpha', 'canary', 'edge', 'nightly',
-  'main', 'master', 'head',
-]);
-
-/** Paths that are noise to scan: vendored code, lockfiles, binaries, this guard. */
-const SKIP = [
-  'pnpm-lock.yaml',
-  'public/vendor/',
-  'quality/personal-terms.json',
-  'src/quality/no-personal-data.test.ts',
-];
-
-/**
- * A placeholder may be bare (`you`), bracketed (`<you>`), or a shell variable
- * (`$USER`, `${USER}`, `%USERNAME%`). Normalize before comparing.
- */
-const isPlaceholder = (segment: string): boolean => {
-  const bare = segment
-    .toLowerCase()
-    .replace(/^[<{[(]+|[>}\])]+$/g, '')
-    .replace(/^\$\{?|\}?$/g, '')
-    .replace(/^%|%$/g, '');
-  // `C:\Users\...` in prose elides the name rather than revealing one, and
-  // `/home/%` (SQL LIKE) or `/home/*` (glob) match every user, naming none.
-  if (/^[.*%]*$/.test(bare)) return true;
-  return PLACEHOLDERS.has(bare);
-};
-
 type Finding = { file: string; line: number; check: string };
-
-/** Home directories on every platform, plus the WSL view of a Windows home. */
-const HOME_PATH =
-  /(?:\/home\/|\/Users\/|[A-Za-z]:[\\/]{1,2}Users[\\/]{1,2}|\/mnt\/[a-z]\/Users\/)([A-Za-z0-9._$<>{}%()[\]-]+)/g;
-
-/** \\wsl$\<distro>\... and \\wsl.localhost\<distro>\... — the distro names a machine. */
-const WSL_UNC = /\\\\wsl(?:\$|\.localhost)\\+([^\\\s"'`]+)/gi;
-
-/**
- * `~alice/...` — the same leak as /home/alice, written shorter. `~/` names
- * nobody, and the segment must start like a username so approximations
- * (`~265KB/day`) are not usernames.
- */
-const TILDE_HOME = /(?<![\w~/\\.-])~([A-Za-z_$<{%([][A-Za-z0-9._$<>{}%()[\]-]*)\//g;
-
-/**
- * Claude Code stores a project under a directory name that is its path with
- * every separator replaced by a hyphen (`decodeProjectPath`,
- * src/parsers/claude-messages.ts). That is a home path the HOME_PATH regex
- * cannot see, and it is the natural shape for a fixture copied from a real
- * transcript — the most likely future leak here. Decode, then reuse the check.
- */
-const ENCODED_HOME = /-(?:Users|home)-[A-Za-z0-9._$<>{}%()[\]-]+/gi;
-const decodeEncodedPath = (encoded: string): string => encoded.replace(/-/g, '/');
-
-/**
- * `<label>.local` is mDNS: the label is a device name. Excluded by the
- * boundaries: `wsl.localhost` (longer word), `docker-compose.local.yml` and
- * `.env.local` (a file-name segment, not a hostname).
- */
-const MDNS = /(?<![\w.-])([A-Za-z0-9][A-Za-z0-9-]*)\.local(?![\w.-])/g;
-
-/**
- * `user@host` with a bare host. A version (`pnpm@10.11.0`), an action ref
- * (`actions/checkout@v4`) and an email (`x@example.com`) are excluded by
- * requiring a letter-led host with no dot other than a trailing `.local`.
- */
-const USER_AT_HOST =
-  /(?<![\w@/.-])([A-Za-z][A-Za-z0-9._-]*)@([A-Za-z][A-Za-z0-9-]*(?:\.local)?)(?![\w.@-])/g;
-
-/**
- * A machine-name assignment holding a literal. Device names were the largest
- * leak category in the scrub; hashing the known ones defends the past, this
- * defends the shape. A value deferred to the environment (`${VAR:?...}`) names
- * nobody — only a hardcoded default is a finding.
- */
-const MACHINE_ASSIGNMENT =
-  /\b(?:MACHINE|DEVICE|COMPUTER|HOST)_?NAME[A-Z0-9_]*\s*[:=]\s*["']?([^\s"',]+)/g;
-
-/** `${VAR:-fallback}` leaks the fallback; `${VAR:?msg}` and `$VAR` leak nothing. */
-const literalOf = (value: string): string | null => {
-  if (!value.includes('$')) return value;
-  const withDefault = /\$\{[A-Za-z0-9_]+:-([^}]*)\}/.exec(value);
-  return withDefault ? withDefault[1] : null;
-};
-
-const scanStructural = (file: string, content: string): Finding[] => {
-  const findings: Finding[] = [];
-  const add = (line: number, check: string) => findings.push({ file, line, check });
-
-  content.split('\n').forEach((text, index) => {
-    const line = index + 1;
-
-    for (const [pattern, check] of [
-      [HOME_PATH, 'home-directory path with a real user segment'],
-      [WSL_UNC, 'WSL UNC path naming a real distro'],
-      [TILDE_HOME, 'tilde home path naming a real user'],
-    ] as const) {
-      for (const match of text.matchAll(pattern)) {
-        if (!isPlaceholder(match[1])) add(line, check);
-      }
-    }
-
-    for (const match of text.matchAll(ENCODED_HOME)) {
-      const decoded = decodeEncodedPath(match[0]);
-      for (const inner of decoded.matchAll(HOME_PATH)) {
-        if (!isPlaceholder(inner[1])) {
-          add(line, 'encoded project-directory path with a real user segment');
-        }
-      }
-    }
-
-    for (const match of text.matchAll(MDNS)) {
-      const label = match[1].toLowerCase();
-      const lastWord = label.split('-').at(-1) ?? label;
-      if (isPlaceholder(label) || GENERIC_MACHINE_NAMES.has(label)) continue;
-      if (HOST_ROLE_WORDS.has(lastWord)) continue;
-      add(line, 'mDNS name identifying a device');
-    }
-
-    for (const match of text.matchAll(USER_AT_HOST)) {
-      const host = match[2].toLowerCase().replace(/\.local$/, '');
-      // A dist-tag is a version; parts under three characters are stand-ins
-      // (`t@t` in a fixture), not a person on a machine.
-      if (DIST_TAGS.has(host) || host.length < 3 || match[1].length < 3) continue;
-      const userNamesNobody = isPlaceholder(match[1]);
-      const hostNamesNobody = isPlaceholder(host) || GENERIC_MACHINE_NAMES.has(host);
-      if (userNamesNobody && hostNamesNobody) continue;
-      add(line, 'user@host naming a person and a machine');
-    }
-
-    for (const match of text.matchAll(MACHINE_ASSIGNMENT)) {
-      const literal = literalOf(match[1]);
-      if (literal === null) continue;
-      const name = literal.replace(/["'}]+$/, '').toLowerCase();
-      if (!name || isPlaceholder(name) || GENERIC_MACHINE_NAMES.has(name)) continue;
-      add(line, 'machine-name assignment holding a literal device name');
-    }
-  });
-  return findings;
-};
-
-const loadTermHashes = (): Set<string> => {
-  const raw = readFileSync(join(repoRoot, 'quality', 'personal-terms.json'), 'utf8');
-  return new Set<string>(JSON.parse(raw).terms);
-};
-
-// Tokens repeat heavily across a repo; hashing each one once keeps the
-// whole-repo scan fast enough that nobody is tempted to skip it.
-const hashCache = new Map<string, string>();
-const hash = (token: string): string => {
-  const cached = hashCache.get(token);
-  if (cached !== undefined) return cached;
-  const digest = createHash('sha256').update(token).digest('hex');
-  hashCache.set(token, digest);
-  return digest;
-};
-
-const scanTerms = (file: string, content: string, banned: Set<string>): Finding[] => {
-  const findings: Finding[] = [];
-  content.split('\n').forEach((text, index) => {
-    for (const token of text.toLowerCase().match(/[a-z0-9][a-z0-9_-]*/g) ?? []) {
-      if (!banned.has(hash(token))) continue;
-      findings.push({ file, line: index + 1, check: 'banned personal term' });
-    }
-  });
-  return findings;
-};
 
 const trackedFiles = (): string[] =>
   execFileSync('git', ['ls-files', '-z'], { cwd: repoRoot, encoding: 'utf8' })
     .split('\0')
     .filter(Boolean);
 
-const isSkipListed = (file: string): boolean =>
-  SKIP.some((skip) => file === skip || file.startsWith(skip));
-
-/**
- * Decode a file to text, or null if it is genuinely binary.
- *
- * "Contains a NUL byte" is NOT the same as binary: UTF-16 text is half NUL by
- * construction, and this repo handles UTF-16LE content. Treating it as binary
- * would silently exempt a real text file from the guard, so BOM-marked UTF-16
- * is decoded rather than skipped.
- */
-const decodeText = (buffer: Buffer): string | null => {
-  if (buffer.length >= 2) {
-    if (buffer[0] === 0xff && buffer[1] === 0xfe) return buffer.subarray(2).toString('utf16le');
-    if (buffer[0] === 0xfe && buffer[1] === 0xff) {
-      const swapped = Buffer.from(buffer.subarray(2));
-      swapped.swap16();
-      return swapped.toString('utf16le');
-    }
-  }
-  // No BOM: a run of NULs at odd and even offsets alike is real binary.
-  if (buffer.includes(0)) return null;
-  return buffer.toString('utf8');
-};
-
 type Skipped = { file: string; reason: 'skip-list' | 'binary' };
 type Scan = { findings: Finding[]; scanned: number; skipped: Skipped[] };
 
 const scanRepository = (): Scan => {
-  const banned = loadTermHashes();
+  const banned = loadTermHashes(repoRoot);
   const findings: Finding[] = [];
   const skipped: Skipped[] = [];
   let scanned = 0;
@@ -272,6 +67,8 @@ const scanRepository = (): Scan => {
       continue;
     }
     scanned += 1;
+    // Add `...scanIdentifiers(file, content)` here once docs/openapi.yaml is
+    // cleaned up — see the header.
     findings.push(...scanStructural(file, content), ...scanTerms(file, content, banned));
   }
   return { findings, scanned, skipped };
@@ -390,6 +187,27 @@ describe('public repository contains no personal data', () => {
       expect(scanStructural('f', '~<user>/.claude')).toHaveLength(0);
     });
 
+    it('reads ~${...} as an approximation without going blind to real names', () => {
+      // "retries in ~5m" is written `~${fmtDuration(x)}` and sits next to a
+      // closing tag. The tilde is an approximation sign; the segment the
+      // unbounded pattern captured — `{fmtDuration(x)}<` — was markup, and the
+      // `/` that terminated it belonged to `</span>`. Nothing here names anyone.
+      const chip =
+        'html`<span class="right faint nowrap">retries in ~${fmtDuration(held.resumesIn)}</span>`';
+      expect(scanStructural('f', chip)).toHaveLength(0);
+      expect(scanStructural('f', 'html`<span>~${etaText} remaining</span>`')).toHaveLength(0);
+      // Same shape with a real `/` inside the interpolation: the segment ends
+      // at `}`, so the division sign is not a path separator either.
+      expect(scanStructural('f', '`~${Math.round(summary.length/4)} tokens`')).toHaveLength(0);
+
+      // The bound moved where a segment ENDS, not which names count. A tilde
+      // home path still leaks — including inside the very markup above — and
+      // an interpolation named after a person still leaks that person.
+      expect(scanStructural('f', 'html`<a href="~realperson/notes">x</a>`')).toHaveLength(1);
+      expect(scanStructural('f', '~${REALNAME}/.claude')).toHaveLength(1);
+      expect(scanStructural('f', '~${USER}/.claude')).toHaveLength(0);
+    });
+
     it('flags mDNS names, which name a device', () => {
       expect(scanStructural('f', 'OLLAMA_URL=http://realbox.local:11434')).toHaveLength(1);
       expect(scanStructural('f', 'ssh realbox.local')).toHaveLength(1);
@@ -436,6 +254,93 @@ describe('public repository contains no personal data', () => {
     it('reports location without echoing the offending value', () => {
       const message = describeFindings([{ file: 'a.ts', line: 7, check: 'banned personal term' }]);
       expect(message).toContain('a.ts:7');
+    });
+  });
+
+  // Tier 3. The reason this exists: on 2026-08-07 an agent wrote an AGENTS.md
+  // holding real session ids, real message ids and `Uber Eats` queries pulled
+  // from `dataClass: personal` / `source: android` records — and tiers 1 and 2
+  // returned ZERO findings on it, before and after the fix. They ask "did a
+  // path or a known word leak"; nobody had asked "is this content quoted out
+  // of his private records".
+  describe('content quoted out of personal records', () => {
+    it('flags bare ids in docs and accepts the placeholder form', () => {
+      // The exact line that nearly shipped, and its sanitized replacement.
+      expect(scanIdentifiers('AGENTS.md', 'Session: 104057  Message: 288314')).toHaveLength(2);
+      expect(
+        scanIdentifiers('AGENTS.md', 'Session: <SESSION_ID>  Message: <MESSAGE_ID>'),
+      ).toHaveLength(0);
+      expect(scanIdentifiers('AGENTS.md', 'sessionId=104057')).toHaveLength(1);
+      expect(scanIdentifiers('AGENTS.md', 'session_id: 104057')).toHaveLength(1);
+    });
+
+    it('does not mistake counts, cardinals and JSON keys for ids', () => {
+      // Each of these is real text from this repo's docs. A guard that fires
+      // on them is a guard that gets --no-verify'd, so they are pinned.
+      expect(scanIdentifiers('AGENTS.md', '`messageCount` — 185 android sessions')).toHaveLength(0);
+      expect(
+        scanIdentifiers('AGENTS.md', '{"code":-32000,"message":"Bad Request: No valid session ID"}'),
+      ).toHaveLength(0);
+      expect(scanIdentifiers('AGENTS.md', '`limit` (max 200), `offset`')).toHaveLength(0);
+      expect(scanIdentifiers('AGENTS.md', 'one 8-chunk session received 24 passes')).toHaveLength(0);
+      expect(scanIdentifiers('AGENTS.md', 'GET /api/sessions/<id>/messages')).toHaveLength(0);
+    });
+
+    it('gives code a higher id floor than prose, and says why in the floor', () => {
+      // Test fixtures invent ids and this repo's are four digits, so firing on
+      // them would train everyone to bypass the hook. Live ids are six.
+      expect(scanIdentifiers('src/mcp/search.test.ts', 'session_id: 4268,')).toHaveLength(0);
+      expect(scanIdentifiers('src/mcp/search.test.ts', 'session_id: 104057,')).toHaveLength(1);
+      // Prose has no such excuse — the placeholder is free there.
+      expect(scanIdentifiers('AGENTS.md', 'session_id: 4268')).toHaveLength(1);
+    });
+
+    it('flags a consumer app name used as an example query', () => {
+      // Verbatim from docs/openapi.yaml, which still carries it.
+      expect(
+        scanIdentifiers('docs/x.md', 'q=what did I order from Uber Eats tonight'),
+      ).toHaveLength(1);
+      // Reported as the whole brand, not just `Uber` — alternation is sorted
+      // longest-first so the finding says as much as it knows.
+      expect(scanIdentifiers('docs/x.md', 'q=Uber Eats tonight')[0].excerpt).toContain('Ub');
+      expect(scanIdentifiers('docs/x.md', 'q=Kia finds the message')).toHaveLength(1);
+      expect(scanIdentifiers('docs/x.md', 'notif:com.ubercab.eats:Order delivered')).toHaveLength(2);
+      // The documented placeholder shape names no app at all.
+      expect(scanIdentifiers('docs/x.md', 'session `external_id` | `notif:<package>:<title>`')).toHaveLength(0);
+    });
+
+    it('leaves ordinary engineering vocabulary alone', () => {
+      // Every one of these fired during tuning. `ring buffer` is in two source
+      // files; the rest are the words a denylist of brand names swallows.
+      expect(scanIdentifiers('f', 'In-memory ring buffer of console output')).toHaveLength(0);
+      expect(scanIdentifiers('f', 'a nested, seamless calm signal from Amazon S3')).toHaveLength(0);
+      expect(scanIdentifiers('f', 'posted to Slack and Discord via GitHub')).toHaveLength(0);
+    });
+
+    it('flags phone numbers, addresses, contacts and personal email', () => {
+      expect(scanIdentifiers('f', 'call me at (555) 867-5309')).toHaveLength(1);
+      expect(scanIdentifiers('f', 'ship to 1600 Pennsylvania Ave')).toHaveLength(1);
+      expect(scanIdentifiers('f', 'contact: Jane Doe')).toHaveLength(1);
+      expect(scanIdentifiers('f', 'mail me at jdoe@personaldomain.com')).toHaveLength(1);
+      // `someone@` names nobody, so it is a placeholder, not a contact.
+      expect(scanIdentifiers('f', 'mail me at someone@personaldomain.com')).toHaveLength(0);
+    });
+
+    it('does not read versions, IPs or bot addresses as contact details', () => {
+      // 195 findings in this repo before the TLD was required to be alphabetic
+      // — every one of them a lockfile version like `pkg@4.120.0(dep@4.2.1)`.
+      expect(scanIdentifiers('f', 'version: 4.120.0(@cloudflare/workers-types@4.20260702.1)')).toHaveLength(0);
+      expect(scanIdentifiers('f', '"packageManager": "pnpm@10.11.0"')).toHaveLength(0);
+      expect(scanIdentifiers('f', 'Co-Authored-By: X <noreply@anthropic.com>')).toHaveLength(0);
+      expect(scanIdentifiers('f', 'contact: someone@example.com')).toHaveLength(0);
+      expect(scanIdentifiers('f', 'POSTGRES_HOST=192.168.1.100')).toHaveLength(0);
+      expect(scanIdentifiers('f', 'listen on 127.0.0.1:3847')).toHaveLength(0);
+    });
+
+    it('masks the value it reports, because hook output gets indexed', () => {
+      const [finding] = scanIdentifiers('AGENTS.md', 'Session: 104057');
+      expect(finding.excerpt).not.toContain('104057');
+      expect(finding.excerpt.startsWith('10')).toBe(true);
     });
   });
 });

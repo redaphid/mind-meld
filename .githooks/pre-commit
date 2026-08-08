@@ -1,0 +1,26 @@
+#!/bin/sh
+# Block personal data from entering this PUBLIC repository.
+#
+# Activate once per clone (a commit cannot set this for you):
+#
+#     git config core.hooksPath .githooks
+#
+# `core.hooksPath` lives in the shared .git/config, so one run covers the main
+# checkout and every worktree. Git runs hooks from the top of the worktree, so
+# the relative path resolves per-worktree.
+#
+# Non-interactive by design: agents commit here, and a hook that asks a
+# question is a hook that hangs a pipeline. It prints and exits, nothing else.
+
+set -e
+
+# Deliberately no `pnpm`, no `npx`, no test suite, no node_modules: the guard
+# is plain ESM run by bare node, so it works in a fresh clone and in a worktree
+# that has never been installed.
+if ! command -v node >/dev/null 2>&1; then
+  echo "personal-data guard: 'node' is not on PATH, so nothing was scanned." >&2
+  echo "This repo is PUBLIC. Install Node, or use --no-verify knowing it is unchecked." >&2
+  exit 1
+fi
+
+exec node "$(dirname "$0")/scan-staged.mjs"

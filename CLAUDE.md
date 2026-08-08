@@ -396,6 +396,42 @@ text, because this repo's CI logs are public too.
 Real host-specific values belong in your `.env` (see `.env.example`), which is
 not tracked.
 
+### Activate the pre-commit guard (one command, once per clone)
+
+```bash
+git config core.hooksPath .githooks
+```
+
+A commit cannot set this for you, so **run it now** — nothing below protects a
+clone where it has not been run. `core.hooksPath` lives in the shared
+`.git/config`, so one run covers the main checkout and every worktree.
+
+`.githooks/pre-commit` scans **only the lines a commit adds** (`git diff
+--cached`) using the same rules as the test guard, from
+`src/quality/personal-data.mjs` — one definition, two callers. It runs on bare
+`node`: no test suite, no `node_modules`, no database, no network, so it still
+works in a fresh clone and cannot be taken down by an unrelated failing test.
+Scanning additions rather than the working tree also means a pre-existing
+violation elsewhere in a file you are editing does not block you.
+
+It adds one thing the test guard does not have: a check for **content quoted
+out of `dataClass: personal` records** — live session/message ids where a
+`<SESSION_ID>` placeholder belongs, consumer app and vendor names used as
+example queries, Android notification ids, phone numbers, addresses, contact
+names, personal email. That class is why the hook exists. On 2026-08-07 an
+`AGENTS.md` full of real ids and food-delivery-app queries taken from the
+operator's phone records passed the test guard with **zero findings**; path
+shapes and banned words were all it knew how to look for. (This paragraph
+originally named the app, and the hook blocked the commit that added it.)
+
+Findings name the file, the line, the rule, and a **masked** excerpt. The value
+is never printed in full: this repo is public, and hook output lands in agent
+transcripts that get indexed straight back into mindmeld.
+
+`git commit --no-verify` skips the hook. That is deliberate — a guard that
+cannot be bypassed gets deleted instead — but it is an accountable act, not a
+routine one. The history of a public repo is permanent.
+
 ## Deployment
 
 Deploys are **semver-driven** — CI only builds images when `package.json`'s `version` changes. A plain merge to `main` does **not** deploy.

@@ -11,6 +11,11 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
+    // src/quality/personal-data.mjs is deliberately plain ESM: the pre-commit
+    // hook must run it with bare `node`, before any install. allowJs lets the
+    // test guard import the same module instead of keeping a second copy of
+    // the rules.
+    "allowJs": true,
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
