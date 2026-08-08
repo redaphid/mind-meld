@@ -29,14 +29,19 @@
   "vars": {
     // Origins are <service>.<ORIGIN_DOMAIN>/mcp
     "ORIGIN_DOMAIN": "example.com",
-    // Which <service> names are proxyable — the allowlist, comma-separated
-    "MCP_SERVICES": "mindmeld",
+    // Which <service> names are proxyable — the allowlist, comma-separated.
+    // The name is also the origin's subdomain, so it has to match the hostname
+    // exactly; adding a server is adding its name here. See ADD-MCP-HUB.md.
+    "MCP_SERVICES": "mindmeld,mcp-hub",
     // Your Cloudflare Zero Trust team domain
     "ACCESS_TEAM_DOMAIN": "<team>.cloudflareaccess.com",
-    // AUD tag of the Access app protecting <gateway-host>/authorize
+    // AUD tag(s) of the Access app(s) protecting <gateway-host>/authorize.
+    // Comma-separated: Access apps are per-hostname, so a gateway serving two
+    // hostnames lists two AUDs.
     "ACCESS_AUD": "<access-app-aud>",
-    // AUD tag of the Access app protecting <gateway-host>/ingest — a separate
-    // app whose policy is Service Auth (any_valid_service_token)
+    // AUD tag(s) of the Access app(s) protecting <gateway-host>/ingest —
+    // separate apps whose policy is Service Auth (any_valid_service_token).
+    // Comma-separated like ACCESS_AUD.
     "INGEST_ACCESS_AUD": "<ingest-app-aud>",
     // Service-token client ids allowed to drain the spool (read it back);
     // any valid token may push

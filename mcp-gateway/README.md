@@ -34,6 +34,10 @@ Access protection and need no changes; the gateway authenticates to them with
 an Access **service token**, and forwards the authorized user's email as
 `X-Forwarded-Email` for any origin that cares.
 
+`ADD-MCP-HUB.md` walks the whole of that end to end for a second service — the
+deploy, the Access application, the tunnel hostname, and what each credential
+is allowed to see.
+
 Security decisions worth knowing before touching this:
 
 - **`/authorize` trusts Access, but verifies it** — signature, `aud`, expiry

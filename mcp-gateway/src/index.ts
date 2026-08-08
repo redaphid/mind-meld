@@ -45,11 +45,14 @@ export interface Env {
 
   // Cloudflare Access team domain, e.g. "yourteam.cloudflareaccess.com".
   ACCESS_TEAM_DOMAIN: string
-  // The AUD tag of the Access application protecting /authorize. Verifying it
-  // is what stops a token minted for some *other* Access app being replayed.
+  // AUD tag(s) of the Access application(s) protecting /authorize, comma-
+  // separated — one per hostname this Worker serves, since Access apps are
+  // per-hostname. Verifying the AUD is what stops a token minted for some
+  // *other* Access app being replayed.
   ACCESS_AUD: string
-  // The AUD tag of the Access application protecting /ingest — a separate
-  // app because its policy is Service Auth (machines), not identity (humans).
+  // AUD tag(s) of the Access application(s) protecting /ingest — separate
+  // apps because their policy is Service Auth (machines), not identity
+  // (humans). Comma-separated like ACCESS_AUD.
   INGEST_ACCESS_AUD: string
   // Service-token client ids allowed to read and acknowledge the spool
   // (comma-separated). Empty or unset means any valid service token may
@@ -137,7 +140,8 @@ type AccessIdentity = { email?: string; sub: string; commonName?: string }
 const verifyAccessJwt = async (
   token: string,
   env: Env,
-  expectedAud: string
+  // Comma-separated AUD tags; the JWT must carry one of them.
+  expectedAuds: string
 ): Promise<AccessIdentity | null> => {
   const parts = token.split('.')
   if (parts.length !== 3) return null
@@ -173,7 +177,7 @@ const verifyAccessJwt = async (
     : payload.aud
       ? [payload.aud]
       : []
-  if (!audience.includes(expectedAud)) return null
+  if (!list(expectedAuds).some(aud => audience.includes(aud))) return null
 
   if (payload.iss !== `https://${env.ACCESS_TEAM_DOMAIN}`) return null
 
