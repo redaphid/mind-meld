@@ -22,7 +22,7 @@ runbook: what to run, what to click, and what to check.
 ## What is being wired
 
 ```
-claude.ai ──OAuth 2.1──> <gateway-host>/mcp/metamcp
+claude.ai ──OAuth 2.1──> <gateway-host>/mcp
                              │
                              │  CF-Access-Client-Id / -Secret  (service token)
                              ▼
@@ -36,8 +36,29 @@ claude.ai ──OAuth 2.1──> <gateway-host>/mcp/metamcp
 ```
 
 The service name **is** the subdomain. `MCP_SERVICES` gains `metamcp`, and
-`/mcp/metamcp` therefore proxies to `https://metamcp.<domain>/mcp`. Nothing
-else in the Worker changes — that is the whole point of the naming convention.
+`/mcp/metamcp` therefore proxies to `https://metamcp.<domain>/mcp` — that is
+the naming convention, and it is why adding a server is adding a name.
+
+**The hub is also the default, so it needs no name in the URL.** The whole
+reason to run an aggregator is that one endpoint carries every tool; making a
+client spell out which aggregator would undo that. `DEFAULT_MCP_SERVICE` names
+the service an unqualified path resolves to, so three URLs reach the same hub:
+
+| URL | Resolves to |
+| --- | --- |
+| `https://<gateway-host>/mcp` | `DEFAULT_MCP_SERVICE` — **the connector URL** |
+| `https://<gateway-host>/` | the same |
+| `https://<gateway-host>/mcp/metamcp` | `metamcp`, named explicitly |
+
+Per-service paths keep working, and are how you reach anything that is *not*
+the default (`/mcp/mindmeld` still goes straight to the conversation index).
+The default is looked up in `MCP_SERVICES` like any other name, so it is a
+shortcut to one of those origins, never an exemption from the allowlist.
+
+One consequence of publishing the root: `https://<gateway-host>/` is now an MCP
+endpoint rather than a landing page, so an unauthenticated `GET /` answers
+`401` with a `WWW-Authenticate` challenge instead of explanatory HTML. The
+OAuth endpoints are matched ahead of it and are unaffected.
 
 ## Which credential flows where
 
@@ -46,7 +67,7 @@ is the most common way to spend an afternoon.
 
 | Credential | Minted by | Presented to | Never seen by |
 | --- | --- | --- | --- |
-| OAuth bearer token | this Worker | this Worker (`/mcp/*`) | the origin — `apiHandler` deletes `authorization` before proxying |
+| OAuth bearer token | this Worker | this Worker (`/mcp`, `/mcp/*`, `/`) | the origin — `apiHandler` deletes `authorization` before proxying |
 | Access session JWT | the Access app on `<gateway-host>/authorize` | this Worker, verified against `ACCESS_AUD` | the origin |
 | **Access service token** | your Zero Trust account | the **origin's** Access app | claude.ai |
 | MetaMCP API key | the hub | MetaMCP, injected by the hub's own edge | anything off the machine |
@@ -92,7 +113,9 @@ downstream will 502.
 
 ### 1. Deploy the Worker
 
-`MCP_SERVICES` in `wrangler.jsonc` already lists `metamcp`. One command:
+`MCP_SERVICES` in `wrangler.jsonc` already lists `metamcp`, and
+`DEFAULT_MCP_SERVICE` is set to it so the bare `/mcp` endpoint resolves there.
+One command:
 
 ```bash
 cd mcp-gateway && pnpm run deploy
@@ -190,15 +213,24 @@ Two ways to get the URL wrong, both of which have already happened here:
 Each command with the output that means "this step is right".
 
 ```bash
-# The gateway advertises the new resource
-curl -s https://<gateway-host>/.well-known/oauth-protected-resource/mcp/metamcp
-# -> {"resource":"https://<gateway-host>/mcp/metamcp",
+# The gateway advertises the connector URL as a resource
+curl -s https://<gateway-host>/.well-known/oauth-protected-resource/mcp
+# -> {"resource":"https://<gateway-host>/mcp",
 #     "authorization_servers":["https://<gateway-host>"], ...}
 
 # ...and challenges for it, pointing at that document
-curl -si -X POST https://<gateway-host>/mcp/metamcp | grep -i www-authenticate
+curl -si -X POST https://<gateway-host>/mcp | grep -i www-authenticate
 # -> WWW-Authenticate: Bearer realm="OAuth",
-#    resource_metadata=".../.well-known/oauth-protected-resource/mcp/metamcp"
+#    resource_metadata=".../.well-known/oauth-protected-resource/mcp"
+
+# The `resource` in that document must equal the URL the client calls, or
+# discovery fails silently. Both sides are derived from the request path by the
+# OAuth provider, so they agree by construction — check it anyway after any
+# routing change, because a mismatch looks like "the connector just won't add".
+
+# The per-service paths still resolve (not a 404)
+curl -si -X POST https://<gateway-host>/mcp/mindmeld | head -1   # -> 401
+curl -si -X POST https://<gateway-host>/mcp/metamcp  | head -1   # -> 401
 
 # The origin is protected: no credential gets nothing
 curl -s -o /dev/null -w '%{http_code}\n' https://metamcp.<domain>/mcp
@@ -227,7 +259,11 @@ curl -si https://<gateway-host>/authorize | head -1
 ### 5. Add the connector
 
 claude.ai → Settings → Connectors → Add custom connector →
-`https://<gateway-host>/mcp/metamcp`
+**`https://<gateway-host>/mcp`**
+
+That is the whole endpoint: one URL, every tool behind the hub. (`/mcp/metamcp`
+reaches the same server the long way, and the bare `https://<gateway-host>`
+works too — but the URL above is the one to hand out.)
 
 Discovery, dynamic registration and the Access-backed login follow from there.
 If registration fails, the gateway hostname's bypass policy is the thing to
@@ -259,10 +295,23 @@ check — `/register` and `/token` must be publicly reachable.
 - **The allowlist is what stops subdomain-hopping.** `MCP_SERVICES` is why an
   authorized caller cannot aim the gateway's service token at an arbitrary
   `<anything>.<domain>`. Keep it exact.
+- **Token audiences are hierarchical, and `/mcp` is now a parent path.** When a
+  client binds a token to a resource (RFC 8707), the provider accepts it on that
+  path *and everything under it* — so a token issued for `https://<gateway-host>/mcp`
+  also validates at `/mcp/mindmeld`. Before the default service existed the
+  resources were siblings and no such containment arose. It grants nothing new:
+  every token comes from the same `/authorize` gate and the same email
+  allowlist, so a client that can get a token for `/mcp` could register for
+  `/mcp/mindmeld` directly anyway. Worth knowing before this gateway ever issues
+  tokens to more than one person.
 
 ## Rollback
 
-Remove `metamcp` from `MCP_SERVICES` and redeploy; `/mcp/metamcp` returns
-`404 unknown_service` again. To take the origin off the internet entirely,
+Remove `metamcp` from `MCP_SERVICES` **and clear `DEFAULT_MCP_SERVICE`**, then
+redeploy; `/mcp/metamcp`, `/mcp` and `/` all return `404 unknown_service`
+again. Clearing only one of the two leaves the other pointing at a name the
+allowlist no longer admits, which is the same 404 by a longer route. To point
+the bare endpoint somewhere else instead, set `DEFAULT_MCP_SERVICE` to another
+name already in `MCP_SERVICES`. To take the origin off the internet entirely,
 delete the tunnel's public hostname — that is the single switch, and it leaves
 the hub fully usable on loopback.
