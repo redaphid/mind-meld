@@ -11,7 +11,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
-import { search, findProjectsByPath, UnknownDataClassError } from './search.js'
+import { searchWithDiagnostics, findProjectsByPath, UnknownDataClassError } from './search.js'
 import { IngestPayloadSchema, ingestConversation, MissingDataClassError } from './ingest.js'
 import { getSessionDigest, getMessages, getMessageById } from './session.js'
 import { createMcpServer } from './tools.js'
@@ -498,9 +498,9 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
           .map(s => s.trim())
           .filter(Boolean)
 
-  let results
+  let outcome
   try {
-    results = await search({
+    outcome = await searchWithDiagnostics({
       query: q,
       negativeQuery: typeof req.query.not === 'string' ? req.query.not : undefined,
       mode: mode && ['semantic', 'text', 'hybrid'].includes(mode) ? mode : 'hybrid',
@@ -529,9 +529,14 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
     status: 'ok',
     query: q,
     mode: mode ?? 'hybrid',
-    count: results.length,
+    count: outcome.results.length,
     projectIds,
-    results: results.map(toSearchHit),
+    // Additive and null on a healthy search, so nothing that ignores it breaks.
+    // Non-null means the vector arms were skipped and these results came from
+    // full text alone — the difference between "no such conversation" and "the
+    // GPU gate was shut", which are indistinguishable from the results list.
+    degraded: outcome.degraded,
+    results: outcome.results.map(toSearchHit),
   })
 }))
 

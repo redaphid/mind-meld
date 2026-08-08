@@ -2,7 +2,7 @@ import assert from 'node:assert'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { query } from '../db/postgres.js'
-import { search, formatSearchResults, findProjectsByPath } from './search.js'
+import { searchWithDiagnostics, formatSearchResults, findProjectsByPath } from './search.js'
 import { sinceSchema } from './since.js'
 import {
   getSessionDigest,
@@ -90,9 +90,11 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
     async (params) => {
       const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
       const projectIds = matchingProjects.map((p) => p.id)
-      const results = await search(params)
+      const { results, degraded } = await searchWithDiagnostics(params)
       return {
-        content: [{ type: 'text', text: formatSearchResults(results, projectIds) }],
+        content: [
+          { type: 'text', text: formatSearchResults(results, projectIds, degraded) },
+        ],
       }
     }
   )

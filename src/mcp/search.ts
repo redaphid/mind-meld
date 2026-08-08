@@ -2,7 +2,7 @@ import assert from 'node:assert'
 import { query } from '../db/postgres.js'
 import { querySimilar } from '../db/chroma.js'
 import { config } from '../config.js'
-import { getOllamaClient } from '../embeddings/ollama.js'
+import { getInteractiveOllamaClient } from '../embeddings/ollama.js'
 import { subtractVectors, normalizeVector, addVectors, scaleVector } from '../utils/vector-math.js'
 import { projectPathVariants, isWindowsBackedPath } from '../utils/project-path.js'
 import { fuseRanks, type RankedList } from './rrf.js'
@@ -136,8 +136,15 @@ const parseWeightedIds = (params: string[]): WeightedId[] =>
     })
     .filter((item) => item.id.length > 0)
 
+// Search is the one Ollama caller with a person waiting on it, so it uses the
+// interactive client: one attempt, seconds not minutes, and no waiting out a
+// GPU-gate cooldown. When that fails the semantic arms are skipped and the
+// caller is told the results are full-text only — see `degraded` below.
 const getQueryEmbedding = async (text: string) => {
-  const response = await getOllamaClient().embed({ model: config.embeddings.model, input: text })
+  const response = await getInteractiveOllamaClient().embed({
+    model: config.embeddings.model,
+    input: text,
+  })
   return response.embeddings[0]
 }
 
@@ -360,7 +367,28 @@ const passesFilters = (
   return true
 }
 
-export const search = async (params: SearchParams): Promise<SearchResult[]> => {
+// Why a search returned less than it was asked for, or null when it ran whole.
+//
+// The semantic arms need a query vector, and the only thing that can produce
+// one is an Ollama behind a GPU gate that is entitled to say "not now".
+// Full-text needs nothing but Postgres, so it still works — and handing those
+// results back immediately is better than making someone wait for a vector that
+// is not coming. What must not happen is handing them back *silently*: full
+// text matches words, not meaning, so a caller who believes it got a semantic
+// search will read far too much into a miss.
+export type SearchDegradation = {
+  // The semantic arms were skipped. In hybrid mode the results are full-text
+  // only; in `semantic` mode there are no results at all.
+  semantic: false
+  reason: string
+}
+
+export type SearchOutcome = {
+  results: SearchResult[]
+  degraded: SearchDegradation | null
+}
+
+export const searchWithDiagnostics = async (params: SearchParams): Promise<SearchOutcome> => {
   const limit = params.limit ?? 8
   const mode = params.mode ?? 'hybrid'
   const includeAutomated = params.includeAutomated ?? false
@@ -395,6 +423,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
   const hitBySession = new Map<number, Hit>()
   const inProject = new Set<number>()
   const rankedLists: RankedList[] = []
+  let degraded: SearchDegradation | null = null
 
   // First arm to claim a session wins its tier/cursor/snippet source. Arms run
   // session → chunk → message → fts; later, fusion across all arms decides rank.
@@ -477,7 +506,12 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         rankedLists.push(messageRanked)
       }
     } catch (e) {
-      console.error('Semantic search failed:', e)
+      // Reached in seconds now rather than after ~120s of retrying a shut gate:
+      // getQueryEmbedding uses the interactive client, which does not wait one
+      // out. The reason travels with the results instead of only to the log.
+      const reason = e instanceof Error ? e.message : String(e)
+      console.error('Semantic search failed, returning full-text results only:', reason)
+      degraded = { semantic: false, reason }
     }
   }
 
@@ -590,11 +624,29 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
     return { ...hit.result, score, snippet: buildSnippet(hit.rawSnippet, hit.headline) }
   })
   results.sort((a, b) => b.score - a.score)
-  return results.slice(0, limit)
+  return { results: results.slice(0, limit), degraded }
 }
 
-export const formatSearchResults = (results: SearchResult[], projectIds: number[] = []) => {
-  if (results.length === 0) return 'No matching conversations found.'
+// The plain form, for callers that have nothing useful to do with the
+// diagnostics. Everything user-facing should prefer searchWithDiagnostics and
+// say when the answer was only half-computed.
+export const search = async (params: SearchParams): Promise<SearchResult[]> =>
+  (await searchWithDiagnostics(params)).results
+
+// An LLM reading this cannot see the log line, and "no results" reads as "this
+// conversation does not exist" — a conclusion it will then act on. So a
+// degraded search says so in the text, including when it found nothing.
+const degradedNote = (degraded: SearchDegradation | null) =>
+  degraded
+    ? `\n\nNOTE: full-text results only — semantic search was unavailable (${degraded.reason}). Meaning-based matches are missing, so absence here is not evidence a conversation does not exist. Retry shortly for a full search.`
+    : ''
+
+export const formatSearchResults = (
+  results: SearchResult[],
+  projectIds: number[] = [],
+  degraded: SearchDegradation | null = null
+) => {
+  if (results.length === 0) return `No matching conversations found.${degradedNote(degraded)}`
 
   const output = results
     .map((r, i) => {
@@ -618,5 +670,5 @@ export const formatSearchResults = (results: SearchResult[], projectIds: number[
     })
     .join('\n\n')
 
-  return `Found ${results.length} relevant conversations:\n\n${output}`
+  return `Found ${results.length} relevant conversations:\n\n${output}${degradedNote(degraded)}`
 }

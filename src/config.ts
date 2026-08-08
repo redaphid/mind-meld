@@ -93,6 +93,20 @@ export const config = {
     // running fine.
     url: getEnv("OLLAMA_URL", "http://127.0.0.1:11434"),
     timeoutMs: getEnvInt("OLLAMA_TIMEOUT_MS", 120000), // 2 minutes
+    // The ceiling for a query someone is waiting on, which is a different
+    // question entirely from how long a background batch may take.
+    //
+    // A search embeds its query through the same gated client as the batch
+    // pipeline, so on a closed gate it inherited the batch settings: three
+    // attempts, each Retry-After clamped to retryMaxDelayMs, ~120 seconds of
+    // silence before the caller got FTS-only results anyway. Nobody waits two
+    // minutes for a search box. The vector arm is an *enhancement* over
+    // full-text here — when it cannot be had promptly, the honest move is to
+    // return the full-text results now and say they are degraded.
+    //
+    // Bounds the whole interactive attempt: one try, no retries, and no more
+    // than this long queueing for the tunnel slot either.
+    interactiveTimeoutMs: getEnvInt("OLLAMA_INTERACTIVE_TIMEOUT_MS", 4000),
     maxRetries: getEnvInt("OLLAMA_MAX_RETRIES", 3),
     retryDelayMs: getEnvInt("OLLAMA_RETRY_DELAY_MS", 5000), // 5 seconds between retries
     // Ceiling on how long a single 503 Retry-After may park a request. A GPU

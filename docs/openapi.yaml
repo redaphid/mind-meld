@@ -387,6 +387,33 @@ paths:
                     description: Project ids matching `cwd`, empty when `cwd` was not given.
                     items:
                       type: integer
+                  degraded:
+                    type: object
+                    nullable: true
+                    description: |
+                      Null on a complete search. Non-null means the semantic arms
+                      were skipped because no query vector could be obtained
+                      promptly — Ollama unreachable, or the GPU gate in front of
+                      it holding work back — and these results came from
+                      full-text alone. Search does not wait one out: a query has
+                      someone attached to it, so it degrades in seconds rather
+                      than retrying for two minutes.
+
+                      It matters because the two cases are indistinguishable
+                      from the results list. Full text matches words, not
+                      meaning, so an empty or thin result set here is not
+                      evidence the conversation does not exist — retry shortly.
+                      In `semantic` mode there is no fallback arm, so results
+                      will be empty.
+                    required: [semantic, reason]
+                    properties:
+                      semantic:
+                        type: boolean
+                        const: false
+                      reason:
+                        type: string
+                        description: The underlying failure, passed through whole.
+                        example: '503 GPU is in use by other applications right now'
                   results:
                     type: array
                     items:

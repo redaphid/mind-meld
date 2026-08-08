@@ -13,10 +13,12 @@ vi.mock('../db/postgres.js', () => ({
   queries: {},
 }))
 
-const doSearch = vi.fn(async () => [])
+// The tool calls the diagnostics-carrying form, so a degraded search can say so
+// in the text it hands back to an LLM.
+const doSearch = vi.fn(async () => ({ results: [], degraded: null }))
 const findProjectsByPath = vi.fn(async () => [{ id: 7, name: 'proj' }])
 vi.mock('./search.js', () => ({
-  search: (...args: unknown[]) => doSearch(...(args as [])),
+  searchWithDiagnostics: (...args: unknown[]) => doSearch(...(args as [])),
   formatSearchResults: () => 'SEARCH RESULTS',
   findProjectsByPath: (...args: unknown[]) => findProjectsByPath(...(args as [])),
 }))
