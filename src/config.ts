@@ -106,7 +106,14 @@ export const config = {
     //
     // Bounds the whole interactive attempt: one try, no retries, and no more
     // than this long queueing for the tunnel slot either.
-    interactiveTimeoutMs: getEnvInt("OLLAMA_INTERACTIVE_TIMEOUT_MS", 4000),
+    //
+    // Not tighter than this on purpose. A single request over the SSH tunnel
+    // measures ~4-6s (see maxConcurrency below), so a 4s deadline would keep
+    // cutting off embeds that were about to succeed — and every one of those is
+    // a search quietly answered from full text alone. The failure this bounds
+    // is a gate holding work for minutes; it does not need a tight number to
+    // catch that, and a loose one costs nothing when the vector arrives.
+    interactiveTimeoutMs: getEnvInt("OLLAMA_INTERACTIVE_TIMEOUT_MS", 8000),
     maxRetries: getEnvInt("OLLAMA_MAX_RETRIES", 3),
     retryDelayMs: getEnvInt("OLLAMA_RETRY_DELAY_MS", 5000), // 5 seconds between retries
     // Ceiling on how long a single 503 Retry-After may park a request. A GPU
