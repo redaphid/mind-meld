@@ -48,12 +48,21 @@ export type GateStatus = {
   quietSeconds: number | null
   requiredQuietSeconds: number | null
   holdReason: string | null
-  // VRAM held by processes that are not Ollama — i.e. what mindmeld is being
-  // asked to yield to. This is the only real GPU-load signal available here:
-  // no mindmeld container has GPU access, so nothing inside one can run
-  // nvidia-smi. The proxy can, and already does.
-  otherVramMb: number | null
-  busyThresholdMb: number | null
+  // GPU *utilization* by processes that are not Ollama — i.e. what mindmeld is
+  // being asked to yield to — as a percentage, summed across every engine (3D,
+  // Copy, VideoDecode, ...) of every non-Ollama process. It can legitimately
+  // exceed 100. This is the only real GPU-load signal available here: no
+  // mindmeld container has GPU access, so nothing inside one can run
+  // nvidia-smi. The proxy reads the Windows "GPU Engine" counters and already
+  // publishes it.
+  //
+  // Utilization, not VRAM: these were read as `other_vram_mb` /
+  // `busy_threshold_mb` for long enough that the GPU panel was permanently
+  // blank — the proxy has never emitted those keys, every optional field
+  // resolved to null, and null renders as nothing. The names below are the ones
+  // ollama-proxy's `/_gate` and 503 bodies actually send.
+  otherUtilPct: number | null
+  busyThresholdPct: number | null
   // The proxy's own full sentence explaining the current state. Passed through
   // whole — it is already written for a human, and truncating it would remove
   // the half that says what to do.
@@ -67,8 +76,8 @@ export const GATE_ABSENT: GateStatus = {
   quietSeconds: null,
   requiredQuietSeconds: null,
   holdReason: null,
-  otherVramMb: null,
-  busyThresholdMb: null,
+  otherUtilPct: null,
+  busyThresholdPct: null,
   status: null,
 }
 
@@ -82,8 +91,8 @@ export const parseGate = (g: any): GateStatus => ({
   quietSeconds: g?.quiet_seconds ?? null,
   requiredQuietSeconds: g?.required_quiet_seconds ?? null,
   holdReason: g?.hold_reason ?? null,
-  otherVramMb: g?.other_vram_mb ?? null,
-  busyThresholdMb: g?.busy_threshold_mb ?? null,
+  otherUtilPct: g?.other_util_pct ?? null,
+  busyThresholdPct: g?.busy_threshold_pct ?? null,
   status: g?.status ?? null,
 })
 
