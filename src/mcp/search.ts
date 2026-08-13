@@ -9,6 +9,7 @@ import { fuseRanks, type RankedList } from './rrf.js'
 import { buildSnippet, ts_headline_options } from './snippet.js'
 import { resolveTitle, type TitleSource } from './title.js'
 import { parseSinceDate } from './since.js'
+import { LAST_ACTIVITY_SQL, lastActivity } from './last-activity.js'
 
 const PROJECT_BOOST = 0.5
 
@@ -246,6 +247,7 @@ type SessionRow = {
   source_name: string
   data_class: string
   started_at: Date
+  ended_at: Date | null
   message_count: number
   project_id: number
 }
@@ -256,7 +258,7 @@ const AUTOMATED_FILTER = `($2::boolean OR s.is_automated = false)`
 const SESSION_QUERY = `
   SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
          src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
-         s.started_at, s.message_count, p.id as project_id
+         s.started_at, s.ended_at, s.message_count, p.id as project_id
   FROM sessions s
   JOIN projects p ON s.project_id = p.id
   JOIN sources src ON p.source_id = src.id
@@ -276,7 +278,7 @@ const getSessionByMessageId = async (messageId: number, includeAutomated: boolea
   const result = await query<MessageAnchoredRow>(
     `SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
             src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
-            s.started_at, s.message_count, p.id as project_id,
+            s.started_at, s.ended_at, s.message_count, p.id as project_id,
             m.id as message_id, m.content_text
      FROM messages m
      JOIN sessions s ON m.session_id = s.id
@@ -294,7 +296,7 @@ const getSessionByChunkId = async (chunkId: number, includeAutomated: boolean) =
   const result = await query<ChunkAnchoredRow>(
     `SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
             src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
-            s.started_at, s.message_count, p.id as project_id,
+            s.started_at, s.ended_at, s.message_count, p.id as project_id,
             c.chunk_index, c.summary as chunk_summary
      FROM session_chunks c
      JOIN sessions s ON c.session_id = s.id
@@ -339,7 +341,7 @@ const baseResult = (s: SessionRow, score: number, tier: MatchedTier): SearchResu
   source: s.source_name,
   data_class: s.data_class,
   ...resolveTitleFields(s),
-  date: s.started_at,
+  date: lastActivity(s),
   score,
   matched_tier: tier,
   snippet: null,
@@ -355,7 +357,7 @@ const passesFilters = (
   if (!params.includeUnsummarized && session.summary === null) return false
   if (dataClasses && !dataClasses.includes(session.data_class)) return false
   if (params.source && session.source_name !== params.source) return false
-  if (sinceDate && session.started_at < sinceDate) return false
+  if (sinceDate && lastActivity(session) < sinceDate) return false
   if (params.projectOnly && !projectIds.includes(session.project_id)) return false
   return true
 }
@@ -486,7 +488,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       `to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $1)`,
       `s.deleted_at IS NULL`,
       `($2::text IS NULL OR src.name = $2)`,
-      `($3::timestamptz IS NULL OR s.started_at >= $3)`,
+      `($3::timestamptz IS NULL OR ${LAST_ACTIVITY_SQL} >= $3)`,
       `($4::boolean OR s.is_automated = false)`,
     ]
     // Same rule as the semantic arms, applied in SQL: a session with no summary
@@ -525,6 +527,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       source_name: string
       data_class: string
       started_at: Date
+      ended_at: Date | null
       message_count: number
       rank: number
       project_id: number
@@ -545,7 +548,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
       )
       SELECT rm.session_id, rm.message_id, s.title, s.summary, p.name as project_name, p.path as project_path,
              src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
-             s.started_at, s.message_count, rm.rank,
+             s.started_at, s.ended_at, s.message_count, rm.rank,
              p.id as project_id,
              ts_headline('english', rm.content_text, websearch_to_tsquery('english', $1), '${ts_headline_options}') as headline
       FROM ranked_messages rm
@@ -567,7 +570,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         source: row.source_name,
         data_class: row.data_class,
         ...resolveTitleFields(row),
-        date: row.started_at,
+        date: lastActivity(row),
         score: row.rank,
         matched_tier: 'message',
         snippet: null,
