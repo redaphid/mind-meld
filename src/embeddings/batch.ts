@@ -33,6 +33,10 @@ interface MessageToEmbed {
   project_path: string;
   source_name: string;
   model: string | null;
+  // The message's effective data class, which decides how short it may be
+  // before classifyNoise writes it off. A project-level override wins over the
+  // source's default, matching how search.ts resolves the same value.
+  data_class: string | null;
 }
 
 // Mark a message as un-embeddable with explicit failure tracking
@@ -71,7 +75,8 @@ async function getMessagesToEmbed(limit: number, maxChars?: number): Promise<Get
   const embeddable = embeddableMessages(2, maxChars);
   const result = await query<MessageToEmbed>(
     `SELECT m.id, m.session_id, m.content_text, m.role, m.timestamp,
-            p.path as project_path, src.name as source_name, m.model
+            p.path as project_path, src.name as source_name, m.model,
+            COALESCE(p.data_class, src.data_class) as data_class
      ${embeddable.sql}
      ORDER BY m.id
      LIMIT $1`,
@@ -82,7 +87,7 @@ async function getMessagesToEmbed(limit: number, maxChars?: number): Promise<Get
   const skipped: Array<{ id: number; detail: string }> = [];
 
   for (const row of result.rows) {
-    const noiseDetail = classifyNoise(row.content_text);
+    const noiseDetail = classifyNoise(row.content_text, row.data_class);
     if (noiseDetail) {
       skipped.push({ id: row.id, detail: noiseDetail });
     } else {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { classifyAutomated, isAutomated, classifyNoise } from './classify.js'
+import { classifyAutomated, isAutomated, classifyNoise, minContentChars } from './classify.js'
 
 // The parser strips scaffolding on the way in, but ~800 messages were stored
 // before it did. Until the backfill runs, those rows still hold raw wrappers —
@@ -39,6 +39,69 @@ describe('classifyNoise: harness scaffolding (issue #37)', () => {
 
   it('leaves ordinary long conversation alone', () => {
     expect(classifyNoise('Can you explain how the embedding backlog drains? '.repeat(3))).toBeNull()
+  })
+})
+
+// The 50-character floor is a coding heuristic: under it, a transcript is
+// almost always tool chatter. A conversation is the opposite -- the short line
+// is the content. Applying the coding floor to chat sources discarded the
+// majority of every chat corpus indexed here behind permanent UNEMBEDDABLE
+// markers, which is why the message tier of semantic search returned nothing
+// for them.
+describe('classifyNoise: the length floor follows the data class', () => {
+  // Synthetic, but shaped like the traffic that was being dropped: ordinary
+  // chat lines between 10 and 50 characters. Deliberately invented rather than
+  // copied from a real thread -- this repository is public, and a regression
+  // fixture is not a reason to publish somebody's messages.
+  const shortChatLines = [
+    'What time does it start?',
+    'omg I cannot wait for this',
+    'this is going to be so much fun',
+    'yes same here, super hyped!',
+    'that track absolutely goes hard',
+  ]
+
+  it.each(shortChatLines)('keeps a chat line the coding floor threw away: %s', (dm) => {
+    expect(dm.length).toBeLessThan(50)
+    // What the bug did.
+    expect(classifyNoise(dm, 'coding')).toMatch(/^too-short:/)
+    // What it must do now.
+    expect(classifyNoise(dm, 'personal')).toBeNull()
+  })
+
+  it('still applies the aggressive floor to coding data', () => {
+    expect(classifyNoise('Exit code 0 and done', 'coding')).toMatch(/^too-short:/)
+  })
+
+  it('treats an unspecified data class as coding, so existing callers are unchanged', () => {
+    const short = 'Where is it being held?'
+    expect(classifyNoise(short)).toBe(classifyNoise(short, 'coding'))
+    expect(classifyNoise(short, null)).toMatch(/^too-short:/)
+  })
+
+  it('does not let a conversational class rescue near-empty text', () => {
+    // Below the 10-character gate pending.ts already applies in SQL.
+    expect(classifyNoise('ok thx', 'personal')).toMatch(/^too-short:/)
+  })
+
+  it('judges chat length on stripped content, so markup cannot pad it', () => {
+    const raw = '<command-name>/ask</command-name>\n<command-args>hi</command-args>'
+    expect(classifyNoise(raw, 'personal')).not.toBeNull()
+  })
+
+  it('still applies the noise patterns to conversational data', () => {
+    expect(classifyNoise('[Request interrupted by the user before it finished]', 'personal')).toMatch(
+      /^pattern:/
+    )
+  })
+
+  it('presumes any unrecognised class is conversational, not coding', () => {
+    // A class added later must not silently inherit the coding floor.
+    expect(minContentChars('notes')).toBe(10)
+    expect(minContentChars('meetings')).toBe(10)
+    expect(minContentChars('a-class-invented-tomorrow')).toBe(10)
+    expect(minContentChars('coding')).toBe(50)
+    expect(minContentChars('  CODING  ')).toBe(50)
   })
 })
 

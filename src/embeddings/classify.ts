@@ -22,7 +22,35 @@ export const NOISE_PATTERNS = [
   /IMMEDIATE DISMISSAL.*dismissed-urls\.txt/s,
 ]
 
-export const classifyNoise = (text: string): string | null => {
+// How short a message may be before it is written off as noise.
+//
+// The 50-character floor was measured against CODING transcripts, where nearly
+// everything under it is tool chatter -- `Exit code 0`, `done`, `File created
+// successfully`. That reasoning does not survive contact with a conversation.
+// In a chat thread the short line IS the content: a question about where to
+// meet, or an answer naming the place, is routinely under 50 characters and
+// carries the whole fact. Applying the coding floor to conversational sources
+// discarded the MAJORITY of every chat corpus indexed here -- measured at 54%
+// and 39% of two of them -- behind permanent UNEMBEDDABLE markers, leaving the
+// message tier of semantic search with nothing to match against.
+//
+// So the floor is per data class, not global. Conversational sources fall back
+// to the same 10-character gate the SQL predicate in pending.ts already
+// applies, just measured on the scaffolding-stripped text so a wrapper cannot
+// pad a two-word message over the line.
+const CODING_MIN_CHARS = 50
+const CONVERSATIONAL_MIN_CHARS = 10
+
+// Only `coding` earns the aggressive floor. Anything else -- personal, notes,
+// meetings, and any class added later -- is presumed to be human conversation,
+// which is the safer default: over-embedding costs GPU time, under-embedding
+// loses the message permanently behind an UNEMBEDDABLE marker.
+export const minContentChars = (dataClass?: string | null): number =>
+  (dataClass ?? 'coding').trim().toLowerCase() === 'coding'
+    ? CODING_MIN_CHARS
+    : CONVERSATIONAL_MIN_CHARS
+
+export const classifyNoise = (text: string, dataClass?: string | null): string | null => {
   // Judged on the real content, not the markup around it. The parser strips
   // scaffolding on the way in, but ~800 messages were stored before it did and
   // those rows still hold raw wrappers until the backfill runs. Length was the
@@ -31,7 +59,7 @@ export const classifyNoise = (text: string): string | null => {
   // (issue #37).
   const real = stripScaffolding(text)
   if (isScaffoldingOnly(text)) return 'scaffolding-only'
-  if (real.length < 50) return `too-short:${real.length}`
+  if (real.length < minContentChars(dataClass)) return `too-short:${real.length}`
   const matched = NOISE_PATTERNS.find((p) => p.test(real))
   if (matched) return `pattern:${matched.source}`
   return null
