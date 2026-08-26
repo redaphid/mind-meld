@@ -39,6 +39,19 @@ function getEnvBool(key: string, defaultValue: boolean): boolean {
   return value.toLowerCase() === "true" || value === "1";
 }
 
+// A comma-separated env var as a list. An explicitly empty value ("") means an
+// empty list, not "fall back to the default" -- otherwise a setting like
+// MINDMELD_DEFAULT_EXCLUDED_TAGS could never be turned off from the
+// environment, only changed to something else.
+function getEnvList(key: string, defaultValue: string[]): string[] {
+  const value = process.env[key];
+  if (value === undefined) return defaultValue;
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
 export const config = {
   // Which computer this process is running on. Several machines sync into the
   // same database, so every project a sync stamps carries its origin. Falls
@@ -57,6 +70,18 @@ export const config = {
     // observed ~265KB/day for a sync container this is a few MB per machine
     // per fortnight; set 0 to keep everything.
     retentionDays: getEnvInt("LOG_RETENTION_DAYS", 14),
+  },
+
+  tags: {
+    // Tags whose presence hides a session from search unless the caller asks
+    // for them by name. "useless" is the first member and the reason the set
+    // exists: it replaces a separate soft-delete flag with one ordinary tag,
+    // so hiding a session stays reversible (task 326).
+    //
+    // Configurable precisely so a second hidden tag never needs a code change.
+    // Note this is the ONLY place tags are treated specially -- the vocabulary
+    // itself stays open, and nothing here restricts what tags may be created.
+    defaultExcluded: getEnvList("MINDMELD_DEFAULT_EXCLUDED_TAGS", ["useless"]),
   },
 
   // PostgreSQL
