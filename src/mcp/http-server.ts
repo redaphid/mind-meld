@@ -475,6 +475,18 @@ const intParam = (raw: unknown, fallback: number) => {
 
 const boolParam = (raw: unknown) => raw === 'true' || raw === '1'
 
+// A repeatable OR comma-separated query param: ?tag=a&tag=b and ?tag=a,b both
+// give ["a","b"]. Absent stays undefined, which every caller below distinguishes
+// from an empty list -- "not asked for" and "asked for nothing" mean different
+// things to the search layer.
+const listParam = (raw: unknown): string[] | undefined => {
+  if (raw === undefined) return undefined
+  const parts = (Array.isArray(raw) ? raw.map(String) : String(raw).split(','))
+    .map((s) => s.trim())
+    .filter(Boolean)
+  return parts.length > 0 ? parts : undefined
+}
+
 // Search over the same index the MCP tool uses — same fusion, same filters —
 // returning the structured results rather than the MCP text rendering.
 app.get('/api/search', apiRoute('Search', async (req, res) => {
@@ -490,13 +502,7 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
 
   // ?dataClass=coding&dataClass=personal or ?dataClass=coding,personal both
   // work; absent means the search-layer default (coding only).
-  const rawDataClass = req.query.dataClass
-  const dataClass =
-    rawDataClass === undefined
-      ? undefined
-      : (Array.isArray(rawDataClass) ? rawDataClass.map(String) : String(rawDataClass).split(','))
-          .map(s => s.trim())
-          .filter(Boolean)
+  const dataClass = listParam(req.query.dataClass)
 
   let outcome
   try {
@@ -511,7 +517,13 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
       projectOnly: boolParam(req.query.projectOnly),
       includeAutomated: boolParam(req.query.includeAutomated),
       includeUnsummarized: boolParam(req.query.includeUnsummarized),
-      dataClass: dataClass?.length ? dataClass : undefined,
+      dataClass,
+      // Without these two, the default-excluded tag set would be a ONE-WAY
+      // DOOR over HTTP: a search here still hides "useless"-tagged sessions
+      // (the filter lives in the search layer, not the tool layer), but
+      // nothing could ever ask to see them again.
+      tags: listParam(req.query.tag),
+      excludeTags: listParam(req.query.excludeTag),
     })
   } catch (error) {
     // A typo'd class is a caller mistake, not a server fault — 400, with the
