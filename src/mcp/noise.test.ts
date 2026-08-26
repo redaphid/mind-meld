@@ -58,16 +58,17 @@ describe('choosing a cluster count', () => {
   })
 
   it('scales with the corpus rather than being fixed', () => {
-    // sqrt(n/2): a handful of reported sessions should not be split into a
-    // dozen "clusters" of one, and a large corpus should not be squashed into
-    // a single mean.
+    // ~4 vectors per cluster. A handful of reported sessions must not become a
+    // dozen "clusters" of one, and a large corpus must not be squashed into a
+    // single mean -- the tuning sweep showed collateral damage falling as k
+    // rises, so the heuristic leans toward more clusters rather than fewer.
     expect(chooseClusterCount(2)).toBe(1)
-    expect(chooseClusterCount(50)).toBe(5)
-    expect(chooseClusterCount(200)).toBe(10)
+    expect(chooseClusterCount(50)).toBe(13)
+    expect(chooseClusterCount(120)).toBe(30)
   })
 
   it('caps k so a big corpus does not cost a comparison per cluster forever', () => {
-    expect(chooseClusterCount(100000)).toBe(16)
+    expect(chooseClusterCount(100000)).toBe(32)
   })
 
   it('never asks for more clusters than there are vectors', () => {

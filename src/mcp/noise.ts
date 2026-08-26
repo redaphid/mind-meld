@@ -105,17 +105,33 @@ export const forgetNoiseVector = async (sessionId: number): Promise<void> => {
   invalidateNoiseClusters()
 }
 
-// How many clusters for a corpus of n vectors.
+// How many clusters for a corpus of n vectors: about one per four, capped.
 //
-// Roughly sqrt(n/2), the usual rule of thumb, clamped at both ends. The clamp
-// matters: below ~2 vectors per cluster a "cluster" is one reported session and
-// the penalty degenerates into exact-match blocking, while a large k over a
-// small corpus produces many near-identical centroids and multiplies the
-// per-result comparison cost for nothing.
+// This started as sqrt(n/2), the usual rule of thumb, which gives k=8 for the
+// 120-vector corpus the tuning sweep ran against. The sweep then showed that
+// COLLATERAL DAMAGE FALLS AS k RISES, near-monotonically, while the amount the
+// noise itself moves stays roughly flat:
+//
+//   k    mean rank change: held-out noise / real DM threads / real SMS
+//   1     +1.57   +0.35   +0.15     <- one global centroid
+//   2     +1.70   +0.35   +0.20
+//   4     +1.07   +0.18   +0.13
+//   8     +1.07   +0.12   +0.23
+//   16    +1.61   +0.18   +0.15
+//   32    +1.86   +0.00   +0.20
+//
+// That trend is the clustering argument carried to its conclusion rather than a
+// lucky point: a finer model resembles SPECIFIC noise more and generic text
+// less, so it charges real conversations less. At k=32 the DM threads were left
+// exactly where the unpenalized run put them.
+//
+// So the target is ~4 vectors per cluster. The cap is what stops a large corpus
+// from costing a comparison per cluster on every hit, and the floor of 1 keeps
+// a corpus of two or three from degenerating into exact-match blocking.
 export const chooseClusterCount = (n: number, configured = config.noise.clusterCount): number => {
   if (n <= 0) return 0
   if (configured > 0) return Math.max(1, Math.min(configured, n))
-  return Math.max(1, Math.min(16, Math.round(Math.sqrt(n / 2))))
+  return Math.max(1, Math.min(32, Math.round(n / 4)))
 }
 
 // Spherical k-means: L2-normalized vectors and centroids, assignment by maximum
