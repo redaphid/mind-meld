@@ -43,6 +43,17 @@ vi.mock('./health.js', () => ({
   formatHealth: () => 'HEALTH',
 }))
 
+const doApplyTags = vi.fn(async () => ['useless'])
+const doRemoveTags = vi.fn(async () => ['useless'])
+const doGetTags = vi.fn(async () => ['useless'])
+vi.mock('./tags.js', () => ({
+  applyTags: (...args: unknown[]) => doApplyTags(...(args as [])),
+  removeTags: (...args: unknown[]) => doRemoveTags(...(args as [])),
+  getTags: (...args: unknown[]) => doGetTags(...(args as [])),
+  formatTagWrite: () => 'TAG WRITE',
+  defaultExcludedTags: () => ['useless'],
+}))
+
 const { createMcpServer } = await import('./tools.js')
 
 // Talk to the server exactly as a real client does, over an in-memory
@@ -75,12 +86,14 @@ const src = (file: string) =>
 // Every tool both transports must offer. A tool added to the shared module
 // without being listed here fails too — the list is the reviewed contract.
 const EXPECTED_TOOLS = [
+  'addTag',
   'getChunk',
   'getMessage',
   'getMessages',
   'getSession',
   'getSessionTranscript',
   'health',
+  'removeTag',
   'reportUselessSession',
   'search',
   'stats',
@@ -207,6 +220,63 @@ describe('every advertised tool executes', () => {
     expect(
       text(await client.callTool({ name: 'reportUselessSession', arguments: { sessionId: 6 } }))
     ).toContain('not found or already deleted')
+    await client.close()
+  })
+
+  it('routes addTag to a session or a message, and refuses anything ambiguous', async () => {
+    const client = await connect()
+
+    expect(text(await client.callTool({ name: 'addTag', arguments: { sessionId: 5, tag: 'Useless' } })))
+      .toBe('TAG WRITE')
+    expect(doApplyTags).toHaveBeenCalledWith({ sessionId: 5 }, ['Useless'], { createdBy: 'mcp', note: undefined })
+
+    // Message granularity is equally valid — the tool must not force sessions.
+    await client.callTool({ name: 'addTag', arguments: { messageId: 99, tags: ['a', 'b'] } })
+    expect(doApplyTags).toHaveBeenLastCalledWith({ messageId: 99 }, ['a', 'b'], { createdBy: 'mcp', note: undefined })
+
+    // `tag` and `tags` are one list, so a caller never has to choose a form.
+    await client.callTool({ name: 'addTag', arguments: { sessionId: 5, tag: 'a', tags: ['b'] } })
+    expect(doApplyTags).toHaveBeenLastCalledWith({ sessionId: 5 }, ['a', 'b'], { createdBy: 'mcp', note: undefined })
+
+    // Naming both targets, or neither, is a mistake worth reporting rather
+    // than a coin flip about what the caller meant.
+    for (const args of [{ sessionId: 5, messageId: 9, tag: 'x' }, { tag: 'x' }]) {
+      const result = await client.callTool({ name: 'addTag', arguments: args })
+      expect((result as { isError?: boolean }).isError).toBe(true)
+    }
+
+    // A target with no tag is likewise refused, not silently accepted.
+    const empty = await client.callTool({ name: 'addTag', arguments: { sessionId: 5 } })
+    expect((empty as { isError?: boolean }).isError).toBe(true)
+    await client.close()
+  })
+
+  it('routes removeTag the same way, so tagging is reversible', async () => {
+    const client = await connect()
+    expect(text(await client.callTool({ name: 'removeTag', arguments: { sessionId: 5, tag: 'useless' } })))
+      .toBe('TAG WRITE')
+    expect(doRemoveTags).toHaveBeenCalledWith({ sessionId: 5 }, ['useless'])
+    await client.close()
+  })
+
+  it('advertises tag filtering on search, including the hidden-tag escape hatch', async () => {
+    const search = (await advertisedTools()).find(t => t.name === 'search')!
+    const properties = (search.inputSchema as { properties: Record<string, unknown> }).properties
+    // Without both halves, a default-excluded tag is a one-way door: things go
+    // in and can never be searched for again.
+    expect(properties).toHaveProperty('tags')
+    expect(properties).toHaveProperty('excludeTags')
+  })
+
+  it('passes tag filters through to the search layer untouched', async () => {
+    const client = await connect()
+    await client.callTool({
+      name: 'search',
+      arguments: { query: 'x', tags: ['keeper'], excludeTags: ['noise'] },
+    })
+    expect(doSearch).toHaveBeenCalledWith(
+      expect.objectContaining({ tags: ['keeper'], excludeTags: ['noise'] })
+    )
     await client.close()
   })
 
