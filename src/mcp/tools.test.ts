@@ -252,7 +252,8 @@ describe('every advertised tool executes', () => {
 
     // NOTHING this tool runs may touch deleted_at. Clearing or setting it is how
     // 426 personal SMS threads would leak into search.
-    for (const call of query.mock.calls) expect(String(call[0])).not.toContain('deleted_at')
+    for (const call of query.mock.calls)
+      expect(String((call as unknown[])[0])).not.toContain('deleted_at')
 
     await client.close()
   })
