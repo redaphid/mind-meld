@@ -4,7 +4,16 @@ const query = vi.fn()
 vi.mock('../db/postgres.js', () => ({ query: (...args: unknown[]) => query(...args) }))
 
 const querySimilar = vi.fn()
-vi.mock('../db/chroma.js', () => ({ querySimilar: (...args: unknown[]) => querySimilar(...args) }))
+// getAllEmbeddings backs the noise-ranking penalty (src/mcp/noise.ts). Empty by
+// default: with no reported noise the penalty is a no-op, which is exactly the
+// state every test here other than the noise ones is asserting about.
+const getAllEmbeddings = vi.fn(async () => ({ ids: [] as string[], embeddings: [] as number[][] }))
+vi.mock('../db/chroma.js', () => ({
+  querySimilar: (...args: unknown[]) => querySimilar(...args),
+  getAllEmbeddings: (...args: unknown[]) => getAllEmbeddings(...(args as [])),
+  upsertEmbeddings: vi.fn(),
+  deleteEmbeddings: vi.fn(),
+}))
 
 // Search embeds its query through the INTERACTIVE client — one attempt, a few
 // seconds — because a person is waiting on it. `embed` is a mock so a test can
@@ -13,6 +22,7 @@ vi.mock('../db/chroma.js', () => ({ querySimilar: (...args: unknown[]) => queryS
 const embed = vi.fn(async () => ({ embeddings: [new Array(1024).fill(0.1)] }))
 vi.mock('../embeddings/ollama.js', () => ({
   getInteractiveOllamaClient: () => ({ embed: (...args: unknown[]) => embed(...(args as [])) }),
+  generateEmbedding: vi.fn(async () => new Array(1024).fill(0.1)),
 }))
 
 const { search, searchWithDiagnostics, resolveDataClasses, formatSearchResults, findProjectsByPath } =
@@ -151,9 +161,9 @@ describe('search default data-class filter (semantic arm)', () => {
     mockChromaSessionsOnly()
 
     await search({ query: 'anything', mode: 'semantic', limit: 8 })
-    expect(querySimilar).toHaveBeenCalledWith('convo-sessions', expect.anything(), 40)
-    expect(querySimilar).toHaveBeenCalledWith('convo-chunks', expect.anything(), 40)
-    expect(querySimilar).toHaveBeenCalledWith('convo-messages', expect.anything(), 40)
+    expect(querySimilar).toHaveBeenCalledWith('convo-sessions', expect.anything(), 40, undefined, true)
+    expect(querySimilar).toHaveBeenCalledWith('convo-chunks', expect.anything(), 40, undefined, true)
+    expect(querySimilar).toHaveBeenCalledWith('convo-messages', expect.anything(), 40, undefined, true)
   })
 
   it('keeps the original over-fetch when the filter is disabled', async () => {
@@ -161,9 +171,9 @@ describe('search default data-class filter (semantic arm)', () => {
     mockChromaSessionsOnly()
 
     await search({ query: 'anything', mode: 'semantic', limit: 8, dataClass: ['*'] })
-    expect(querySimilar).toHaveBeenCalledWith('convo-sessions', expect.anything(), 16)
-    expect(querySimilar).toHaveBeenCalledWith('convo-chunks', expect.anything(), 24)
-    expect(querySimilar).toHaveBeenCalledWith('convo-messages', expect.anything(), 24)
+    expect(querySimilar).toHaveBeenCalledWith('convo-sessions', expect.anything(), 16, undefined, true)
+    expect(querySimilar).toHaveBeenCalledWith('convo-chunks', expect.anything(), 24, undefined, true)
+    expect(querySimilar).toHaveBeenCalledWith('convo-messages', expect.anything(), 24, undefined, true)
   })
 })
 
