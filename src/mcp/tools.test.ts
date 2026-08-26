@@ -54,6 +54,13 @@ vi.mock('./tags.js', () => ({
   defaultExcludedTags: () => ['useless'],
 }))
 
+const doWriteNote = vi.fn(async () => ({ sessionId: 42, title: 'a note', dataClass: 'notes', tags: ['note'] }))
+vi.mock('./notes.js', () => ({
+  writeNote: (...args: unknown[]) => doWriteNote(...(args as [])),
+  formatWrittenNote: () => 'WRITTEN NOTE',
+  NOTE_TAG: 'note',
+}))
+
 const { createMcpServer } = await import('./tools.js')
 
 // Talk to the server exactly as a real client does, over an in-memory
@@ -97,6 +104,7 @@ const EXPECTED_TOOLS = [
   'reportUselessSession',
   'search',
   'stats',
+  'writeNote',
 ]
 
 describe('shared MCP tool surface', () => {
@@ -278,6 +286,44 @@ describe('every advertised tool executes', () => {
       expect.objectContaining({ tags: ['keeper'], excludeTags: ['noise'] })
     )
     await client.close()
+  })
+
+  it('runs writeNote, passing text, title and tags through to the notes layer', async () => {
+    const client = await connect()
+    const result = await client.callTool({
+      name: 'writeNote',
+      arguments: { text: 'remember this', title: 'Reminder', tags: ['decision'] },
+    })
+    expect(text(result)).toBe('WRITTEN NOTE')
+    expect(doWriteNote).toHaveBeenCalledWith({
+      text: 'remember this',
+      title: 'Reminder',
+      tags: ['decision'],
+    })
+    await client.close()
+  })
+
+  // The automatic "note" tag is applied in the notes layer, not here, so the
+  // tool must NOT accept it as an argument or pre-seed it — otherwise a caller
+  // could reasonably think it was optional.
+  it('offers tags on writeNote without asking the caller to supply the automatic one', async () => {
+    const write = (await advertisedTools()).find(t => t.name === 'writeNote')!
+    const properties = (write.inputSchema as { properties: Record<string, unknown> }).properties
+    expect(properties).toHaveProperty('tags')
+
+    const client = await connect()
+    await client.callTool({ name: 'writeNote', arguments: { text: 'no tags given' } })
+    expect(doWriteNote).toHaveBeenLastCalledWith({ text: 'no tags given', title: undefined, tags: undefined })
+    await client.close()
+  })
+
+  // Task 329 renamed this tool from the earlier unmerged `saveNote` draft.
+  // Two names for one write path is the failure worth guarding against: an
+  // LLM would have no way to tell which one to reach for.
+  it('offers exactly one note-writing tool, not both names', async () => {
+    const names = (await advertisedTools()).map(t => t.name)
+    expect(names).toContain('writeNote')
+    expect(names).not.toContain('saveNote')
   })
 
   it('only resolves cwd to projects when a cwd was given', async () => {
