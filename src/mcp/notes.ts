@@ -16,10 +16,16 @@ import { applyTags } from './tags.js'
 //
 // NAMING: the exported function is `writeNote`, matching the name in the task
 // spec and the framing there ("mindmeld is read-only to agents; this is the
-// write path"). An earlier unmerged draft called it `saveNote`; that name was
-// never shipped - the live container has no notes module at all - so nothing
-// depended on it, and carrying both names would put two write paths on the
-// tool surface for one behaviour. There is deliberately no `saveNote` alias.
+// write path").
+//
+// This branch originally argued for no `saveNote` alias on the grounds that
+// the name had never shipped. That reasoning expired: v1.22.0 released #131,
+// so `saveNote` IS on the live tool surface and callers can already be using
+// it. The old name is kept briefly, but only where it is actually observable:
+// as an MCP tool named `saveNote` in tools.ts, which delegates to writeNote().
+// There is deliberately no alias EXPORT here - nothing imports one, and two
+// exported bindings for one function is duplicate surface with no caller.
+// The removal condition lives with the registration in tools.ts.
 
 export type WriteNoteParams = {
   text: string
