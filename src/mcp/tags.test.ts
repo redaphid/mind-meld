@@ -20,6 +20,9 @@ const {
   resolveTagFilter,
   applyTags,
   removeTags,
+  getTags,
+  getSessionTags,
+  formatTagWrite,
 } = await import('./tags.js')
 
 beforeEach(() => {
@@ -216,5 +219,139 @@ describe('writes', () => {
     // Asked for two, only one was there — the caller learns the difference
     // instead of the no-op being an error.
     expect(await removeTags({ sessionId: 5 }, ['useless', 'never-applied'])).toEqual(['useless'])
+  })
+})
+
+describe('tagging a message rather than a session', () => {
+  // Every write path below forks on which target it was given: a different
+  // existence check, a different column, a different id, and a different noun
+  // in the error. Session-only tests leave the whole message half of that fork
+  // unexercised, which matters because message-level tagging is the granular
+  // half of the feature -- it is what lets an agent call one message noise
+  // without condemning the conversation around it.
+  it('checks the target exists against messages, not sessions', async () => {
+    query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }], rowCount: 1 } as never)
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await applyTags({ messageId: 42 }, ['noisy'])
+    expect(String(query.mock.calls[0][0])).toContain('FROM messages')
+    expect(query.mock.calls[0][1] as unknown[]).toEqual([42])
+  })
+
+  it('stores the tag against message_id, not session_id', async () => {
+    query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }], rowCount: 1 } as never)
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await applyTags({ messageId: 42 }, ['  Noisy '])
+    // Normalization is not session-specific, and proving it here stops the
+    // message path from quietly storing "Noisy" that search never matches.
+    expect(String(query.mock.calls[1][0])).toContain('INSERT INTO tags (message_id')
+    expect(query.mock.calls[1][1] as unknown[]).toEqual([42, ['noisy'], null, null])
+  })
+
+  it('names the message, not a session, when the id does not exist', async () => {
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await expect(applyTags({ messageId: 999 }, ['x'])).rejects.toThrow('No such message 999')
+  })
+
+  it('deletes by message_id and reports what went', async () => {
+    query.mockResolvedValueOnce({ rows: [{ tag: 'noisy' }], rowCount: 1 } as never)
+    expect(await removeTags({ messageId: 42 }, ['Noisy'])).toEqual(['noisy'])
+    expect(String(query.mock.calls[0][0])).toContain('DELETE FROM tags WHERE message_id')
+    expect(query.mock.calls[0][1] as unknown[]).toEqual([42, ['noisy']])
+  })
+
+  it('records who tagged it and why when it is told', async () => {
+    // The provenance columns are the difference between "this session is
+    // useless" and "some agent decided this was useless, on this basis" --
+    // without them a bad tag is unattributable and cannot be reviewed.
+    query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }], rowCount: 1 } as never)
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
+    await applyTags({ sessionId: 5 }, ['useless'], { createdBy: 'some-agent', note: 'monitoring run' })
+    expect(query.mock.calls[1][1] as unknown[]).toEqual([5, ['useless'], 'some-agent', 'monitoring run'])
+  })
+})
+
+describe('reading tags back', () => {
+  it('reads a session\'s tags in a stable order', async () => {
+    // Ordered in SQL rather than at the call site: the confirmation text and
+    // the search display both render this list, and two different orders for
+    // the same state reads as a change that did not happen.
+    query.mockResolvedValueOnce({ rows: [{ tag: 'keeper' }, { tag: 'useless' }], rowCount: 2 } as never)
+    expect(await getTags({ sessionId: 5 })).toEqual(['keeper', 'useless'])
+    expect(String(query.mock.calls[0][0])).toContain('WHERE session_id = $1')
+    expect(String(query.mock.calls[0][0])).toContain('ORDER BY tag')
+    expect(query.mock.calls[0][1] as unknown[]).toEqual([5])
+  })
+
+  it('reads a message\'s tags from the message column', async () => {
+    query.mockResolvedValueOnce({ rows: [{ tag: 'noisy' }], rowCount: 1 } as never)
+    expect(await getTags({ messageId: 42 })).toEqual(['noisy'])
+    expect(String(query.mock.calls[0][0])).toContain('WHERE message_id = $1')
+    expect(query.mock.calls[0][1] as unknown[]).toEqual([42])
+  })
+
+  it('comes back empty for an untagged target instead of throwing', async () => {
+    // getTags runs immediately after every write to build the confirmation, so
+    // "nothing is tagged" is the ordinary case on a first removal, not an edge.
+    expect(await getTags({ sessionId: 5 })).toEqual([])
+  })
+})
+
+describe('session tags for a page of results', () => {
+  it('groups every tag under the session that carries it', async () => {
+    // A session with two tags is the only thing that exercises the append
+    // path; with one tag each, the grouping loop only ever creates lists.
+    query.mockResolvedValueOnce({
+      rows: [
+        { session_id: 7, tag: 'keeper' },
+        { session_id: 7, tag: 'useless' },
+        { session_id: 9, tag: 'keeper' },
+      ],
+      rowCount: 3,
+    } as never)
+    const bySession = await getSessionTags([7, 9])
+    expect(bySession.get(7)).toEqual(['keeper', 'useless'])
+    expect(bySession.get(9)).toEqual(['keeper'])
+  })
+
+  it('leaves an untagged session absent rather than present-and-empty', async () => {
+    // Search renders this map per hit; an empty array would print an empty tag
+    // strip on every untagged result.
+    query.mockResolvedValueOnce({ rows: [{ session_id: 7, tag: 'keeper' }], rowCount: 1 } as never)
+    const bySession = await getSessionTags([7, 8])
+    expect(bySession.has(8)).toBe(false)
+  })
+
+  it('asks the database nothing for an empty page of results', async () => {
+    expect(await getSessionTags([])).toEqual(new Map())
+    expect(query).not.toHaveBeenCalled()
+  })
+})
+
+describe('what the agent is told after a write', () => {
+  it('reports what was applied and the state that resulted', () => {
+    expect(formatTagWrite('Tagged', { sessionId: 5 }, ['useless'], ['keeper', 'useless'])).toBe(
+      'Tagged session 5: useless\nTags now: keeper, useless'
+    )
+  })
+
+  it('says plainly that nothing changed rather than claiming a write', () => {
+    // Idempotence is the feature, so a no-op has to READ as a no-op. Echoing
+    // "Untagged message 42: " with an empty list would tell an agent it had
+    // removed something it never removed.
+    expect(formatTagWrite('Untagged', { messageId: 42 }, [], ['keeper'])).toBe(
+      'No change to message 42. Tags now: keeper'
+    )
+  })
+
+  it('says "(none)" rather than trailing off when the last tag is gone', () => {
+    expect(formatTagWrite('Untagged', { sessionId: 5 }, ['useless'], [])).toBe(
+      'Untagged session 5: useless\nTags now: (none)'
+    )
+  })
+
+  it('says "(none)" on a no-op against a target that was never tagged', () => {
+    expect(formatTagWrite('Tagged', { messageId: 42 }, [], [])).toBe(
+      'No change to message 42. Tags now: (none)'
+    )
   })
 })
