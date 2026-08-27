@@ -54,6 +54,12 @@ vi.mock('./tags.js', () => ({
   defaultExcludedTags: () => ['useless'],
 }))
 
+const doSaveNote = vi.fn(async () => ({ sessionId: 42, title: 'a note', dataClass: 'notes' }))
+vi.mock('./notes.js', () => ({
+  saveNote: (...args: unknown[]) => doSaveNote(...(args as [])),
+  formatSavedNote: () => 'SAVED NOTE',
+}))
+
 const { createMcpServer } = await import('./tools.js')
 
 // Talk to the server exactly as a real client does, over an in-memory
@@ -95,6 +101,7 @@ const EXPECTED_TOOLS = [
   'health',
   'removeTag',
   'reportUselessSession',
+  'saveNote',
   'search',
   'stats',
 ]
@@ -277,6 +284,17 @@ describe('every advertised tool executes', () => {
     expect(doSearch).toHaveBeenCalledWith(
       expect.objectContaining({ tags: ['keeper'], excludeTags: ['noise'] })
     )
+    await client.close()
+  })
+
+  it('runs saveNote, passing text and title through to the notes layer', async () => {
+    const client = await connect()
+    const result = await client.callTool({
+      name: 'saveNote',
+      arguments: { text: 'remember this', title: 'Reminder' },
+    })
+    expect(text(result)).toBe('SAVED NOTE')
+    expect(doSaveNote).toHaveBeenCalledWith({ text: 'remember this', title: 'Reminder' })
     await client.close()
   })
 
