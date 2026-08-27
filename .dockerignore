@@ -48,8 +48,11 @@ quality
 vitest.config.ts
 knip.jsonc
 
-# Operator-side helper scripts, not container entrypoints.
+# Operator-side helper scripts. One of them IS a container entrypoint - the
+# centroids image runs `pnpm compute:centroids`, which excluding this
+# directory left crash-looping forever on ERR_MODULE_NOT_FOUND (task 274).
 scripts
+!scripts/compute-centroids.ts
 *.sh
 
 # Logs
