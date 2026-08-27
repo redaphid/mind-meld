@@ -3,8 +3,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const query = vi.fn()
 vi.mock('../db/postgres.js', () => ({ query: (...args: unknown[]) => query(...args) }))
 
-const { getSessionDigest, getMessages, getMessageById, formatMessages, formatDigest } =
-  await import('./session.js')
+const {
+  getSessionDigest,
+  getMessages,
+  getMessageById,
+  formatMessages,
+  formatDigest,
+  formatMessage,
+  formatChunk,
+} = await import('./session.js')
 
 type Row = Record<string, unknown>
 const rows = (...r: Row[]) => ({ rows: r })
@@ -347,5 +354,84 @@ describe('getSessionDigest title resolution (#95)', () => {
     const digest = await getSessionDigest({ sessionId: 42 })
     expect(digest!.title).toBeNull()
     expect(digest!.title_source).toBe('none')
+  })
+})
+
+describe('formatMessage', () => {
+  // This is what getMessage() actually returns to an agent, and tools.test.ts
+  // stubs it out ('MESSAGE') to test the wiring -- so nothing anywhere
+  // exercised the real thing. Every branch below is a label that either
+  // appears or does not, and a wrong one misattributes what was said.
+  const base = {
+    id: 7,
+    sequence_num: 1,
+    role: 'assistant',
+    content_text: 'the answer',
+    tool_name: null,
+    timestamp: new Date('2026-01-01T00:00:00Z'),
+    model: null,
+  }
+
+  it('names the speaker and reports the id and size', () => {
+    // The char count is how a caller decides whether to ask for more; it must
+    // describe the content, not the rendered string around it.
+    expect(formatMessage(base)).toBe('**Claude:** **(message 7, 10 chars)**\n\nthe answer')
+  })
+
+  it('labels a user turn differently from an assistant turn', () => {
+    expect(formatMessage({ ...base, role: 'user' })).toContain('**User:**')
+  })
+
+  it('falls back to the raw role for anything else, rather than mislabelling it', () => {
+    // A tool result rendered as "**Claude:**" would read as the model claiming
+    // output it never produced.
+    expect(formatMessage({ ...base, role: 'tool' })).toContain('**tool:**')
+  })
+
+  it('names the tool when there was one', () => {
+    expect(formatMessage({ ...base, tool_name: 'Bash' })).toContain('[Tool: Bash]')
+  })
+
+  it('names the model when it is known, and stays quiet when it is not', () => {
+    expect(formatMessage({ ...base, model: 'opus' })).toContain('[opus]')
+    expect(formatMessage(base)).not.toContain('[')
+  })
+
+  it('says "[No content]" rather than rendering nothing at all', () => {
+    // An empty render is indistinguishable from a fetch that failed; the
+    // placeholder says the message exists and is genuinely empty.
+    const empty = formatMessage({ ...base, content_text: null })
+    expect(empty).toContain('[No content]')
+    expect(empty).toContain('0 chars')
+  })
+})
+
+describe('formatChunk', () => {
+  const chunk = {
+    index: 2,
+    summary: 'We fixed the NaN embeddings.',
+    start_message_id: 100,
+    end_message_id: 140,
+    chars: 5000,
+  }
+
+  it('reports where the chunk sits and how big it is', () => {
+    const text = formatChunk(chunk, 42)
+    expect(text).toContain('**Chunk [2]** of session 42')
+    expect(text).toContain('msgs 100')
+    expect(text).toContain('140')
+    expect(text).toContain('5000 chars')
+  })
+
+  it('carries the summary itself, not a description of it', () => {
+    expect(formatChunk(chunk, 42)).toContain('We fixed the NaN embeddings.')
+  })
+
+  it('hands back the exact call that reads the region underneath', () => {
+    // A summary with no way down is a dead end. The ids in the suggested call
+    // have to be the chunk's own bounds or the agent reads the wrong region.
+    expect(formatChunk(chunk, 42)).toContain(
+      'getMessages({ startMessageId: 100, endMessageId: 140 })'
+    )
   })
 })
