@@ -2,7 +2,7 @@ import assert from 'node:assert'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { query } from '../db/postgres.js'
-import { search, formatSearchResults, findProjectsByPath } from './search.js'
+import { searchWithDiagnostics, formatSearchResults, findProjectsByPath } from './search.js'
 import { sinceSchema } from './since.js'
 import {
   getSessionDigest,
@@ -17,6 +17,30 @@ import {
 import { getHealth, formatHealth } from './health.js'
 import { resolveTitle } from './title.js'
 import { saveNote, formatSavedNote } from './notes.js'
+import { applyTags, removeTags, getTags, formatTagWrite, defaultExcludedTags, type TagTarget } from './tags.js'
+
+// addTag/removeTag both take an optional sessionId and an optional messageId
+// and require exactly one. Which granularity to use is the tagging agent's
+// call -- a whole conversation and a single message are both legitimate things
+// to judge -- so the tool refuses to choose for them, and refuses to guess when
+// they name both.
+const resolveTagTarget = (params: { sessionId?: number; messageId?: number }): TagTarget => {
+  const { sessionId, messageId } = params
+  if (sessionId != null && messageId != null)
+    throw new Error('Pass either sessionId or messageId, not both — a tag targets one thing.')
+  if (sessionId != null) return { sessionId }
+  if (messageId != null) return { messageId }
+  throw new Error('Pass sessionId (tag a whole conversation) or messageId (tag one message).')
+}
+
+// The tool surface accepts `tag` (one) or `tags` (several) and treats them as
+// one list, so a caller never has to wrap a single tag in an array and a
+// caller with five does not need five calls.
+const collectTags = (params: { tag?: string; tags?: string[] }): string[] => [
+  ...(params.tag ? [params.tag] : []),
+  ...(params.tags ?? []),
+]
+
 
 // THE tool surface. Both transports — stdio (server.ts) and Streamable HTTP
 // (http-server.ts) — register from here and declare nothing of their own.
@@ -69,7 +93,14 @@ WEIGHTED CENTROID SEARCH:
 - likeProject: Boost results matching specific project(s) topics
 - unlikeProject: Suppress results matching these project(s)
 
-Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressive)`,
+Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressive)
+
+TAGS:
+- tags: only results carrying any of these (see addTag). Matches a tag on the
+  session OR on any of its messages.
+- excludeTags: hide results carrying any of these.
+- Some tags are hidden by default (currently "useless"). Naming one in "tags"
+  overrides that, so hidden results stay reachable on purpose.`,
     {
       query: z.string().optional().describe('Search query - natural language works best for semantic search (optional when using centroid params)'),
       negativeQuery: z.string().optional().describe('Negative query - pushes results away from this concept'),
@@ -87,13 +118,17 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
       includeAutomated: z.boolean().optional().describe('Include automated, non-interactive sessions (Slack monitoring, curiosity curation, MCP health checks, huddle transcripts). Excluded by default.'),
       includeUnsummarized: z.boolean().optional().describe('Include sessions that have not been summarized yet. Excluded by default: an unsummarized session has no title and no session-level vector, so it can only arrive as an untriageable result. Pass true to reach the indexing backlog deliberately.'),
       dataClass: z.array(z.string()).optional().describe('Data classes to search (default ["coding"]). Sources are classified as coding, personal, meetings, etc. Pass ["*"] to search everything, or e.g. ["coding","personal"] to widen. An explicit source param bypasses this default.'),
+      tags: z.array(z.string()).optional().describe('Only return results carrying ANY of these tags (OR, not AND). Matches a tag on the session OR on any of its messages, so you do not have to know which granularity the tagging agent chose. Tags are free-form and case-insensitive; an unused tag is not an error, it simply matches nothing. Naming a tag here also overrides its default exclusion — tags:["useless"] is how you deliberately reach hidden sessions.'),
+      excludeTags: z.array(z.string()).optional().describe('Hide results carrying ANY of these tags, in addition to the default-excluded set. A tag on the session hides the whole session; a tag on a single message only hides that message\'s own hit.'),
     },
     async (params) => {
       const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
       const projectIds = matchingProjects.map((p) => p.id)
-      const results = await search(params)
+      const { results, degraded } = await searchWithDiagnostics(params)
       return {
-        content: [{ type: 'text', text: formatSearchResults(results, projectIds) }],
+        content: [
+          { type: 'text', text: formatSearchResults(results, projectIds, degraded) },
+        ],
       }
     }
   )
@@ -320,6 +355,76 @@ Call this proactively whenever you get useless results back from search.`,
         return { content: [{ type: 'text', text: `Session ${sessionId} not found or already deleted.` }] }
       if (reason) console.error(`Session ${sessionId} reported as useless: ${reason}`)
       return { content: [{ type: 'text', text: `Session ${sessionId} soft-deleted.` }] }
+    }
+  )
+
+  server.tool(
+    'addTag',
+    `Tag a session or a single message. Tags are how you record a judgement about
+something in the index so that later searches can act on it.
+
+THE VOCABULARY IS OPEN. Invent whatever tag is useful — there is no list of
+allowed tags, no registration step, and tagging with a word nobody has used
+before is not an error. Tags are trimmed and lowercased, so "Useless" and
+"useless" are the same tag.
+
+TARGET (pass exactly one):
+- sessionId — judges the whole conversation
+- messageId — judges one message, leaving the rest of the session alone
+Either is fine; pick whichever matches what you actually mean.
+
+FINDING THEM AGAIN: search({ tags: ["your-tag"] }) matches a tag on the session
+OR on any of its messages, so a message-level tag is still findable without the
+searcher knowing which granularity you chose.
+
+HIDDEN TAGS: some tags hide their session from search by default — currently
+${defaultExcludedTags().join(', ') || '(none)'}. Tag a session "useless" when
+search returns it as noise (automated runs, monitoring jobs, boilerplate) and it
+stops polluting results. This is reversible: removeTag puts it back, and
+search({ tags: ["useless"] }) still reaches it deliberately.
+
+Idempotent — re-tagging something changes nothing and is not an error.`,
+    {
+      sessionId: z.number().optional().describe('Session to tag (mutually exclusive with messageId)'),
+      messageId: z.number().optional().describe('Message to tag (mutually exclusive with sessionId)'),
+      tag: z.string().optional().describe('A tag to apply. Free-form — any word or phrase.'),
+      tags: z.array(z.string()).optional().describe('Several tags to apply at once. Combined with `tag` if both are given.'),
+      note: z.string().optional().describe('Optional free-text reason, stored with the tag as provenance.'),
+    },
+    async (params) => {
+      const target = resolveTagTarget(params)
+      const requested = collectTags(params)
+      if (requested.length === 0)
+        return { content: [{ type: 'text', text: 'No tag given. Pass tag: "something" or tags: ["a","b"].' }], isError: true }
+      const applied = await applyTags(target, requested, { createdBy: 'mcp', note: params.note })
+      const current = await getTags(target)
+      return { content: [{ type: 'text', text: formatTagWrite('Tagged', target, applied, current) }] }
+    }
+  )
+
+  server.tool(
+    'removeTag',
+    `Remove tags from a session or a message — the inverse of addTag, and the
+reason tagging is safe to do freely: nothing about it is permanent.
+
+Removing "useless" from a session returns it to normal search results.
+
+Pass exactly one of sessionId / messageId. Removing a tag that was not there is
+reported, not an error.`,
+    {
+      sessionId: z.number().optional().describe('Session to untag (mutually exclusive with messageId)'),
+      messageId: z.number().optional().describe('Message to untag (mutually exclusive with sessionId)'),
+      tag: z.string().optional().describe('A tag to remove.'),
+      tags: z.array(z.string()).optional().describe('Several tags to remove at once. Combined with `tag` if both are given.'),
+    },
+    async (params) => {
+      const target = resolveTagTarget(params)
+      const requested = collectTags(params)
+      if (requested.length === 0)
+        return { content: [{ type: 'text', text: 'No tag given. Pass tag: "something" or tags: ["a","b"].' }], isError: true }
+      const removed = await removeTags(target, requested)
+      const current = await getTags(target)
+      return { content: [{ type: 'text', text: formatTagWrite('Untagged', target, removed, current) }] }
     }
   )
 

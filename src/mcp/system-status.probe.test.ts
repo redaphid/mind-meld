@@ -19,7 +19,7 @@ const routeFetch = (handlers: Record<string, () => unknown>) =>
     throw new Error(`unexpected fetch: ${url}`)
   })
 
-const GATE_OPEN = { open: true, gpu_in_use_now: false, other_vram_mb: 120, status: 'clear' }
+const GATE_OPEN = { open: true, gpu_in_use_now: false, other_util_pct: 1.2, status: 'clear' }
 
 beforeEach(() => {
   getCollectionStats.mockReset()
@@ -54,7 +54,7 @@ describe('readSystemStatus', () => {
     vi.stubGlobal(
       'fetch',
       routeFetch({
-        '/_gate': () => json({ open: false, gpu_in_use_now: true, other_vram_mb: 9566 }),
+        '/_gate': () => json({ open: false, gpu_in_use_now: true, other_util_pct: 96.4 }),
         '/api/version': () => json({ version: '0.32.5' }),
         '/api/ps': () => json({ models: [] }),
       })
@@ -65,7 +65,7 @@ describe('readSystemStatus', () => {
     expect(s.ollama.reachable).toBe(true)
     expect(s.ollama.gate.open).toBe(false)
     expect(s.ollama.gate.gpuInUseNow).toBe(true)
-    expect(s.ollama.gate.otherVramMb).toBe(9566)
+    expect(s.ollama.gate.otherUtilPct).toBe(96.4)
     expect(s.ollama.error).toBeNull()
   })
 

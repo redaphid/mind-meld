@@ -95,8 +95,27 @@ const WSL_UNC = /\\\\wsl(?:\$|\.localhost)\\+([^\\\s"'`]+)/gi;
  * `~alice/...` — the same leak as /home/alice, written shorter. `~/` names
  * nobody, and the segment must start like a username so approximations
  * (`~265KB/day`) are not usernames.
+ *
+ * A `${...}` interpolation is matched as ONE bounded unit so a segment cannot
+ * run past its closing brace. Without that bound, `~${fmtDuration(x)}</span>`
+ * — the idiomatic way to render "retries in ~5m" — reads as a home path: the
+ * segment swallows `{fmtDuration(x)}<` and the `/` of the closing tag
+ * terminates it. The tilde there is an approximation sign, and everything the
+ * segment ate is markup. Three sites in this repo already write `~${...}`; the
+ * two that do not fire escape only on incidental whitespace, so this is a
+ * recurring false positive, not a one-off.
+ *
+ * This narrows where a segment ENDS, never which names count. The
+ * interpolation is still handed to isPlaceholder, so `~${USER}/` passes as a
+ * placeholder and `~${REALNAME}/` is still a finding — a variable named after
+ * a person leaks that person.
+ *
+ * The `(?!\$\{)` guard on the second branch is load-bearing: alternation
+ * backtracks, so without it the greedy branch simply re-eats the interpolation
+ * the first branch just declined and the false positive returns.
  */
-const TILDE_HOME = /(?<![\w~/\\.-])~([A-Za-z_$<{%([][A-Za-z0-9._$<>{}%()[\]-]*)\//g;
+const TILDE_HOME =
+  /(?<![\w~/\\.-])~(\$\{[^}]*\}|(?!\$\{)[A-Za-z_$<{%([][A-Za-z0-9._$<>{}%()[\]-]*)\//g;
 
 /**
  * Claude Code stores a project under a directory name that is its path with
@@ -388,6 +407,27 @@ describe('public repository contains no personal data', () => {
       expect(scanStructural('f', '~/.claude')).toHaveLength(0);
       expect(scanStructural('f', '~you/.claude')).toHaveLength(0);
       expect(scanStructural('f', '~<user>/.claude')).toHaveLength(0);
+    });
+
+    it('reads ~${...} as an approximation without going blind to real names', () => {
+      // "retries in ~5m" is written `~${fmtDuration(x)}` and sits next to a
+      // closing tag. The tilde is an approximation sign; the segment the
+      // unbounded pattern captured — `{fmtDuration(x)}<` — was markup, and the
+      // `/` that terminated it belonged to `</span>`. Nothing here names anyone.
+      const chip =
+        'html`<span class="right faint nowrap">retries in ~${fmtDuration(held.resumesIn)}</span>`';
+      expect(scanStructural('f', chip)).toHaveLength(0);
+      expect(scanStructural('f', 'html`<span>~${etaText} remaining</span>`')).toHaveLength(0);
+      // Same shape with a real `/` inside the interpolation: the segment ends
+      // at `}`, so the division sign is not a path separator either.
+      expect(scanStructural('f', '`~${Math.round(summary.length/4)} tokens`')).toHaveLength(0);
+
+      // The bound moved where a segment ENDS, not which names count. A tilde
+      // home path still leaks — including inside the very markup above — and
+      // an interpolation named after a person still leaks that person.
+      expect(scanStructural('f', 'html`<a href="~realperson/notes">x</a>`')).toHaveLength(1);
+      expect(scanStructural('f', '~${REALNAME}/.claude')).toHaveLength(1);
+      expect(scanStructural('f', '~${USER}/.claude')).toHaveLength(0);
     });
 
     it('flags mDNS names, which name a device', () => {

@@ -18,6 +18,28 @@
 //     https://<gateway>/mcp/<service>  ->  https://<service>.<ORIGIN_DOMAIN>/mcp
 //
 // with MCP_SERVICES as the allowlist of which names are real.
+//
+// One name is special. An aggregator already fronts every upstream server
+// behind a single endpoint, so making a client name it twice — once as the
+// gateway, once as the service — is ceremony with no meaning. DEFAULT_MCP_SERVICE
+// is the service an unqualified path resolves to, which makes the endpoint the
+// bare hostname:
+//
+//     https://<gateway>/mcp   ->  https://<DEFAULT_MCP_SERVICE>.<ORIGIN_DOMAIN>/mcp
+//     https://<gateway>/      ->  the same
+//
+// The explicit `/mcp/<service>` form keeps working unchanged; it is how you
+// reach anything that is not the default. The default is resolved against the
+// same MCP_SERVICES allowlist as any other name, so it cannot widen what the
+// gateway will reach; leaving it unset simply makes the unqualified URLs a 404,
+// which is what they did before.
+//
+// Discovery follows the URL rather than being configured: the OAuth provider
+// derives each RFC 9728 document from the path it was asked about
+// (/.well-known/oauth-protected-resource/mcp describes https://<gateway>/mcp),
+// and the 401 challenge points at the document for the path the client actually
+// called. So all three URLs above self-describe correctly, and no `resource`
+// value has to be kept in step by hand.
 import OAuthProvider, {
   AuthorizationError,
   type AuthRequest,
@@ -27,6 +49,9 @@ import OAuthProvider, {
 // the exact definition the host enforces at drain time (see ingest-schema.ts
 // for why it lives apart from the ingest logic).
 import { IngestPayloadSchema } from '../../src/mcp/ingest-schema'
+// The path -> service rule, kept apart so it can be tested without the Workers
+// runtime. See routing.ts for why a named-but-unknown service never falls back.
+import { resolveRoute } from './routing'
 
 export interface Env {
   OAUTH_KV: KVNamespace
@@ -42,14 +67,21 @@ export interface Env {
   // what stops an authenticated caller from using the gateway's service token
   // to reach arbitrary subdomains.
   MCP_SERVICES: string
+  // The service that answers the unqualified endpoints, `/mcp` and `/`. Must
+  // also appear in MCP_SERVICES — it is a shortcut to one of those names, not a
+  // second way to name an origin. Unset means the unqualified endpoints 404.
+  DEFAULT_MCP_SERVICE?: string
 
   // Cloudflare Access team domain, e.g. "yourteam.cloudflareaccess.com".
   ACCESS_TEAM_DOMAIN: string
-  // The AUD tag of the Access application protecting /authorize. Verifying it
-  // is what stops a token minted for some *other* Access app being replayed.
+  // AUD tag(s) of the Access application(s) protecting /authorize, comma-
+  // separated — one per hostname this Worker serves, since Access apps are
+  // per-hostname. Verifying the AUD is what stops a token minted for some
+  // *other* Access app being replayed.
   ACCESS_AUD: string
-  // The AUD tag of the Access application protecting /ingest — a separate
-  // app because its policy is Service Auth (machines), not identity (humans).
+  // AUD tag(s) of the Access application(s) protecting /ingest — separate
+  // apps because their policy is Service Auth (machines), not identity
+  // (humans). Comma-separated like ACCESS_AUD.
   INGEST_ACCESS_AUD: string
   // Service-token client ids allowed to read and acknowledge the spool
   // (comma-separated). Empty or unset means any valid service token may
@@ -137,7 +169,8 @@ type AccessIdentity = { email?: string; sub: string; commonName?: string }
 const verifyAccessJwt = async (
   token: string,
   env: Env,
-  expectedAud: string
+  // Comma-separated AUD tags; the JWT must carry one of them.
+  expectedAuds: string
 ): Promise<AccessIdentity | null> => {
   const parts = token.split('.')
   if (parts.length !== 3) return null
@@ -173,7 +206,7 @@ const verifyAccessJwt = async (
     : payload.aud
       ? [payload.aud]
       : []
-  if (!audience.includes(expectedAud)) return null
+  if (!list(expectedAuds).some(aud => audience.includes(aud))) return null
 
   if (payload.iss !== `https://${env.ACCESS_TEAM_DOMAIN}`) return null
 
@@ -341,7 +374,7 @@ const defaultHandler = {
       return page(
         'MCP gateway',
         `<p>An OAuth 2.1 authorization server for MCP clients.</p>` +
-          `<p>Point your client at <code>/mcp/&lt;service&gt;</code>.</p>`,
+          `<p>Point your client at <code>/mcp</code>.</p>`,
         404
       )
     }
@@ -423,11 +456,12 @@ const apiHandler = {
     // us; its handler signature just can't say so generically.
     const props = ctx.props as Props
     const url = new URL(request.url)
-    const [service, ...rest] = url.pathname.replace(/^\/mcp\/?/, '').split('/')
 
-    if (!service || !list(env.MCP_SERVICES).includes(service.toLowerCase())) {
+    const route = resolveRoute(url.pathname, list(env.MCP_SERVICES), env.DEFAULT_MCP_SERVICE)
+    if (!route) {
       return Response.json({ error: 'unknown_service' }, { status: 404 })
     }
+    const { service, rest } = route
 
     const target = new URL(`https://${service}.${env.ORIGIN_DOMAIN}/mcp`)
     if (rest.length) target.pathname += `/${rest.join('/')}`
@@ -472,7 +506,13 @@ const apiHandler = {
 }
 
 export default new OAuthProvider<Env>({
-  apiRoute: '/mcp/',
+  // '/mcp' is a prefix match, so it covers /mcp and /mcp/<service> alike. '/'
+  // is special-cased by the provider to the root document only, so adding it
+  // publishes the bare hostname as an endpoint without swallowing /authorize,
+  // /token, /register or /ingest — those keep their own paths and are matched
+  // before API routes anyway. The cost is that the root no longer serves the
+  // landing page: an unauthenticated GET / is now a 401 challenge.
+  apiRoute: ['/mcp', '/'],
   apiHandler,
   defaultHandler,
   authorizeEndpoint: '/authorize',

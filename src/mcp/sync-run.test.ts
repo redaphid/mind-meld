@@ -131,6 +131,31 @@ describe('startSyncRun', () => {
       )
     })
   })
+
+  // The lock is process-local and has no timeout, so anything that can set
+  // `running` without clearing it greys out the button until the container is
+  // restarted. A runner that throws before returning a promise never reaches
+  // the .catch, which is why releasing it cannot depend on one.
+  describe('when the runner throws synchronously', () => {
+    beforeEach(() => {
+      resetSyncRunState()
+      startSyncRun((() => {
+        throw new Error('threw before returning a promise')
+      }) as unknown as () => Promise<never>)
+    })
+
+    it('releases the lock rather than wedging on "Ingesting…" forever', () => {
+      const state = getSyncRunState()
+      expect(state.running).toBe(false)
+      expect(state.error).toBe('threw before returning a promise')
+    })
+
+    it('accepts the next press', () => {
+      expect(startSyncRun(async () => ({ messagesEmbedded: 0, sessionsUpdated: 0 })).started).toBe(
+        true
+      )
+    })
+  })
 })
 
 // The default runner — what the button actually triggers when no stub is passed.
@@ -281,5 +306,39 @@ describe('the default ingestion run', () => {
         vi.mocked(generatePendingEmbeddings).mock.invocationCallOrder[0]
       )
     })
+  })
+})
+
+// An embedding pass that gave up because nothing would embed means the upstream
+// is refusing work. The aggregate drain is the same Ollama through the same
+// gate, only 5-10 minutes per session — and this run holds the single-flight
+// lock for every one of those minutes while the button reads "Ingesting…".
+describe('when the embedding pass stalls', () => {
+  beforeEach(async () => {
+    resetSyncRunState()
+    vi.mocked(generatePendingEmbeddings).mockReset()
+    vi.mocked(updateAggregateEmbeddings).mockReset()
+    vi.mocked(generatePendingEmbeddings).mockResolvedValue({
+      processed: 0,
+      skipped: 0,
+      errors: 3,
+      stalled: '100 messages still pending after 3 batches that embedded nothing; last error: 503',
+    } as any)
+    startSyncRun()
+    await awaitSyncRun()
+  })
+
+  it('skips the aggregate drain instead of spending it on a shut gate', () => {
+    expect(updateAggregateEmbeddings).not.toHaveBeenCalled()
+  })
+
+  it('reports why, so the UI can say more than "0 embedded"', () => {
+    expect(getSyncRunState().error).toContain('ingestion stopped early')
+    expect(getSyncRunState().error).toContain('embedded nothing')
+  })
+
+  it('finishes, releasing the lock for the next press', () => {
+    expect(getSyncRunState().running).toBe(false)
+    expect(startSyncRun(async () => ({ messagesEmbedded: 0, sessionsUpdated: 0 })).started).toBe(true)
   })
 })

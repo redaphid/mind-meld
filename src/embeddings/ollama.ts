@@ -105,7 +105,32 @@ ${text}`,
   return response.response.trim();
 }
 
+// The interactive counterpart to fetchWithRetry, for requests a person is
+// waiting on. One attempt, a short timeout, and — the part that is easy to miss
+// — a bounded wait for the tunnel slot as well. All Ollama traffic in this
+// process is serialized through withOllamaGate, and in the `mcp` service that
+// same process also drains the embedding queue, so a search can be stuck behind
+// a session summarization holding the only slot for 5-10 minutes without ever
+// having issued a request of its own. Capping the retries alone would not have
+// fixed that.
+//
+// A 503 from the GPU gate is returned rather than retried, so the Ollama client
+// raises it immediately and the caller can fall back to something that does not
+// need a GPU. Waiting out a cooldown is a background worker's job.
+const fetchOnce: typeof fetch = async (input, init) => {
+  const { interactiveTimeoutMs } = config.ollama;
+  return withOllamaGate(
+    () =>
+      fetch(input, {
+        ...init,
+        signal: AbortSignal.timeout(interactiveTimeoutMs),
+      }),
+    interactiveTimeoutMs,
+  );
+};
+
 let client: Ollama | null = null;
+let interactiveClient: Ollama | null = null;
 
 // One ollama serves both bge-m3 (vectorization) and qwen3 (generation).
 export function getOllamaClient(): Ollama {
@@ -116,6 +141,21 @@ export function getOllamaClient(): Ollama {
     });
   }
   return client;
+}
+
+// The client for query-time work. Same Ollama, opposite failure policy: this
+// one gives up quickly so its caller can degrade, instead of retrying so the
+// work is never lost. Anything queued, batched or scheduled wants
+// getOllamaClient() instead — dropping background work is how the queue stops
+// draining.
+export function getInteractiveOllamaClient(): Ollama {
+  if (!interactiveClient) {
+    interactiveClient = new Ollama({
+      host: config.ollama.url,
+      fetch: fetchOnce,
+    });
+  }
+  return interactiveClient;
 }
 
 // truncate:false is load-bearing everywhere we embed. Ollama's default silently
