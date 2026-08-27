@@ -39,6 +39,13 @@ function getEnvBool(key: string, defaultValue: boolean): boolean {
   return value.toLowerCase() === "true" || value === "1";
 }
 
+function getEnvFloat(key: string, defaultValue: number): number {
+  const value = process.env[key];
+  if (!value) return defaultValue;
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : defaultValue;
+}
+
 // A comma-separated env var as a list. An explicitly empty value ("") means an
 // empty list, not "fall back to the default" -- otherwise a setting like
 // MINDMELD_DEFAULT_EXCLUDED_TAGS could never be turned off from the
@@ -84,6 +91,48 @@ export const config = {
     defaultExcluded: getEnvList("MINDMELD_DEFAULT_EXCLUDED_TAGS", ["useless"]),
   },
 
+  // Negative-vector ranking (task 326). Reporting a session as useless does two
+  // things: it tags that one session, and it teaches search what noise LOOKS
+  // like, so that SIMILAR sessions nobody has reported are ranked down too. The
+  // second half is this block.
+  noise: {
+    // How hard a result that resembles reported noise is pushed down, as a
+    // multiplicative damping: score * (1 - weight * similarityToNearestCluster).
+    // Multiplicative rather than subtractive because the fused score is an RRF
+    // sum in the ~0.01-0.05 range while PROJECT_BOOST is 0.5 -- any fixed
+    // subtraction is either a rounding error against the boost or annihilates
+    // every organic score. A damping factor is scale-free and survives both.
+    //
+    // The default is measured, not guessed: see the sweep in the PR. Pushed
+    // much higher, the penalty starts evicting real conversations that merely
+    // sit near noise in embedding space, which is the one failure this feature
+    // must not have.
+    penaltyWeight: getEnvFloat("MINDMELD_NOISE_PENALTY_WEIGHT", 0.35),
+
+    // Similarity below this is treated as "not noise-like at all" and costs
+    // nothing. bge-m3 puts unrelated text around 0.4-0.5 cosine, so without a
+    // floor EVERY result carries some penalty and the whole ranking shifts down
+    // roughly uniformly -- which changes no order and is therefore all cost and
+    // no effect. The floor is what makes the penalty discriminative.
+    similarityFloor: getEnvFloat("MINDMELD_NOISE_SIMILARITY_FLOOR", 0.55),
+
+    // Noise vectors are CLUSTERED and a result is scored against its NEAREST
+    // cluster, not against one global mean. Sentinel results and tool-call spam
+    // occupy different regions; their mean points at neither, so a single
+    // centroid penalizes the empty space between them and misses both.
+    //
+    // 0 means "choose k from the corpus size" (see chooseClusterCount).
+    clusterCount: getEnvInt("MINDMELD_NOISE_CLUSTERS", 0),
+
+    // How long a computed set of cluster centroids is reused before rebuilding.
+    // Clustering re-reads every noise vector, which is far too much work to
+    // repeat per search, and noise accumulates slowly enough that a few minutes
+    // of staleness costs nothing. A report or un-report invalidates the cache
+    // immediately, so the agent that just flagged something sees the effect on
+    // its next search rather than up to a TTL later.
+    clusterCacheMs: getEnvInt("MINDMELD_NOISE_CLUSTER_CACHE_MS", 300000),
+  },
+
   // PostgreSQL
   postgres: {
     host: getEnv("POSTGRES_HOST", "127.0.0.1"),
@@ -105,6 +154,12 @@ export const config = {
       sessions: "convo-sessions",
       projects: "convo-projects",
       chunks: "convo-chunks",
+      // Vectors of sessions an agent reported as useless. SEARCH NEVER QUERIES
+      // THIS COLLECTION -- it is read only to build the ranking penalty. Keeping
+      // it outside the four searchable collections is what makes "reported
+      // sessions go somewhere search does not look" structurally true rather
+      // than true only while somebody remembers to filter it out.
+      noise: "convo-noise",
     },
   },
 

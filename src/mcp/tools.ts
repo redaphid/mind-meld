@@ -17,6 +17,7 @@ import {
 import { getHealth, formatHealth } from './health.js'
 import { resolveTitle } from './title.js'
 import { applyTags, removeTags, getTags, formatTagWrite, defaultExcludedTags, type TagTarget } from './tags.js'
+import { recordNoiseVector, forgetNoiseVector } from './noise.js'
 import { writeNote, formatWrittenNote, NOTE_TAG } from './notes.js'
 
 // addTag/removeTag both take an optional sessionId and an optional messageId
@@ -100,7 +101,17 @@ TAGS:
   session OR on any of its messages.
 - excludeTags: hide results carrying any of these.
 - Some tags are hidden by default (currently "useless"). Naming one in "tags"
-  overrides that, so hidden results stay reachable on purpose.`,
+  overrides that, so hidden results stay reachable on purpose.
+
+IF THE RESULTS ARE JUNK, SAY SO — CONSIDER REPORTING A SESSION AS USELESS IF IT
+IS USELESS. Call reportUselessSession(session_id, reason) on anything that comes
+back as obvious noise: notification stubs, sentinel results, tool-call spam,
+automated boilerplate. It is reversible (unreportUselessSession), it takes a
+second, and it does more than hide that one session — reported sessions teach
+the ranker what noise looks like, so SIMILAR junk nobody has reported is ranked
+down for everyone afterwards. Search only gets quieter if you tell it.
+
+- includeNoise: bring the hidden and demoted material back (default false).`,
     {
       query: z.string().optional().describe('Search query - natural language works best for semantic search (optional when using centroid params)'),
       negativeQuery: z.string().optional().describe('Negative query - pushes results away from this concept'),
@@ -120,6 +131,7 @@ TAGS:
       dataClass: z.array(z.string()).optional().describe('Data classes to search (default ["coding"]). Sources are classified as coding, personal, meetings, etc. Pass ["*"] to search everything, or e.g. ["coding","personal"] to widen. An explicit source param bypasses this default.'),
       tags: z.array(z.string()).optional().describe('Only return results carrying ANY of these tags (OR, not AND). Matches a tag on the session OR on any of its messages, so you do not have to know which granularity the tagging agent chose. Tags are free-form and case-insensitive; an unused tag is not an error, it simply matches nothing. Naming a tag here also overrides its default exclusion — tags:["useless"] is how you deliberately reach hidden sessions.'),
       excludeTags: z.array(z.string()).optional().describe('Hide results carrying ANY of these tags, in addition to the default-excluded set. A tag on the session hides the whole session; a tag on a single message only hides that message\'s own hit.'),
+      includeNoise: z.boolean().optional().describe('Include sessions reported as useless, and switch off the ranking penalty that demotes results resembling reported noise. False by default. Pass true when you are debugging what the index actually holds rather than looking for an answer -- with it off you cannot tell "no such conversation" apart from "it was reported as noise".'),
     },
     async (params) => {
       const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
@@ -335,26 +347,130 @@ Use this to confirm the pipeline is actually keeping up, not just degrading quie
 
   server.tool(
     'reportUselessSession',
-    `Soft-delete a session that pollutes search results.
+    `Flag a session that pollutes search results. REVERSIBLE — nothing is deleted.
 
 Use this when search returns results that are clearly noise — automated runs,
-monitoring jobs, repeated boilerplate sessions, or anything that isn't a real
-interactive conversation. Soft-deletes the session so it stops appearing in search.
+monitoring jobs, notification stubs, sentinel results, tool-call spam, repeated
+boilerplate, or anything that isn't a real conversation.
 
-Call this proactively whenever you get useless results back from search.`,
+WHAT IT DOES, and the second half is the point:
+1. Tags the session "useless", which hides it from search by default.
+2. Adds the session's vector to a separate noise collection that search never
+   searches. Those vectors are clustered, and every later search ranks results
+   DOWN by how much they resemble the nearest noise cluster. So reporting one
+   notification stub quietly demotes the other nine hundred nobody has reported.
+
+Call this proactively whenever you get useless results back from search. Over-
+reporting is cheap: unreportUselessSession(sessionId) undoes both halves.
+
+IF YOU ARE DEBUGGING SOMETHING, CONSIDER TRYING includeNoise. search({ ...,
+includeNoise: true }) brings back everything reported here and switches the
+ranking penalty off, which is how you tell "mindmeld has no such conversation"
+apart from "somebody reported it". search({ tags: ["useless"] }) reaches the
+same material.
+
+Reporting a session does NOT delete it. getSession and getMessages still return
+it by id, whether it is flagged or not.`,
     {
-      sessionId: z.number().describe('Session ID to soft-delete'),
-      reason: z.string().optional().describe('Why this session is useless (for logging)'),
+      sessionId: z.number().describe('Session ID to flag as useless'),
+      reason: z
+        .string()
+        .optional()
+        .describe('Why this session is useless. Free text — there is no controlled vocabulary. Stored on the tag, so a later reader can see what you judged and disagree.'),
     },
     async ({ sessionId, reason }) => {
-      const result = await query(
-        `UPDATE sessions SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id`,
-        [sessionId]
-      )
-      if (result.rowCount === 0)
-        return { content: [{ type: 'text', text: `Session ${sessionId} not found or already deleted.` }] }
+      // Writes a TAG. It deliberately does NOT touch sessions.deleted_at.
+      //
+      // The previous implementation of this tool ran
+      //   UPDATE sessions SET deleted_at = now()
+      // which is a soft delete with no undo path. The 440 rows currently
+      // carrying deleted_at were NOT set by this tool -- every one of them is
+      // is_warmup = true and belongs to scripts/mark-warmups.ts, and 426 are
+      // personal SMS threads whose titles are phone numbers. The two mechanisms
+      // are kept apart on purpose:
+      //   deleted_at    = "not real content", structural, script-set.
+      //   "useless" tag = "an agent judged this noise", reversible, per-agent.
+      // Nothing here clears an existing deleted_at, and nothing should: doing so
+      // would un-hide those SMS threads into search results.
+      const exists = await query('SELECT 1 FROM sessions WHERE id = $1', [sessionId])
+      if (exists.rowCount === 0)
+        return { content: [{ type: 'text', text: `Session ${sessionId} not found.` }] }
+
+      await applyTags({ sessionId }, ['useless'], { createdBy: 'reportUselessSession', note: reason })
+
+      // The vector half is best-effort. If Chroma or the embedder is
+      // unavailable the session is still flagged and still hidden -- degrading
+      // to "hidden but does not generalise" is right, whereas failing the whole
+      // call would leave an agent believing its judgement was not recorded.
+      let learned = false
+      try {
+        learned = await recordNoiseVector(sessionId)
+      } catch (e) {
+        console.error(`Could not add session ${sessionId} to the noise corpus:`, e)
+      }
+
       if (reason) console.error(`Session ${sessionId} reported as useless: ${reason}`)
-      return { content: [{ type: 'text', text: `Session ${sessionId} soft-deleted.` }] }
+      return {
+        content: [
+          {
+            type: 'text',
+            text: [
+              `Session ${sessionId} flagged "useless" and hidden from search. Not deleted.`,
+              learned
+                ? 'Its vector was added to the noise corpus, so similar sessions will rank lower too.'
+                : 'Note: no vector could be built for it, so it is hidden but will not affect the ranking of similar sessions.',
+              `Undo with unreportUselessSession({ sessionId: ${sessionId} }). See it anyway with search({ includeNoise: true }).`,
+            ].join('\n'),
+          },
+        ],
+      }
+    }
+  )
+
+  server.tool(
+    'unreportUselessSession',
+    `Undo reportUselessSession. Removes the "useless" tag AND takes the session
+back out of the noise corpus, so it stops dragging similar sessions down.
+
+Agents over-flag — that is expected, and it is why this exists. If a session was
+reported as noise and it turns out to be real, undo it here; there is no cost to
+being wrong in either direction.
+
+Un-reporting a session that was never reported is not an error. It reports that
+there was nothing to undo and changes nothing.
+
+This does NOT resurrect soft-deleted sessions. Sessions hidden by deleted_at
+were hidden by the ingestion pipeline, not by an agent's judgement, and this
+tool has no business overruling that.`,
+    {
+      sessionId: z.number().describe('Session ID to un-flag'),
+    },
+    async ({ sessionId }) => {
+      const removed = await removeTags({ sessionId }, ['useless'])
+
+      // Drop the vector even when no tag was found. The two stores can drift if
+      // a previous report half-failed, and the fix for drift is to make the
+      // undo path converge on "not noise" rather than to assume they agree.
+      try {
+        await forgetNoiseVector(sessionId)
+      } catch (e) {
+        console.error(`Could not remove session ${sessionId} from the noise corpus:`, e)
+      }
+
+      if (removed.length === 0)
+        return {
+          content: [
+            { type: 'text', text: `Session ${sessionId} was not flagged useless. Nothing to undo.` },
+          ],
+        }
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Session ${sessionId} is no longer flagged useless. It is back in search results and no longer influences the ranking of similar sessions.`,
+          },
+        ],
+      }
     }
   )
 

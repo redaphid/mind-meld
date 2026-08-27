@@ -1,17 +1,24 @@
 import { describe, it, expect } from 'vitest'
-import { subtractVectors, addVectors, scaleVector, normalizeVector } from './vector-math.js'
+import {
+  subtractVectors,
+  addVectors,
+  scaleVector,
+  normalizeVector,
+  cosineSimilarity,
+} from './vector-math.js'
 
-// These four functions are the whole of weighted centroid search: search.ts
-// builds its query vector by adding, subtracting and scaling centroids, then
-// normalizing the result. Nothing downstream can tell a subtly wrong vector
-// from a right one -- a bad query vector does not throw, it just quietly ranks
-// the wrong conversations first. So the arithmetic is worth pinning exactly.
+// This module is the whole of weighted centroid search: search.ts builds its
+// query vector by adding, subtracting and scaling centroids, then normalizing
+// the result. Nothing downstream can tell a subtly wrong vector from a right
+// one -- a bad query vector does not throw, it just quietly ranks the wrong
+// conversations first. So the arithmetic is worth pinning exactly.
 //
-// `cosineSimilarity` is deliberately NOT tested here. Nothing imports it, and
-// quality/knip-baseline.json already records it as an unused export. Importing
-// it from a test would clear that finding and add a covered function without
-// making any shipped code more correct -- which is cheating two ratchets at
-// once. It should be deleted or used, and either is a change of its own.
+// cosineSimilarity is covered here because THIS is the branch that gave it a
+// caller: noise.ts uses it both to cluster the noise corpus and to score a hit
+// against those clusters. On the branch these tests came from nothing imported
+// it and quality/knip-baseline.json recorded it as an unused export, so a test
+// importing it there would have cleared a dead-code finding without making any
+// shipped code more correct. Here it is live, so covering it is ordinary work.
 
 describe('subtractVectors', () => {
   it('subtracts element by element', () => {
@@ -69,5 +76,38 @@ describe('normalizeVector', () => {
     // as a search that returns nothing for no stated reason. A zero vector is
     // reachable in normal use: subtracting a centroid from itself.
     expect(normalizeVector([0, 0, 0])).toEqual([0, 0, 0])
+  })
+})
+
+describe('cosineSimilarity', () => {
+  it('scores identical directions 1', () => {
+    expect(cosineSimilarity([1, 2, 3], [1, 2, 3])).toBeCloseTo(1, 10)
+  })
+
+  it('is about direction, not magnitude', () => {
+    // The reason cosine is the measure at all, and the reason clustering can
+    // compare a one-line stub against a long transcript: a long document and a
+    // short one on the same subject must score the same.
+    expect(cosineSimilarity([1, 2, 3], [10, 20, 30])).toBeCloseTo(1, 10)
+  })
+
+  it('scores orthogonal vectors 0', () => {
+    expect(cosineSimilarity([1, 0], [0, 1])).toBe(0)
+  })
+
+  it('scores opposite directions -1', () => {
+    expect(cosineSimilarity([1, 2], [-1, -2])).toBeCloseTo(-1, 10)
+  })
+
+  it('scores a zero vector 0 rather than returning NaN', () => {
+    // The clustering loop compares every candidate against every centroid and
+    // takes the best. A NaN loses every comparison silently, so an unembeddable
+    // all-zero vector would not merely fail to cluster -- it would disappear.
+    expect(cosineSimilarity([0, 0], [1, 2])).toBe(0)
+    expect(cosineSimilarity([1, 2], [0, 0])).toBe(0)
+  })
+
+  it('refuses vectors of different lengths, naming both', () => {
+    expect(() => cosineSimilarity([1, 2], [1, 2, 3])).toThrow('Vector dimension mismatch: 2 vs 3')
   })
 })

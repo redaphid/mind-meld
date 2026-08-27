@@ -80,21 +80,65 @@ export async function querySimilar(
   collectionName: string,
   queryEmbedding: number[],
   nResults = 10,
-  whereFilter?: Record<string, unknown>
+  whereFilter?: Record<string, unknown>,
+  // Ask Chroma to hand back each hit's OWN vector alongside its distance.
+  //
+  // The noise penalty (src/mcp/noise.ts) has to compare a result against the
+  // noise clusters, which means it needs a vector for that result. The obvious
+  // source is `sessions.centroid_vector`, and it is the wrong one: 5 of the 6
+  // sessions actually observed polluting a live search have no centroid at all,
+  // so a centroid-based penalty would silently skip exactly the rows it exists
+  // to demote. The vector that CAUSED the hit is always available and is a
+  // truer subject anyway -- it is the thing that matched.
+  includeEmbeddings = false
 ): Promise<{
   ids: string[][];
   documents: (string | null)[][];
   metadatas: (Record<string, unknown> | null)[][];
   distances: (number | null)[][] | null;
+  embeddings?: (number[] | null)[][] | null;
 }> {
   const collection = await getCollection(collectionName);
+  const include = ['documents', 'metadatas', 'distances'];
+  if (includeEmbeddings) include.push('embeddings');
   const results = await collection.query({
     queryEmbeddings: [queryEmbedding],
     nResults,
     where: whereFilter as Parameters<typeof collection.query>[0]['where'],
-    include: ['documents', 'metadatas', 'distances'],
+    include: include as Parameters<typeof collection.query>[0]['include'],
   });
   return results;
+}
+
+// Every vector in a collection, ids included. Only ever called against the
+// noise collection, which is bounded by how many sessions agents have actually
+// reported -- a number in the hundreds, not the hundreds of thousands the
+// message collection holds. Do not point this at a searchable collection.
+export async function getAllEmbeddings(
+  collectionName: string
+): Promise<{ ids: string[]; embeddings: number[][] }> {
+  const collection = await getCollection(collectionName);
+  const result = await collection.get({ include: ['embeddings'] });
+  const embeddings = (result.embeddings ?? []) as unknown as (number[] | null)[];
+  const ids: string[] = [];
+  const vectors: number[][] = [];
+  result.ids.forEach((id, i) => {
+    const vec = embeddings[i];
+    if (vec && vec.length > 0) {
+      ids.push(id);
+      vectors.push(vec);
+    }
+  });
+  return { ids, embeddings: vectors };
+}
+
+// Drop ids from a collection. Used by unreportUselessSession to take a session
+// back out of the noise corpus, so that un-reporting genuinely undoes both
+// halves of a report rather than only the visible tag.
+export async function deleteEmbeddings(collectionName: string, ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const collection = await getCollection(collectionName);
+  await collection.delete({ ids });
 }
 
 // Check if ID exists in collection

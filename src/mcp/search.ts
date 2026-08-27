@@ -10,6 +10,7 @@ import { buildSnippet, ts_headline_options } from './snippet.js'
 import { resolveTitle, type TitleSource } from './title.js'
 import { parseSinceDate } from './since.js'
 import { resolveTagFilter, passesTagFilter, getSessionTags, type TagFilter } from './tags.js'
+import { getNoiseClusters, noiseDamping } from './noise.js'
 import { LAST_ACTIVITY_SQL, lastActivity } from './last-activity.js'
 
 const PROJECT_BOOST = 0.5
@@ -46,6 +47,14 @@ export type SearchParams = {
   // for a vocabulary anyone may extend at any time.
   tags?: string[]
   excludeTags?: string[]
+  // Noise reported via reportUselessSession. False (the default) means two
+  // things at once, and they are two because hiding and ranking are two
+  // different mechanisms:
+  //   - sessions tagged "useless" are hidden outright, and
+  //   - sessions that merely RESEMBLE reported noise are ranked down.
+  // true disables both, which is what makes the hidden material reachable
+  // again for debugging rather than gone.
+  includeNoise?: boolean
 }
 
 // Which effective data classes this search may see. null means unfiltered.
@@ -133,6 +142,16 @@ type Hit = {
   projectId: number
   rawSnippet: string | null
   headline: string | null
+  // The embedding of the thing that actually matched -- the session, chunk or
+  // message vector Chroma returned alongside the distance. This is what the
+  // noise penalty scores against.
+  //
+  // Deliberately NOT sessions.centroid_vector: five of the six sessions
+  // observed polluting a live search have no centroid at all, so a
+  // centroid-based penalty would skip precisely the rows it exists to demote.
+  // null for hits that arrived only through the full-text arm, which have no
+  // vector and are therefore left unpenalized.
+  vector: number[] | null
 }
 
 const parseWeightedIds = (params: string[]): WeightedId[] =>
@@ -432,6 +451,17 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
   // params: the configured default-excluded set ("useless") applies to a plain
   // search too, which is the whole point of it being a default.
   const tagFilter = await resolveTagFilter(params)
+
+  // includeNoise:true lifts BOTH halves of the noise machinery -- the outright
+  // hiding above and the ranking penalty below. Half an escape hatch is not an
+  // escape hatch: someone debugging why a session was demoted needs to see it
+  // where it would otherwise have ranked, not merely to see it at all.
+  //
+  // Asking for the "useless" tag by name also counts as asking for noise. A
+  // search for tags:["useless"] that then ranked every result down by its
+  // resemblance to "useless" would be fighting itself.
+  const wantsNoisePenalty =
+    params.includeNoise !== true && !tagFilter.includeTags.includes('useless')
   // Chroma knows nothing about data classes, so an active class filter can
   // starve the semantic arms (~70% of sessions may be filtered out after the
   // fetch). Over-fetch harder when a filter is on to compensate.
@@ -456,11 +486,12 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     result: SearchResult,
     projectId: number,
     rawSnippet: string | null,
-    headline: string | null
+    headline: string | null,
+    vector: number[] | null = null
   ) => {
     if (projectIds.includes(projectId)) inProject.add(result.session_id)
     if (!hitBySession.has(result.session_id))
-      hitBySession.set(result.session_id, { result, projectId, rawSnippet, headline })
+      hitBySession.set(result.session_id, { result, projectId, rawSnippet, headline, vector })
   }
 
   if (mode === 'semantic' || mode === 'hybrid') {
@@ -474,7 +505,13 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
         unlikeProjectCentroids
       )
 
-      const sessionHits = await querySimilar(config.chroma.collections.sessions, embedding, limit * (overFetch ?? 2))
+      const sessionHits = await querySimilar(
+        config.chroma.collections.sessions,
+        embedding,
+        limit * (overFetch ?? 2),
+        undefined,
+        wantsNoisePenalty
+      )
       if (sessionHits.ids[0]) {
         const sessionRanked: RankedList = []
         for (let i = 0; i < sessionHits.ids[0].length; i++) {
@@ -483,13 +520,25 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
           const session = await getSessionById(sessionId, includeAutomated)
           if (!session) continue
           if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
-          record(baseResult(session, score, 'session'), session.project_id, session.summary, null)
+          record(
+            baseResult(session, score, 'session'),
+            session.project_id,
+            session.summary,
+            null,
+            sessionHits.embeddings?.[0]?.[i] ?? null
+          )
           sessionRanked.push(session.id)
         }
         rankedLists.push(sessionRanked)
       }
 
-      const chunkHits = await querySimilar(config.chroma.collections.chunks, embedding, limit * (overFetch ?? 3))
+      const chunkHits = await querySimilar(
+        config.chroma.collections.chunks,
+        embedding,
+        limit * (overFetch ?? 3),
+        undefined,
+        wantsNoisePenalty
+      )
       if (chunkHits.ids[0]) {
         const chunkRanked: RankedList = []
         const seen = new Set<number>()
@@ -503,13 +552,19 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
           seen.add(session.id)
           const result = baseResult(session, score, 'chunk')
           result.cursor = { chunk_index: session.chunk_index }
-          record(result, session.project_id, session.chunk_summary, null)
+          record(result, session.project_id, session.chunk_summary, null, chunkHits.embeddings?.[0]?.[i] ?? null)
           chunkRanked.push(session.id)
         }
         rankedLists.push(chunkRanked)
       }
 
-      const messageHits = await querySimilar(config.chroma.collections.messages, embedding, limit * (overFetch ?? 3))
+      const messageHits = await querySimilar(
+        config.chroma.collections.messages,
+        embedding,
+        limit * (overFetch ?? 3),
+        undefined,
+        wantsNoisePenalty
+      )
       if (messageHits.ids[0]) {
         // Chroma returns messages in distance order; first appearance of a
         // session is its best-ranked message, so dedup preserves rank order.
@@ -526,7 +581,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
           seen.add(session.id)
           const result = baseResult(session, score, 'message')
           result.cursor = { message_id: session.message_id }
-          record(result, session.project_id, session.content_text, null)
+          record(result, session.project_id, session.content_text, null, messageHits.embeddings?.[0]?.[i] ?? null)
           messageRanked.push(session.id)
         }
         rankedLists.push(messageRanked)
@@ -663,8 +718,23 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
 
   const fused = fuseRanks(rankedLists)
 
+  // Fetched once per search, not once per hit: clustering re-reads the whole
+  // noise corpus, and the result is cached in noise.ts across searches.
+  // An empty array (nothing reported yet, or Chroma unreachable) makes
+  // noiseDamping return 1 for everything, so this whole block is a no-op on a
+  // corpus nobody has judged.
+  const noiseClusters = wantsNoisePenalty ? await getNoiseClusters() : []
+
   const results = Array.from(hitBySession.values()).map((hit) => {
-    const score = (fused.get(hit.result.session_id) ?? 0) + (inProject.has(hit.result.session_id) ? PROJECT_BOOST : 0)
+    const fusedScore = fused.get(hit.result.session_id) ?? 0
+    // Damping is applied to the retrieval score BEFORE the project boost is
+    // added. A hit in the current project stays surfaced even if it looks a
+    // little like noise -- "in the project I am standing in" is evidence the
+    // penalty has no business overruling -- while noise from elsewhere is
+    // pushed down by the full factor.
+    const score =
+      fusedScore * noiseDamping(hit.vector, noiseClusters) +
+      (inProject.has(hit.result.session_id) ? PROJECT_BOOST : 0)
     return { ...hit.result, score, snippet: buildSnippet(hit.rawSnippet, hit.headline) }
   })
   results.sort((a, b) => b.score - a.score)

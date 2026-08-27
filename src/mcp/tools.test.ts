@@ -43,6 +43,13 @@ vi.mock('./health.js', () => ({
   formatHealth: () => 'HEALTH',
 }))
 
+const doRecordNoiseVector = vi.fn(async () => true)
+const doForgetNoiseVector = vi.fn(async () => {})
+vi.mock('./noise.js', () => ({
+  recordNoiseVector: (...args: unknown[]) => doRecordNoiseVector(...(args as [])),
+  forgetNoiseVector: (...args: unknown[]) => doForgetNoiseVector(...(args as [])),
+}))
+
 const doApplyTags = vi.fn(async () => ['useless'])
 const doRemoveTags = vi.fn(async () => ['useless'])
 const doGetTags = vi.fn(async () => ['useless'])
@@ -104,6 +111,7 @@ const EXPECTED_TOOLS = [
   'reportUselessSession',
   'search',
   'stats',
+  'unreportUselessSession',
   'writeNote',
 ]
 
@@ -216,18 +224,65 @@ describe('every advertised tool executes', () => {
     await client.close()
   })
 
-  it('soft-deletes on reportUselessSession, and says so when there was nothing to delete', async () => {
+  // THE POINT OF THIS TEST is that reportUselessSession does not delete. It used
+  // to run `UPDATE sessions SET deleted_at = now()`, which had no undo path; the
+  // 440 rows in the live database carrying deleted_at were set by the warmup
+  // script, not by this tool, and 426 of them are personal SMS threads. So the
+  // assertion that matters most here is the negative one at the bottom: no SQL
+  // this tool issues may mention deleted_at.
+  it('flags rather than deletes on reportUselessSession, and records the noise vector', async () => {
     const client = await connect()
 
-    query.mockResolvedValueOnce({ rows: [{ id: 5 }], rowCount: 1 } as never)
-    expect(
-      text(await client.callTool({ name: 'reportUselessSession', arguments: { sessionId: 5 } }))
-    ).toBe('Session 5 soft-deleted.')
+    query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }], rowCount: 1 } as never)
+    const out = text(await client.callTool({
+      name: 'reportUselessSession',
+      arguments: { sessionId: 5, reason: 'notification stub' },
+    }))
+    expect(out).toContain('flagged "useless"')
+    expect(out).toContain('Not deleted.')
+    expect(out).toContain('unreportUselessSession')
 
-    // rowCount 0 — already deleted, or never existed.
+    // The reason is free text and is carried onto the tag, not merely logged.
+    expect(doApplyTags).toHaveBeenCalledWith({ sessionId: 5 }, ['useless'], {
+      createdBy: 'reportUselessSession',
+      note: 'notification stub',
+    })
+    // The vector half: reporting one session has to generalise to similar ones.
+    expect(doRecordNoiseVector).toHaveBeenCalledWith(5)
+
+    // A session that does not exist is reported as such, and is not tagged.
+    doApplyTags.mockClear()
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     expect(
       text(await client.callTool({ name: 'reportUselessSession', arguments: { sessionId: 6 } }))
-    ).toContain('not found or already deleted')
+    ).toContain('not found')
+    expect(doApplyTags).not.toHaveBeenCalled()
+
+    // NOTHING this tool runs may touch deleted_at. Clearing or setting it is how
+    // 426 personal SMS threads would leak into search.
+    for (const call of query.mock.calls)
+      expect(String((call as unknown[])[0])).not.toContain('deleted_at')
+
+    await client.close()
+  })
+
+  it('undoes both halves of a report on unreportUselessSession', async () => {
+    const client = await connect()
+
+    expect(
+      text(await client.callTool({ name: 'unreportUselessSession', arguments: { sessionId: 5 } }))
+    ).toContain('no longer flagged useless')
+    expect(doRemoveTags).toHaveBeenCalledWith({ sessionId: 5 }, ['useless'])
+    // Removing the tag alone would leave the session still teaching the ranker
+    // to demote everything that looks like it.
+    expect(doForgetNoiseVector).toHaveBeenCalledWith(5)
+
+    // Un-reporting something never reported is not an error.
+    doRemoveTags.mockResolvedValueOnce([] as never)
+    expect(
+      text(await client.callTool({ name: 'unreportUselessSession', arguments: { sessionId: 7 } }))
+    ).toContain('Nothing to undo')
+
     await client.close()
   })
 
