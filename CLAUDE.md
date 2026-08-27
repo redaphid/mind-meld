@@ -459,11 +459,37 @@ not tracked.
 
 ## Deployment
 
-Deploys are **semver-driven** — CI only builds images when `package.json`'s `version` changes. A plain merge to `main` does **not** deploy.
+**Every commit on `main` publishes images.** `docker-publish.yml` builds and
+pushes `latest` and `main` on each push to the default branch, so a merged PR
+reaches a pullable image without a version bump.
 
-1. Bump `version` in `package.json` and push to `main`.
-2. `.github/workflows/release.yml` (gated on `paths: ["package.json"]`) runs tests + build, then creates a GitHub Release with a `v{version}` tag.
-3. `.github/workflows/docker-publish.yml` (on the `v*` tag / after Release completes) builds and pushes all images to GHCR: `mindmeld-sync` (`Dockerfile.sync`), `mindmeld-mcp` (`Dockerfile.http`), plus postgres/centroids/warmups. Image suffix = the matrix `image:` value, so `Dockerfile.http → mindmeld-mcp` (matches what compose pulls).
+Releases are still semver-driven, and they are a *separate* thing: a GitHub
+Release with a `v{version}` tag is cut only when `package.json`'s `version`
+changes. Bump the version when you want a named, tagged artifact — not to make
+a merge deploy.
+
+This split exists because the two used to be one, and the seam was silent.
+Until 2026-08-27 an image was built **only** after a successful Release, so a
+merge that did not touch `package.json` produced nothing at all: #139 landed on
+`main` and built no image, with no red X anywhere to say the code was
+unreachable. Nothing reported a problem, because nothing had failed.
+
+1. Merge to `main` → images build and push (`latest`, `main`). This is the deploy.
+2. To cut a release: bump `version` in `package.json` and push to `main`.
+   `.github/workflows/release.yml` (gated on `paths: ["package.json"]`) runs
+   tests + build, then creates a GitHub Release with a `v{version}` tag.
+3. `.github/workflows/docker-publish.yml` also runs on a `v*` tag and after a
+   successful Release, pushing all images to GHCR: `mindmeld-sync`
+   (`Dockerfile.sync`), `mindmeld-mcp` (`Dockerfile.http`), plus
+   postgres/centroids. Image suffix = the matrix `image:` value, so
+   `Dockerfile.http → mindmeld-mcp` (matches what compose pulls).
+
+**Version-numbered image tags (`1.23.0`, `1.23`) come only from a tag pushed by
+a human.** `type=semver` reads the git ref, so it produces nothing on a branch
+push; and a tag pushed by `release.yml` using `GITHUB_TOKEN` cannot trigger
+another workflow. That is why GHCR has no version tag newer than `1.19.0`
+despite four releases. `latest` and `main` are unaffected and are what compose
+pulls.
 4. On the host: `docker compose pull && docker compose up -d`. Migrations auto-apply on `mcp` startup (`src/db/migrations.ts`).
 
 `/deploy` (`.claude/commands/deploy.md`) automates the push → tag → CI-watch → pull → restart, but it reads the existing version and does **not** bump it — edit `package.json` first.
