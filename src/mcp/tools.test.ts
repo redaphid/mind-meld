@@ -102,7 +102,6 @@ const EXPECTED_TOOLS = [
   'health',
   'removeTag',
   'reportUselessSession',
-  'saveNote',
   'search',
   'stats',
   'writeNote',
@@ -318,41 +317,18 @@ describe('every advertised tool executes', () => {
     await client.close()
   })
 
-  // Task 329 renamed this tool from the earlier `saveNote` draft, and this
-  // file used to assert the old name was NOT offered. That assertion was
-  // correct only while `saveNote` had never shipped. v1.22.0 released #131 and
-  // put it on the live tool surface, so removing the name outright would break
-  // callers already using it; his ruling is to keep it briefly, deprecated.
+  // Task 329 renamed this tool from the earlier `saveNote` draft. Two names
+  // for one write path is the failure worth guarding against: an LLM has no
+  // way to tell which of them to reach for.
   //
-  // Both halves of the shim are asserted on purpose, so that deleting one
-  // without the other fails here rather than in production.
-  it('still advertises the deprecated saveNote name alongside writeNote', async () => {
+  // `saveNote` did ship, briefly, in v1.22.0 (#131), and an alias for it was
+  // added here and then removed on his call. Dropping it is deliberate - this
+  // is a rename, not a dual surface - and this assertion is what stops the old
+  // name creeping back in later as a convenience.
+  it('offers exactly one note-writing tool, not both names', async () => {
     const names = (await advertisedTools()).map(t => t.name)
     expect(names).toContain('writeNote')
-    expect(names).toContain('saveNote')
-  })
-
-  it('marks saveNote deprecated and points at writeNote, so an LLM prefers the new name', async () => {
-    const save = (await advertisedTools()).find(t => t.name === 'saveNote')!
-    expect(save.description ?? '').toMatch(/DEPRECATED/)
-    expect(save.description ?? '').toContain('writeNote')
-  })
-
-  // The alias must be the SAME write path, not a second one - a note written
-  // through the old name would otherwise miss the automatic "note" tag.
-  it('routes saveNote through writeNote, so the alias is not a second write path', async () => {
-    const client = await connect()
-    const result = await client.callTool({
-      name: 'saveNote',
-      arguments: { text: 'remember this', title: 'Reminder' },
-    })
-    expect(text(result)).toBe('WRITTEN NOTE')
-    expect(doWriteNote).toHaveBeenLastCalledWith({
-      text: 'remember this',
-      title: 'Reminder',
-      tags: undefined,
-    })
-    await client.close()
+    expect(names).not.toContain('saveNote')
   })
 
   it('only resolves cwd to projects when a cwd was given', async () => {
