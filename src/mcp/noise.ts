@@ -255,8 +255,6 @@ export const getNoiseClusters = async (now = Date.now()): Promise<number[][]> =>
   return centroids
 }
 
-export const noiseCorpusSize = (): number => cache?.size ?? 0
-
 // How much of a result's score survives its resemblance to noise.
 //
 // Returns a multiplier in [0, 1]; 1 means untouched. Multiplicative because the
