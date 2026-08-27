@@ -1,8 +1,10 @@
 import { syncClaudeCode, syncClaudeHistory } from './claude-code.js';
+import { drainIngestSpool } from './ingest-spool.js';
 import { generatePendingEmbeddings, updateAggregateEmbeddings, AGGREGATE_BATCH_SIZE } from '../embeddings/batch.js';
 import { ensureEmbeddingModel } from '../embeddings/ollama.js';
 import { ensureSummarizeModel } from '../embeddings/summarize.js';
 import { query } from '../db/postgres.js';
+import { shouldStandDown, STAND_DOWN_NOTICE } from './stand-down.js';
 
 const MAX_AGGREGATE_DRAIN_MS = 50 * 60 * 1000;
 
@@ -22,10 +24,20 @@ export interface FullSyncResult {
     malformedLines: number;
     invalidTimestamps: number;
   };
+  // The edge ingest spool (src/sync/ingest-spool.ts). `configured: false`
+  // means this machine has no spool env set, which is normal, not idle.
+  spool: {
+    configured: boolean;
+    drained: number;
+    quarantined: number;
+  };
   embeddings: {
     messagesEmbedded: number;
     sessionsUpdated: number;
   };
+  // True when the embedding phase was skipped because something asked
+  // ingestion to stand down. Not an error — see where it is set.
+  standDown: boolean;
   errors: string[];
 }
 
@@ -55,7 +67,9 @@ export async function runFullSync(options?: {
     durationMs: 0,
     claudeCode: { projectsProcessed: 0, sessionsProcessed: 0, messagesInserted: 0, skipped: 0, quarantined: 0 },
     history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
+    spool: { configured: false, drained: 0, quarantined: 0 },
     embeddings: { messagesEmbedded: 0, sessionsUpdated: 0 },
+    standDown: false,
     errors: [],
   };
 
@@ -100,8 +114,44 @@ export async function runFullSync(options?: {
     }
   }
 
-  // Generate embeddings
-  if (!options?.skipEmbeddings) {
+  // Drain the edge ingest spool — push ingestion's equivalent of reading
+  // files off disk. Like file sync it is NOT gated by stand-down: it writes
+  // to Postgres and never touches the GPU. Spool errors are real run errors
+  // (a producer's data is waiting in R2), but drainIngestSpool itself never
+  // throws for a payload — bad payloads land in sync_quarantine.
+  try {
+    const spool = await drainIngestSpool();
+    result.spool = {
+      configured: spool.configured,
+      drained: spool.drained,
+      quarantined: spool.quarantined,
+    };
+    errors.push(...spool.errors);
+    if (spool.configured && (spool.drained > 0 || spool.quarantined > 0)) {
+      console.log(
+        `\n--- Ingest spool: ${spool.drained} drained, ${spool.quarantined} quarantined ---`
+      );
+    }
+  } catch (e) {
+    const error = `Ingest spool drain failed: ${e}`;
+    console.error(error);
+    errors.push(error);
+  }
+
+  // Generate embeddings.
+  //
+  // Stand-down gates this phase and not the file sync above it, because the
+  // point is to yield the GPU, and reading transcripts into Postgres never
+  // touches it. Conversations keep being indexed while standing down; only
+  // their vectors wait, and the next cycle picks them up from the same queue.
+  // Deliberately NOT pushed onto `errors`: a run that records an error exits
+  // nonzero, and container monitoring would read an intentional yield as a
+  // failed sync. It is reported as its own fact instead.
+  const standingDown = !options?.skipEmbeddings && (await shouldStandDown());
+  if (standingDown) console.log(STAND_DOWN_NOTICE);
+  result.standDown = standingDown;
+
+  if (!options?.skipEmbeddings && !standingDown) {
     try {
       console.log('\n--- Generating Embeddings ---');
       const embeddingStats = await generatePendingEmbeddings();
@@ -115,6 +165,13 @@ export async function runFullSync(options?: {
         const aggregateStats = await updateAggregateEmbeddings();
         result.embeddings.sessionsUpdated += aggregateStats.sessionsUpdated;
         if (aggregateStats.sessionsFetched < AGGREGATE_BATCH_SIZE) break;
+        // The drain would otherwise keep requesting batches for the next 50
+        // minutes; updateAggregateEmbeddings returns early when standing down,
+        // so without this the loop spins asking for work it will not do.
+        if (await shouldStandDown()) {
+          console.log(STAND_DOWN_NOTICE);
+          break;
+        }
         if (Date.now() - drainStart > MAX_AGGREGATE_DRAIN_MS) {
           console.log('Aggregate drain time budget reached; remaining backlog resumes next cycle');
           break;

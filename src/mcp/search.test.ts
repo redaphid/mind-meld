@@ -27,6 +27,9 @@ const sessionRow = (over: Row): Row => ({
   source_name: 'claude_code',
   data_class: 'coding',
   started_at: new Date('2026-01-01T00:00:00Z'),
+  // A session that saw no further activity: last activity IS its start. Tests
+  // that care about the difference set ended_at explicitly.
+  ended_at: new Date('2026-01-01T00:00:00Z'),
   message_count: 10,
   project_id: 7,
   ...over,
@@ -226,6 +229,7 @@ describe('search default data-class filter (full-text arm)', () => {
           source_name: 'claude_code',
           data_class: 'coding',
           started_at: new Date('2026-01-01T00:00:00Z'),
+          ended_at: new Date('2026-01-01T00:00:00Z'),
           message_count: 10,
           rank: 0.9,
           project_id: 7,
@@ -300,6 +304,8 @@ describe('search parameter arms', () => {
     for (const r of results) expect(r.score).toBeGreaterThan(0.5)
   })
 
+  // Both fixtures ended when they started, so there is no recent activity to
+  // keep them — see the last-activity suite below for the case where there is.
   it('drops sessions older than since', async () => {
     mockDbForSemantic()
     mockChromaSessionsOnly()
@@ -633,6 +639,28 @@ describe('an untitled hit is headed by its matched text (#119)', () => {
     expect(results[0].title).not.toContain('**')
   })
 
+  // No snippet means there is nothing to promote. The row must stay untitled
+  // rather than acquire an empty heading, and title_source must not claim
+  // 'snippet' for a title it did not supply.
+  it('leaves an untitled hit untitled when there is no snippet to promote', async () => {
+    mockFts({ headline: null })
+
+    const results = await search({ query: 'deploy', mode: 'text' })
+    expect(results[0].title).toBeNull()
+    expect(results[0].title_source).not.toBe('snippet')
+  })
+
+  // A headline that is nothing but highlight markers strips to an empty
+  // string. Heading the row with blank space is worse than leaving it
+  // untitled, so an empty result falls back rather than being promoted.
+  it('does not promote a snippet that is empty once the markers are stripped', async () => {
+    mockFts({ headline: '** **' })
+
+    const results = await search({ query: 'deploy', mode: 'text' })
+    expect(results[0].title).toBeNull()
+    expect(results[0].title_source).not.toBe('snippet')
+  })
+
   it('leaves a real title alone', async () => {
     mockFts({ title: 'Fixing the build' })
 
@@ -664,5 +692,122 @@ describe('an untitled hit is headed by its matched text (#119)', () => {
     expect(formatted.match(/failed on migration 022/g)).toHaveLength(1)
     // Never bolded like a real title — that is the visual tell.
     expect(formatted).not.toContain('**the **deploy**')
+  })
+})
+
+// `since` used to filter on s.started_at — the timestamp of the FIRST message
+// ever in the session. Session keys are far coarser than conversations (an SMS
+// thread keyed on threadId spans years), so a message that arrived minutes ago
+// inside an old session read as ancient and was dropped. Observed live: a query
+// returning one hit returned ZERO once `since=6h` was added, for a message 18
+// minutes old. The same column dated hits by session birth, so a week-old
+// message could be rendered as tonight's conversation.
+describe('recency is last activity, not first message', () => {
+  // The reported shape: a thread that began in 2014 and received a message today.
+  const longRunning = sessionRow({
+    id: 1,
+    title: 'SMS thread',
+    source_name: 'android',
+    data_class: 'personal',
+    started_at: new Date('2014-09-12T00:00:00Z'),
+    ended_at: new Date('2026-08-07T23:42:00Z'),
+  })
+
+  const onlySession = (row: Row) =>
+    query.mockImplementation(async (sql: string) =>
+      typeof sql === 'string' && sql.includes('s.id = $1') ? rows(row) : rows()
+    )
+
+  const ftsRow = (over: Row): Row => ({
+    session_id: 1,
+    message_id: 900,
+    title: 'SMS thread',
+    summary: 'summary',
+    project_name: 'proj',
+    project_path: '/p/proj',
+    source_name: 'android',
+    data_class: 'personal',
+    started_at: new Date('2014-09-12T00:00:00Z'),
+    ended_at: new Date('2026-08-07T23:42:00Z'),
+    message_count: 10,
+    rank: 0.9,
+    project_id: 7,
+    headline: 'the <b>courier</b>',
+    ...over,
+  })
+
+  it('keeps a decade-old session that was active inside the since window', async () => {
+    onlySession(longRunning)
+    querySimilar.mockImplementation(async (collection: string) =>
+      collection === 'convo-sessions'
+        ? { ids: [['session-1']], distances: [[0.1]] }
+        : { ids: [[]], distances: [[]] }
+    )
+
+    const results = await search({
+      query: 'courier arriving',
+      mode: 'semantic',
+      dataClass: ['*'],
+      since: '2026-08-07T18:00:00Z',
+    })
+    expect(results.map(r => r.session_id)).toEqual([1])
+  })
+
+  it('still drops a session whose last activity predates the window', async () => {
+    onlySession(sessionRow({ id: 1, ended_at: new Date('2026-01-02T00:00:00Z') }))
+    mockChromaSessionsOnly()
+
+    const results = await search({
+      query: 'courier arriving',
+      mode: 'semantic',
+      dataClass: ['*'],
+      since: '2026-08-07T18:00:00Z',
+    })
+    expect(results).toEqual([])
+  })
+
+  // ended_at is MAX(m.timestamp) and was non-null across every live session, but
+  // a session whose stats have not been computed yet must not vanish from every
+  // since-filtered search: it falls back to started_at rather than to NULL.
+  it('falls back to started_at when the session has no ended_at', async () => {
+    onlySession(sessionRow({ id: 1, started_at: new Date('2026-08-07T20:00:00Z'), ended_at: null }))
+    mockChromaSessionsOnly()
+
+    const results = await search({
+      query: 'courier arriving',
+      mode: 'semantic',
+      dataClass: ['*'],
+      since: '2026-08-07T18:00:00Z',
+    })
+    expect(results.map(r => r.session_id)).toEqual([1])
+  })
+
+  it('dates a semantic hit by its last activity, not its first message', async () => {
+    onlySession(longRunning)
+    mockChromaSessionsOnly()
+
+    const results = await search({ query: 'courier', mode: 'semantic', dataClass: ['*'] })
+    expect(results[0].date).toEqual(new Date('2026-08-07T23:42:00Z'))
+  })
+
+  it('dates a full-text hit by its last activity, not its first message', async () => {
+    query.mockImplementation(async (sql: string) =>
+      typeof sql === 'string' && sql.includes('ranked_messages') ? rows(ftsRow({})) : rows()
+    )
+
+    const results = await search({ query: 'courier', mode: 'text', dataClass: ['*'] })
+    expect(results[0].date).toEqual(new Date('2026-08-07T23:42:00Z'))
+  })
+
+  // The SQL arm has to apply the same rule as passesFilters does in TypeScript;
+  // they are the same expression from last-activity.ts precisely so they cannot
+  // drift into disagreeing about what "recent" means.
+  it('filters the full-text arm on last activity in SQL', async () => {
+    query.mockResolvedValue(rows())
+    await search({ query: 'courier', mode: 'text', since: '2026-08-07T18:00:00Z' })
+
+    const [sql] = query.mock.calls.find(c => String(c[0]).includes('ranked_messages'))!
+    expect(sql).toContain('COALESCE(s.ended_at, s.started_at) >= $3')
+    expect(sql).not.toContain('s.started_at >= $3')
   })
 })

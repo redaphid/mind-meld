@@ -9,6 +9,8 @@ import {
   findEquivalentIn,
   isWindowsBackedPath,
   isWindowsHostOs,
+  pathSegments,
+  lastPathSegment,
 } from './project-path.js'
 
 describe('canonicalizeProjectPath', () => {
@@ -298,5 +300,41 @@ describe('isWindowsBackedPath', () => {
     ['//server/share', false],
   ])('%s -> %s', (path, expected) => {
     expect(isWindowsBackedPath(path)).toBe(expected)
+  })
+})
+
+// `node:path.join` emits '\' on Windows and '/' elsewhere, and transcripts carry
+// either regardless of host. A bare `split('/')` therefore yields the WHOLE path
+// as one segment on Windows — which silently made the project dirName
+// `C:\...\projects\-home-u-proj` and indexed everything under a garbage key.
+describe('lastPathSegment', () => {
+  it.each([
+    ['/home/u/.claude/projects/-home-u-proj', '-home-u-proj'],
+    ['C:\\Users\\u\\projects\\-home-u-proj', '-home-u-proj'],
+    // Mixed separators: a Windows base joined onto a POSIX tail.
+    ['C:\\Users\\u\\projects/-home-u-proj', '-home-u-proj'],
+    ['sess-1.jsonl', 'sess-1.jsonl'],
+  ])('%s -> %s', (path, expected) => {
+    expect(lastPathSegment(path)).toBe(expected)
+  })
+
+  // The bug it replaces: the old expression returned the whole string here.
+  it('does not return the whole path for a backslash path', () => {
+    const windows = 'C:\\Users\\u\\projects\\-home-u-proj'
+    expect(lastPathSegment(windows)).not.toBe(windows)
+  })
+})
+
+describe('pathSegments', () => {
+  it('splits on either separator', () => {
+    expect(pathSegments('a/b/c')).toEqual(['a', 'b', 'c'])
+    expect(pathSegments('a\\b\\c')).toEqual(['a', 'b', 'c'])
+    expect(pathSegments('a\\b/c')).toEqual(['a', 'b', 'c'])
+  })
+
+  // parentExternalIdFromRawPath locates a 'subagents' marker by segment, so a
+  // Windows path that never splits would hide the marker and orphan the child.
+  it('finds a subagents marker in a Windows path', () => {
+    expect(pathSegments('C:\\p\\sess-1\\subagents\\agent-abc.jsonl')).toContain('subagents')
   })
 })

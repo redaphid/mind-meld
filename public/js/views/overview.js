@@ -1,12 +1,20 @@
-// Overview — the "is mindmeld healthy and what's in it" screen. Everything here
-// is one glance: totals, how far behind the embedding pipeline is, which
-// machines are feeding the index, and any sync error worth acting on.
+// Overview — the "is mindmeld healthy, and if it is idle, why" screen.
+//
+// The totals answer what is in the index. The rest of this screen exists for
+// the harder question, because "nothing is moving" has several causes that look
+// identical from a pending count: the GPU gate is holding work back while a
+// game runs, Chroma is unreachable, the slow summarization phase is working
+// normally and simply takes minutes per session, or someone stood ingestion
+// down on purpose. Each of those has its own panel, ordered so the things you
+// might act on come before the things you only read.
 
 import { html, useState, useEffect } from 'preact'
 import { useApi, apiGet } from '../api.js'
 import { navigate } from '../router.js'
 import { Card, Stat, Spinner, ErrorBox, Pill, Bar } from '../ui.js'
 import { fmtNum, fmtExact, timeAgo, sourceLabel, pct } from '../util.js'
+import { EmbeddingChart, ChartWindowPicker } from '../chart.js'
+import { OllamaCard, ChromaCard, LoadCard, SummaryCard, StandDownControl } from '../health.js'
 
 // POST /api/sync answers 202 when it starts a run and 409 when one was already
 // in flight — neither is a failure, and both carry the run's state, so this
@@ -336,19 +344,55 @@ const MachinesCard = ({ machines }) => {
 // doing right now".
 const STATUS_REFRESH_MS = 10000
 
+// The gate flips between holding and open on its own schedule, and a resident
+// model can drop out of VRAM at any moment, so the dependency panels are
+// refreshed on the same beat as the totals. The chart is a rollup over hours —
+// re-fetching it that often would be waste.
+const SERIES_REFRESH_MS = 30000
+
+// The graph of the pipeline over time, with its window picker. Lives here
+// rather than in chart.js so the chart module stays presentational and this
+// keeps the fetching.
+const EmbeddingActivity = () => {
+  const [minutes, setMinutes] = useState(360)
+  const series = useApi('/api/embedding-series', { minutes }, String(minutes))
+
+  useEffect(() => {
+    const id = setInterval(series.reload, SERIES_REFRESH_MS)
+    return () => clearInterval(id)
+  }, [series.reload])
+
+  return html`
+    <${Card}
+      title="Embedding activity"
+      action=${html`<${ChartWindowPicker} value=${minutes} onChange=${setMinutes} />`}
+    >
+      ${series.loading && !series.data && html`<${Spinner} />`}
+      ${series.error && html`<div class="faint">activity unavailable</div>`}
+      ${series.data && html`<${EmbeddingChart} series=${series.data} />`}
+    <//>
+  `
+}
+
 export const OverviewView = () => {
   const status = useApi('/status')
   const activity = useApi('/api/activity', { days: 30 })
   const machines = useApi('/api/machines')
+  const system = useApi('/api/system')
+  const summaries = useApi('/api/summaries')
 
   // Totals, embedding coverage, pending counts and the quarantine badge all
   // come from /status, so refreshing it refreshes the whole screen. Activity is
   // a 30-day rollup and machines change on a sync cycle; neither is worth a
   // request every ten seconds.
   useEffect(() => {
-    const id = setInterval(status.reload, STATUS_REFRESH_MS)
+    const id = setInterval(() => {
+      status.reload()
+      system.reload()
+      summaries.reload()
+    }, STATUS_REFRESH_MS)
     return () => clearInterval(id)
-  }, [status.reload])
+  }, [status.reload, system.reload, summaries.reload])
 
   if (status.loading && !status.data) return html`<${Spinner} label="Reading status…" />`
   // Only surrender the screen when there is nothing to show. Once a refresh has
@@ -395,6 +439,18 @@ export const OverviewView = () => {
       <${IngestionRunner} onFinished=${status.reload} />
     <//>
 
+    <${EmbeddingActivity} />
+
+    <${StandDownControl} onChange=${system.reload} />
+
+    <${LoadCard} system=${system} />
+
+    <${OllamaCard} system=${system} />
+
+    <${SummaryCard} summaries=${summaries} />
+
+    <${ChromaCard} system=${system} />
+
     ${(s?.quarantined ?? 0) > 0 &&
     html`<button class="row" style="border-color:var(--amber)" onClick=${() => navigate('quarantine')}>
       <div class="t">${fmtNum(s.quarantined)} record${s.quarantined === 1 ? '' : 's'} quarantined</div>
@@ -420,19 +476,6 @@ export const OverviewView = () => {
 
     <${Card} title="Sources">
       ${(s?.sync?.sources ?? []).map(src => html`<${SourceLine} key=${src.name} source=${src} />`)}
-    <//>
-
-    <${Card} title="Vector store">
-      ${(s?.chroma?.collections ?? []).length === 0
-        ? html`<div class="faint">Chroma unreachable — semantic search is degraded.</div>`
-        : (s?.chroma?.collections ?? []).map(
-            c => html`
-              <div class="m" style="margin:0;padding:5px 0">
-                <span class="mono">${c.name}</span>
-                <span class="right">${fmtExact(c.count)}</span>
-              </div>
-            `
-          )}
     <//>
 
     <${MachinesCard} machines=${machines} />

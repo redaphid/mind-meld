@@ -61,7 +61,7 @@ export const config = {
 
   // PostgreSQL
   postgres: {
-    host: getEnv("POSTGRES_HOST", "localhost"),
+    host: getEnv("POSTGRES_HOST", "127.0.0.1"),
     port: getEnvInt("POSTGRES_PORT", 5433),
     user: getEnv("POSTGRES_USER", "mindmeld"),
     password: getEnv("POSTGRES_PASSWORD", "mindmeld"),
@@ -70,7 +70,7 @@ export const config = {
 
   // Chroma
   chroma: {
-    host: getEnv("CHROMA_HOST", "localhost"),
+    host: getEnv("CHROMA_HOST", "127.0.0.1"),
     port: getEnvInt("CHROMA_PORT", 8001),
     get url() {
       return `http://${this.host}:${this.port}`;
@@ -87,7 +87,11 @@ export const config = {
   ollama: {
     // One Ollama on the GPU host, reached over the SSH tunnel. Serves both bge-m3
     // (vectorization) and qwen3 (generation/summarization).
-    url: getEnv("OLLAMA_URL", "http://localhost:11434"),
+    //
+    // 127.0.0.1, never `localhost`: Ollama binds IPv4 only, so a `localhost`
+    // that resolves to ::1 first gets ECONNREFUSED against a server that is
+    // running fine.
+    url: getEnv("OLLAMA_URL", "http://127.0.0.1:11434"),
     timeoutMs: getEnvInt("OLLAMA_TIMEOUT_MS", 120000), // 2 minutes
     maxRetries: getEnvInt("OLLAMA_MAX_RETRIES", 3),
     retryDelayMs: getEnvInt("OLLAMA_RETRY_DELAY_MS", 5000), // 5 seconds between retries
@@ -110,7 +114,12 @@ export const config = {
     model: getEnv("EMBEDDING_MODEL", "bge-m3"),
     dimensions: getEnvInt("EMBEDDING_DIMENSIONS", 1024),
     batchSize: getEnvInt("EMBEDDING_BATCH_SIZE", 100),
-    summarizeModel: getEnv("SUMMARIZE_MODEL", "qwen3:8b"),
+    // The one default. docker-compose.yml repeats the literal because compose
+    // cannot read it from here — keep them in step, and prefer changing this one
+    // first. An -instruct build is required: a `thinking` model emits its
+    // reasoning untagged through /api/generate, and neither `think: false`, the
+    // /no_think prefix, nor stripThinking removes it.
+    summarizeModel: getEnv("SUMMARIZE_MODEL", "qwen3:4b-instruct"),
   },
 
   // Source paths

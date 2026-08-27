@@ -1,54 +1,11 @@
-import { z } from 'zod'
 import { queries } from '../db/postgres.js'
 import { listKnownDataClasses } from './search.js'
+import { IngestPayloadSchema, type IngestPayload } from './ingest-schema.js'
 
-const IngestMessageSchema = z.object({
-  externalId: z.string(),
-  role: z.string(),
-  content: z.string(),
-  timestamp: z.string().transform(s => new Date(s)),
-  sequenceNum: z.number(),
-  metadata: z.record(z.unknown()).optional(),
-})
-
-export const IngestPayloadSchema = z.object({
-  source: z.string(),
-  sourceDisplayName: z.string().optional(),
-  // Classification for the source ('coding' | 'personal' | 'meetings' | ...,
-  // open vocabulary). REQUIRED when the ingest would create a new source —
-  // enforced in ingestConversation, where we can see whether the source
-  // exists. An existing source keeps its current class regardless of what is
-  // sent. Normalized like the search side: a source stamped "Coding " would
-  // be unreachable.
-  dataClass: z
-    .string()
-    .max(32)
-    .optional()
-    .transform(s => s?.trim().toLowerCase() || undefined),
-  // The sending computer. Omitted means "unknown" — we record nothing rather
-  // than mislabelling it as the machine running this server.
-  machine: z.string().max(64).optional(),
-  // The sending computer's operating system (#33): `win32` | `wsl` | `linux`
-  // | `darwin` | … Same rule as `machine` — omitted means "unknown" and is
-  // recorded as null, because a relayed thread did not come from this
-  // server's OS. It is the fact that makes a `/mnt/<letter>` path comparison
-  // sound rather than assumed, so guessing it would be worse than lacking it.
-  os: z.string().max(32).optional(),
-  project: z.object({
-    externalId: z.string(),
-    name: z.string(),
-    path: z.string().optional(),
-  }),
-  session: z.object({
-    externalId: z.string(),
-    title: z.string(),
-    startedAt: z.string().transform(s => new Date(s)),
-    endedAt: z.string().transform(s => new Date(s)).optional(),
-  }),
-  messages: z.array(IngestMessageSchema),
-})
-
-export type IngestPayload = z.infer<typeof IngestPayloadSchema>
+// The schema lives in ingest-schema.ts so the edge acceptor (mcp-gateway/)
+// can share it without pulling in the Postgres client; re-exported here so
+// existing importers keep working.
+export { IngestPayloadSchema, type IngestPayload }
 
 // A new source's class decides who sees its data (issue #60): defaulting it
 // silently was the bug, so creating a source now demands an explicit choice.

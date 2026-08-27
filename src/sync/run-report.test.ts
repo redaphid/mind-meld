@@ -14,7 +14,9 @@ const result = (over: Partial<FullSyncResult> = {}): FullSyncResult => ({
     quarantined: 0,
   },
   history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
+  spool: { configured: false, drained: 0, quarantined: 0 },
   embeddings: { messagesEmbedded: 100, sessionsUpdated: 5 },
+  standDown: false,
   errors: [],
   ...over,
 });
@@ -76,6 +78,52 @@ describe('buildRunReport summary', () => {
       result({ history: { entries: 40, malformedLines: 2, invalidTimestamps: 1 } })
     ).lines.join('\n');
     expect(text).toContain('History: 40 entries (2 malformed, 1 unusable timestamps)');
+  });
+
+  // A machine with no spool env set is a normal machine, not an idle one, so
+  // the report says nothing about a spool rather than printing a zero.
+  it('says nothing about the ingest spool when none is configured', () => {
+    const text = buildRunReport(result()).lines.join('\n');
+    expect(text).not.toContain('Ingest spool');
+  });
+
+  it('reports what the ingest spool drained when one is configured', () => {
+    const text = buildRunReport(
+      result({ spool: { configured: true, drained: 4, quarantined: 0 } })
+    ).lines.join('\n');
+    // The spool line carries a quarantine count only when there is one to
+    // carry — a bare "0 quarantined" is noise on every clean run.
+    expect(text).toContain('Ingest spool: 4 drained');
+    expect(text).not.toContain('Ingest spool: 4 drained,');
+  });
+
+  // Spooled payloads land in the same holding pen as file-sync records, so the
+  // one number an operator watches has to count both — a spool quarantine that
+  // only shows on the spool line is data waiting where nobody is looking.
+  it('counts spool quarantines in the total kept in sync_quarantine', () => {
+    const text = buildRunReport(
+      result({
+        claudeCode: {
+          projectsProcessed: 1,
+          sessionsProcessed: 1,
+          messagesInserted: 10,
+          skipped: 0,
+          quarantined: 1,
+        },
+        spool: { configured: true, drained: 4, quarantined: 2 },
+      })
+    ).lines.join('\n');
+    expect(text).toContain('Ingest spool: 4 drained, 2 quarantined');
+    expect(text).toContain('Quarantined: 3 record(s)');
+  });
+
+  // Quarantine is the designed holding pen on this path too: spooled payloads
+  // waiting for a replay must not make the run exit nonzero.
+  it('still exits zero when only the spool quarantined something', () => {
+    const report = buildRunReport(
+      result({ spool: { configured: true, drained: 0, quarantined: 2 } })
+    );
+    expect(report.exitCode).toBe(0);
   });
 
   // Errors were previously only visible as a count in logs nobody read; the

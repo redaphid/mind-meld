@@ -11,11 +11,15 @@ cd "$(dirname "$0")/.."
 
 # Point at the published host ports. dotenv does not override already-set vars,
 # so these win over the in-container hostnames baked into .env.
-export POSTGRES_HOST=localhost
+#
+# 127.0.0.1, never `localhost`: Ollama binds IPv4 only (127.0.0.1:11434, nothing
+# on ::1), so a `localhost` that resolves to IPv6 first fails against a server
+# that is up and healthy. Same literal for the DB ports, for the same reason.
+export POSTGRES_HOST=127.0.0.1
 export POSTGRES_PORT=5433
-export CHROMA_HOST=localhost
+export CHROMA_HOST=127.0.0.1
 export CHROMA_PORT=8001
-export OLLAMA_URL=http://localhost:11434
+export OLLAMA_URL=http://127.0.0.1:11434
 
 INTERVAL="${SYNC_INTERVAL_SECONDS:-3600}"
 while true; do

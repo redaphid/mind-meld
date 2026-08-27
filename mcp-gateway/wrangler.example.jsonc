@@ -1,0 +1,52 @@
+// Copy to wrangler.jsonc and fill in your values. wrangler.jsonc is
+// gitignored because this repository is public and these values name real
+// infrastructure (hostnames, Access AUD tags, allowed emails).
+{
+  "name": "mcp-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "kv_namespaces": [
+    {
+      // The OAuth provider's storage: grants, tokens, registered clients.
+      "binding": "OAUTH_KV",
+      "id": "<your-kv-namespace-id>"
+    }
+  ],
+  "r2_buckets": [
+    {
+      // Durable spool for POST /ingest/<service>; drained by the host's sync
+      // loop through the /spool routes.
+      "binding": "INGEST_SPOOL",
+      "bucket_name": "mindmeld-ingest-spool"
+    }
+  ],
+  "routes": [
+    {
+      "pattern": "mcp-gateway.example.com",
+      "custom_domain": true
+    }
+  ],
+  "vars": {
+    // Origins are <service>.<ORIGIN_DOMAIN>/mcp
+    "ORIGIN_DOMAIN": "example.com",
+    // Which <service> names are proxyable — the allowlist, comma-separated
+    "MCP_SERVICES": "mindmeld",
+    // Your Cloudflare Zero Trust team domain
+    "ACCESS_TEAM_DOMAIN": "<team>.cloudflareaccess.com",
+    // AUD tag of the Access app protecting <gateway-host>/authorize
+    "ACCESS_AUD": "<access-app-aud>",
+    // AUD tag of the Access app protecting <gateway-host>/ingest — a separate
+    // app whose policy is Service Auth (any_valid_service_token)
+    "INGEST_ACCESS_AUD": "<ingest-app-aud>",
+    // Service-token client ids allowed to drain the spool (read it back);
+    // any valid token may push
+    "DRAIN_CLIENTS": "<drain-token-client-id>.access",
+    // Who may authorize; both comma-separated, either may be empty,
+    // but with neither set the gateway denies everyone
+    "ALLOWED_EMAILS": "<you@example.com>",
+    "ALLOWED_EMAIL_DOMAINS": "example.com"
+  }
+  // Secrets, set with `wrangler secret put`:
+  //   CF_ACCESS_CLIENT_ID      Access service token id (ends in .access)
+  //   CF_ACCESS_CLIENT_SECRET  Access service token secret
+}

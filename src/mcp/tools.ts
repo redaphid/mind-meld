@@ -16,6 +16,7 @@ import {
 } from './session.js'
 import { getHealth, formatHealth } from './health.js'
 import { resolveTitle } from './title.js'
+import { saveNote, formatSavedNote } from './notes.js'
 
 // THE tool surface. Both transports — stdio (server.ts) and Streamable HTTP
 // (http-server.ts) — register from here and declare nothing of their own.
@@ -323,6 +324,36 @@ Call this proactively whenever you get useless results back from search.`,
         return { content: [{ type: 'text', text: `Session ${sessionId} not found or already deleted.` }] }
       if (reason) console.error(`Session ${sessionId} reported as useless: ${reason}`)
       return { content: [{ type: 'text', text: `Session ${sessionId} soft-deleted.` }] }
+    }
+  )
+
+  server.tool(
+    'saveNote',
+    `Explicitly save a short freeform note into mindmeld's store - for capturing
+something worth keeping right now (a decision, a reminder, a fact) rather than
+waiting for a full conversation to sync and get indexed later.
+
+This is the tool to reach for from a client with no transcript-sync pipeline
+of its own (e.g. Claude web/mobile via claude.ai) - without it, nothing typed
+there ever reaches the index, unlike Claude Code sessions which sync
+automatically.
+
+Stored as its own one-message session under a dedicated source classified
+dataClass "notes" - the same convention already used by other non-coding
+sources (Vikunja, agent-ops). The session summary is set to the note text
+immediately, so it is searchable by full text and by session-tier match right
+away, with no wait on the async summarizer.
+
+IMPORTANT: search() defaults to dataClass ["coding"]. A saved note will NOT
+show up in a default search - pass dataClass: ["notes"] (or ["*"]) to reach it.
+Use search/getSession/getMessages to find and read notes back later.`,
+    {
+      text: z.string().min(1).describe('The note content to save'),
+      title: z.string().optional().describe('Optional short title. Derived from the note text when omitted.'),
+    },
+    async ({ text, title }) => {
+      const note = await saveNote({ text, title })
+      return { content: [{ type: 'text', text: formatSavedNote(note) }] }
     }
   )
 

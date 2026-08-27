@@ -1,4 +1,5 @@
 import { query } from '../db/postgres.js'
+import { pendingMessagesCount, pendingSessionsCount } from '../embeddings/pending.js'
 
 // Is the embedding queue actually being worked off, and when does it end?
 //
@@ -154,19 +155,24 @@ export const clampWindow = (minutes: unknown): number => {
   return Math.min(1440, Math.max(1, Math.round(n)))
 }
 
-// `pending` and the embeddable filter deliberately match /status's definition
-// (content_text over 10 chars, no row in convo-messages) — two screens
-// disagreeing about how much work is left is worse than either number alone.
-// `summariesPending` is held to the same rule: it is /status's pending-sessions
-// query verbatim (http-server.ts), so the pending-sessions pill and the queue
-// state that explains it cannot contradict each other.
+// `pending` matches /status's definition — two screens disagreeing about how
+// much work is left is worse than either number alone — and, since both now
+// import it from `src/embeddings/pending.ts`, it also matches what the embedder
+// will actually pick up.
 //
-// That predicate — "content_chars GREW past the watermark" — is also the one
-// `updateAggregateEmbeddings` selects sessions with (batch.ts), so this count
-// reflects what the embedder will actually pick up rather than a second
-// opinion about it. #108 argues the growth test should be a change test at
-// every site; whether it does or not, these are the same string in three
-// places and they have to move together.
+// That second half is the fix. This comment used to claim the two were the same
+// thing; they were not. `pending` counted rows `getMessagesToEmbed` skips by
+// design: tool messages, deleted and automated sessions, and anything carrying
+// an UNEMBEDDABLE marker (noise, or text that failed past its retry budget).
+// Observed 2026-08-03: 32,339 reported pending — 30,961 noise-marked, 1,376 in
+// deleted sessions, 2 tool messages — against ZERO real work. A residue that
+// never drains also pins `state` to `draining` and extrapolates an ETA from
+// arrival noise, which is how this file advertised a finish date 14 months out
+// for a queue that was already finished.
+//
+// #108 argues the growth test should be a change test at every site; whether it
+// does or not, the predicate now lives in one place and must not be restated
+// here.
 export const getThroughput = async (windowMinutes: number): Promise<ThroughputReport> => {
   const [
     pending,
@@ -176,11 +182,10 @@ export const getThroughput = async (windowMinutes: number): Promise<ThroughputRe
     summariesPending,
     summarizedInWindow,
   ] = await Promise.all([
-    query<{ count: string }>(`
-      SELECT COUNT(*) as count FROM messages m
-      LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'
-      WHERE m.content_text IS NOT NULL AND LENGTH(m.content_text) > 10 AND e.id IS NULL
-    `),
+    (() => {
+      const q = pendingMessagesCount()
+      return query<{ count: string }>(q.sql, q.params)
+    })(),
     query<{ count: string }>(`
       SELECT COUNT(*) as count FROM embeddings WHERE chroma_collection = 'convo-messages'
     `),
@@ -196,13 +201,10 @@ export const getThroughput = async (windowMinutes: number): Promise<ThroughputRe
          AND content_text IS NOT NULL AND LENGTH(content_text) > 10`,
       [String(windowMinutes)]
     ),
-    query<{ count: string }>(`
-      SELECT COUNT(*) as count FROM sessions s
-      LEFT JOIN embeddings e ON e.chroma_collection = 'convo-sessions' AND e.chroma_id = 'session-' || s.id::text
-      WHERE s.deleted_at IS NULL
-        AND s.message_count > 0
-        AND (e.id IS NULL OR s.content_chars > COALESCE(e.content_chars_at_embed, 0))
-    `),
+    (() => {
+      const q = pendingSessionsCount('convo-sessions')
+      return query<{ count: string }>(q.sql, q.params)
+    })(),
     // The completion signal for the slow phase: `updateAggregateEmbeddings`
     // writes this row immediately after the summary comes back from the LLM,
     // so a row here means a session finished, not that one was attempted.

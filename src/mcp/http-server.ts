@@ -17,7 +17,12 @@ import { getSessionDigest, getMessages, getMessageById } from './session.js'
 import { createMcpServer } from './tools.js'
 import { getSyncStatus } from '../sync/orchestrator.js'
 import { startSyncRun, getSyncRunState } from './sync-run.js'
+import { pendingMessagesCount, pendingSessionsCount } from '../embeddings/pending.js'
 import { getThroughput, clampWindow } from './throughput.js'
+import { readSystemStatus } from './system-status.js'
+import { getSummaryStatus } from './summary-status.js'
+import { getEmbeddingSeries, clampSeriesWindow } from './embedding-series.js'
+import { readStandDown, standDown, resumeSync } from '../sync/stand-down.js'
 import { getCollectionStats } from '../db/chroma.js'
 import { config } from '../config.js'
 import { ensureEmbeddingModel } from '../embeddings/ollama.js'
@@ -198,19 +203,20 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
       LIMIT 10
     `)
 
-    const pendingMessages = await query<{ count: string }>(`
-      SELECT COUNT(*) as count FROM messages m
-      LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'
-      WHERE m.content_text IS NOT NULL AND LENGTH(m.content_text) > 10 AND e.id IS NULL
-    `)
+    // Both counts use the embedder's own predicate (src/embeddings/pending.ts),
+    // so what this screen calls pending is what a worker will actually pick up.
+    // Counting anything looser advertised a 32k backlog against zero real work.
+    const pendingMessagesQuery = pendingMessagesCount()
+    const pendingMessages = await query<{ count: string }>(
+      pendingMessagesQuery.sql,
+      pendingMessagesQuery.params,
+    )
 
-    const pendingSessions = await query<{ count: string }>(`
-      SELECT COUNT(*) as count FROM sessions s
-      LEFT JOIN embeddings e ON e.chroma_collection = 'convo-sessions' AND e.chroma_id = 'session-' || s.id::text
-      WHERE s.deleted_at IS NULL
-        AND s.message_count > 0
-        AND (e.id IS NULL OR s.content_chars > COALESCE(e.content_chars_at_embed, 0))
-    `)
+    const pendingSessionsQuery = pendingSessionsCount(config.chroma.collections.sessions)
+    const pendingSessions = await query<{ count: string }>(
+      pendingSessionsQuery.sql,
+      pendingSessionsQuery.params,
+    )
 
     const quarantined = await countPending()
 
@@ -657,6 +663,50 @@ app.post('/api/sync', apiRoute('Sync run', async (_req, res) => {
 
 app.get('/api/sync', apiRoute('Sync run state', async (_req, res) => {
   res.json({ status: 'ok', run: getSyncRunState() })
+}))
+
+// Live health of the three dependencies that can each stall the pipeline on
+// their own — the Ollama gate, Chroma, and CPU/GPU load. Every field is a probe
+// with its own timeout, so this answers even when all three are down.
+app.get('/api/system', apiRoute('System status', async (_req, res) => {
+  res.json({ status: 'ok', ...(await readSystemStatus()) })
+}))
+
+// The slow phase on its own terms: what is being summarized right now, how far
+// back the queue reaches, and whether more than one worker is duplicating it.
+app.get('/api/summaries', apiRoute('Summary status', async (_req, res) => {
+  res.json({ status: 'ok', ...(await getSummaryStatus()) })
+}))
+
+// The pipeline over time rather than averaged into one rate — the graph on the
+// overview. `minutes` sets the span (default 360, clamped to 10..1440); the
+// bucket size is derived from it to keep roughly 60 points.
+app.get('/api/embedding-series', apiRoute('Embedding series', async (req, res) => {
+  res.json({ status: 'ok', ...(await getEmbeddingSeries(clampSeriesWindow(req.query.minutes))) })
+}))
+
+// The stand-down switch: "stop what you are doing and pick it up next cycle."
+//
+// GET is safe to poll; the UI counts `secondsRemaining` down locally rather
+// than re-deriving it from `until` against a client clock that may disagree
+// with the server's.
+app.get('/api/stand-down', apiRoute('Stand-down state', async (_req, res) => {
+  res.json({ status: 'ok', ...(await readStandDown()) })
+}))
+
+// POST asks ingestion to stand down for `minutes` (clamped 1..240, default 15).
+// Deliberately a short deadline rather than a pause flag — a forgotten press
+// costs one cycle, and cannot freeze the index. `reason` is free text shown on
+// the dashboard so a stand-down can say who asked and why.
+app.post('/api/stand-down', apiRoute('Stand down', async (req, res) => {
+  const { minutes, reason } = req.body ?? {}
+  res.json({ status: 'ok', ...(await standDown(minutes, reason ?? null)) })
+}))
+
+// Clearing the deadline rather than waiting it out: "I finished playing, get
+// back to work" should not cost the rest of the window.
+app.post('/api/stand-down/resume', apiRoute('Resume sync', async (_req, res) => {
+  res.json({ status: 'ok', ...(await resumeSync()) })
 }))
 
 app.post('/api/ingest', async (req: any, res: any) => {

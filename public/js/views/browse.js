@@ -5,7 +5,8 @@
 import { html, useState } from 'preact'
 import { useApi } from '../api.js'
 import { useRoute, navigate } from '../router.js'
-import { Card, Spinner, ErrorBox, Empty, Pill, SessionRow } from '../ui.js'
+import { Spinner, ErrorBox, Empty, Pill } from '../ui.js'
+import { DisclosureRow, DisclosureHint } from '../disclosure.js'
 import { fmtNum, timeAgo, sourceLabel, shortPath } from '../util.js'
 
 const PAGE = 30
@@ -105,9 +106,8 @@ const SessionList = ({ projectId }) => {
         ${data.total > PAGE ? ` · showing ${offset + 1}–${offset + data.count}` : ''}
       </div>
       ${data.sessions.length === 0 && html`<${Empty}>Nothing here.<//>`}
-      ${data.sessions.map(
-        sn => html`<${SessionRow} key=${sn.id} session=${sn} snippet=${sn.summary} />`
-      )}
+      ${data.sessions.length > 0 && html`<${DisclosureHint} />`}
+      ${data.sessions.map(sn => html`<${DisclosureRow} key=${sn.id} session=${sn} />`)}
       ${data.total > PAGE &&
       html`<div class="pager">
         <button class="btn sm" disabled=${offset === 0} onClick=${() => setOffset(Math.max(0, offset - PAGE))}>

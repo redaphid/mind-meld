@@ -28,8 +28,14 @@ export function buildRunReport(result: FullSyncResult): RunReport {
       `(${result.history.malformedLines} malformed, ${result.history.invalidTimestamps} unusable timestamps)`
   );
   lines.push(`  Embeddings: ${result.embeddings.messagesEmbedded} embedded`);
+  if (result.spool.configured) {
+    lines.push(
+      `  Ingest spool: ${result.spool.drained} drained` +
+        (result.spool.quarantined > 0 ? `, ${result.spool.quarantined} quarantined` : '')
+    );
+  }
 
-  const quarantined = result.claudeCode.quarantined;
+  const quarantined = result.claudeCode.quarantined + result.spool.quarantined;
   if (quarantined > 0) {
     lines.push(
       `  Quarantined: ${quarantined} record(s) kept in sync_quarantine — waiting, not lost. ` +

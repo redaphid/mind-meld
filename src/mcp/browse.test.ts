@@ -70,6 +70,14 @@ describe('listSessions', () => {
     expect(result.items[0]).toMatchObject({ id: 1, chunkCount: 3, messageCount: 5 })
   })
 
+  // started_at is the session's FIRST message, and a session key can span years.
+  // Ordering the list on it buries a thread that was active minutes ago below
+  // sessions that merely began more recently.
+  it('orders by last activity rather than by when the session began', async () => {
+    await listSessions({ limit: 10, offset: 0 })
+    expect(sql()).toContain('ORDER BY COALESCE(s.ended_at, s.started_at) DESC NULLS LAST')
+  })
+
   it('is empty, not zero-length-undefined, when nothing matches', async () => {
     const result = await listSessions({ limit: 10, offset: 0 })
     expect(result).toEqual({ total: 0, items: [] })
@@ -87,6 +95,13 @@ describe('listProjects', () => {
     await listProjects()
     expect(sql()).toContain('s.deleted_at IS NULL')
   })
+
+  // The column is called last_activity_at and it sorts the project list; taking
+  // it from started_at made it the date of the project's oldest conversation.
+  it('takes last activity from the newest message, not the oldest', async () => {
+    await listProjects()
+    expect(sql()).toContain('MAX(COALESCE(s.ended_at, s.started_at)) AS last_activity_at')
+  })
 })
 
 describe('getActivity', () => {
@@ -94,6 +109,13 @@ describe('getActivity', () => {
     await getActivity(30)
     expect(sql()).toContain('generate_series')
     expect(params()).toEqual([30])
+  })
+
+  // A thread that began in 2014 and received a message tonight belongs in
+  // tonight's bar, not in a bar eleven years off the left of the chart.
+  it('buckets a session on its last activity', async () => {
+    await getActivity(30)
+    expect(sql()).toContain('ON COALESCE(s.ended_at, s.started_at) >= span.day')
   })
 
   it('coerces the counts postgres returns as strings', async () => {

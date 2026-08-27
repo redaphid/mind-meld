@@ -8,6 +8,10 @@ vi.mock('../embeddings/batch.js', () => ({
   updateAggregateEmbeddings: vi.fn(),
   AGGREGATE_BATCH_SIZE: 100,
 }))
+// The spool drain runs first in the default runner; unconfigured (the default
+// below, and the production default) it is a no-op.
+const { drainIngestSpool } = vi.hoisted(() => ({ drainIngestSpool: vi.fn() }))
+vi.mock('../sync/ingest-spool.js', () => ({ drainIngestSpool }))
 
 import {
   generatePendingEmbeddings,
@@ -19,6 +23,12 @@ import {
   awaitSyncRun,
   resetSyncRunState,
 } from './sync-run.js'
+
+const NO_SPOOL = { configured: false, drained: 0, quarantined: 0, errors: [] }
+
+beforeEach(() => {
+  drainIngestSpool.mockReset().mockResolvedValue(NO_SPOOL)
+})
 
 // The button behind this is one anyone can hold down. What matters is that a
 // second press cannot start a second drain — two would compete for the same
@@ -197,6 +207,79 @@ describe('the default ingestion run', () => {
     it('records the failure and never touches the aggregates', () => {
       expect(getSyncRunState().error).toBe('GPU is in use by other applications right now')
       expect(updateAggregateEmbeddings).not.toHaveBeenCalled()
+    })
+  })
+
+  // In a containers-only deployment this run is the only thing that ever drains
+  // the edge spool, so what it drained has to reach the state the UI reads —
+  // otherwise the work is invisible and looks like nothing happened.
+  describe('when the ingest spool is configured', () => {
+    beforeEach(() => {
+      vi.mocked(generatePendingEmbeddings).mockResolvedValue({
+        processed: 5,
+        skipped: 0,
+        errors: 0,
+      } as any)
+      vi.mocked(updateAggregateEmbeddings).mockResolvedValue({
+        sessionsUpdated: 0,
+        sessionsReembedded: 0,
+        sessionsFetched: 0,
+      })
+    })
+
+    it('reports what the spool drained alongside the embedding counts', async () => {
+      drainIngestSpool.mockResolvedValue({
+        configured: true,
+        drained: 3,
+        quarantined: 1,
+        errors: [],
+      })
+      startSyncRun()
+      await awaitSyncRun()
+
+      const state = getSyncRunState()
+      expect(state.spoolDrained).toBe(3)
+      expect(state.spoolQuarantined).toBe(1)
+      expect(state.messagesEmbedded).toBe(5)
+      expect(state.error).toBeNull()
+    })
+
+    // Spool errors are transport-level — the payloads themselves are already
+    // safe in sync_quarantine — so they are reported without costing the
+    // embedding half of the run, which is the expensive half.
+    it('surfaces spool errors without aborting the embedding pass', async () => {
+      drainIngestSpool.mockResolvedValue({
+        configured: true,
+        drained: 0,
+        quarantined: 0,
+        errors: ['ingest spool list failed: HTTP 503', 'ingest spool unreachable: Error: reset'],
+      })
+      startSyncRun()
+      await awaitSyncRun()
+
+      const state = getSyncRunState()
+      expect(state.error).toBe(
+        'ingest spool list failed: HTTP 503; ingest spool unreachable: Error: reset'
+      )
+      expect(state.messagesEmbedded).toBe(5)
+      expect(generatePendingEmbeddings).toHaveBeenCalledOnce()
+    })
+
+    // Order matters: what the spool lands is exactly what the embedding pass
+    // below it should then pick up, in the same press of the button.
+    it('drains the spool before embedding', async () => {
+      drainIngestSpool.mockResolvedValue({
+        configured: true,
+        drained: 1,
+        quarantined: 0,
+        errors: [],
+      })
+      startSyncRun()
+      await awaitSyncRun()
+
+      expect(drainIngestSpool.mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(generatePendingEmbeddings).mock.invocationCallOrder[0]
+      )
     })
   })
 })

@@ -1,17 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const { query, insertMessage, updateSessionStats, getSessionByExternalId } = vi.hoisted(() => ({
-  query: vi.fn(),
-  insertMessage: vi.fn(),
-  updateSessionStats: vi.fn(),
-  getSessionByExternalId: vi.fn(),
-}))
+const { query, insertMessage, updateSessionStats, getSessionByExternalId, ingestConversation } =
+  vi.hoisted(() => ({
+    query: vi.fn(),
+    insertMessage: vi.fn(),
+    updateSessionStats: vi.fn(),
+    getSessionByExternalId: vi.fn(),
+    ingestConversation: vi.fn(),
+  }))
 
 vi.mock('../db/postgres.js', () => ({
   query,
   queries: { insertMessage, updateSessionStats, getSessionByExternalId },
 }))
 vi.mock('../config.js', () => ({ config: { machine: 'test-box' } }))
+// Replaying a spooled ingest reaches ingest.ts, which reaches chroma and ollama
+// through search.ts. Quarantining stays testable with nothing but Postgres
+// behind it — which is exactly why that import is lazy in the first place.
+vi.mock('../mcp/ingest.js', () => ({ ingestConversation }))
 
 const { quarantine, encodePayload, decodePayload, replayQuarantine, listQuarantine } = await import(
   './quarantine.js'
@@ -24,6 +30,7 @@ beforeEach(() => {
   insertMessage.mockReset().mockResolvedValue(1)
   updateSessionStats.mockReset().mockResolvedValue(undefined)
   getSessionByExternalId.mockReset().mockResolvedValue(null)
+  ingestConversation.mockReset().mockResolvedValue({})
 })
 
 const input = (over = {}) => ({
@@ -280,5 +287,89 @@ describe('listQuarantine', () => {
     const result = await listQuarantine({ limit: 10, offset: 0, withPayload: true })
     expect(result.items[0].payload).toBe('raw line')
     expect(result.total).toBe(1)
+  })
+})
+
+// A spooled ingest is a whole conversation, not a Claude transcript line, so
+// replay has to dispatch on the source — feeding an IngestPayload to
+// parseClaudeLine would fail every retry forever and look like bad data.
+describe('replaying a quarantined spool payload', () => {
+  const payload = JSON.stringify({
+    source: 'huddle',
+    project: { externalId: 'C01', name: '#platform-team' },
+    session: { externalId: 'huddle-1', title: 'Rollout sync', startedAt: '2026-07-30T14:30:00Z' },
+    messages: [
+      {
+        externalId: 'huddle-1-0',
+        role: 'user',
+        content: 'before or after the migration?',
+        timestamp: '2026-07-30T14:30:12Z',
+        sequenceNum: 0,
+      },
+    ],
+  })
+
+  const spoolRow = (over = {}) => ({
+    id: 9,
+    source: 'ingest_spool',
+    machine: 'test-box',
+    file_path: 'https://gateway.example.com/ingest/mindmeld',
+    record_key: 'a.json',
+    line_number: null,
+    session_external_id: null,
+    session_id: null,
+    project_id: null,
+    stage: 'insert',
+    error: 'dataClass is required',
+    attempts: 1,
+    first_seen_at: '2026-08-01T00:00:00Z',
+    last_attempt_at: '2026-08-01T00:00:00Z',
+    resolved_at: null,
+    payload_base64: encodePayload(payload),
+    ...over,
+  })
+
+  it('replays it through ingestConversation and marks it resolved', async () => {
+    query.mockResolvedValueOnce({ rows: [spoolRow()] }).mockResolvedValue({ rows: [] })
+
+    const result = await replayQuarantine({ limit: 10 })
+
+    expect(result).toMatchObject({ attempted: 1, recovered: 1 })
+    expect(ingestConversation).toHaveBeenCalledOnce()
+    // The stored JSON goes back through the same schema the drain used, so the
+    // timestamps arrive as Dates and not as the strings they were spooled as.
+    const sent = ingestConversation.mock.calls[0][0]
+    expect(sent.source).toBe('huddle')
+    expect(sent.session.startedAt).toBeInstanceOf(Date)
+    expect(sent.messages[0].timestamp).toBeInstanceOf(Date)
+    // None of the Claude-transcript machinery applies to this row.
+    expect(insertMessage).not.toHaveBeenCalled()
+    expect(getSessionByExternalId).not.toHaveBeenCalled()
+    expect(query.mock.calls.some(c => String(c[0]).includes('SET resolved_at = NOW()'))).toBe(true)
+  })
+
+  it('keeps the row and bumps the attempt when the ingest fails again', async () => {
+    query.mockResolvedValueOnce({ rows: [spoolRow()] }).mockResolvedValue({ rows: [] })
+    ingestConversation.mockRejectedValueOnce(new Error('dataClass is required'))
+
+    const result = await replayQuarantine({ limit: 10 })
+
+    expect(result).toMatchObject({ attempted: 1, recovered: 0 })
+    expect(result.outcomes[0].error).toContain('dataClass is required')
+    expect(query.mock.calls.some(c => String(c[0]).includes('attempts = attempts + 1'))).toBe(true)
+  })
+
+  // The payload was quarantined *because* it was rejected, so a schema-invalid
+  // one has to report rather than throw out of the batch.
+  it('reports a payload the schema still rejects instead of throwing', async () => {
+    query
+      .mockResolvedValueOnce({ rows: [spoolRow({ payload_base64: encodePayload('{"not":"a payload"}') })] })
+      .mockResolvedValue({ rows: [] })
+
+    const result = await replayQuarantine({ limit: 10 })
+
+    expect(result).toMatchObject({ attempted: 1, recovered: 0 })
+    expect(result.outcomes[0].error).toBeTruthy()
+    expect(ingestConversation).not.toHaveBeenCalled()
   })
 })
