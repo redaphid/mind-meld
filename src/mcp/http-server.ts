@@ -516,6 +516,10 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
       cwd,
       projectOnly: boolParam(req.query.projectOnly),
       includeAutomated: boolParam(req.query.includeAutomated),
+      // Deprecated and inert (issue #119) — still forwarded rather than dropped
+      // at the door, so a caller that sends it gets the same answer as before
+      // instead of a 400 on an argument that used to be required to see half
+      // the index. /api/sessions below is a different filter; it still applies.
       includeUnsummarized: boolParam(req.query.includeUnsummarized),
       dataClass,
       // Without these two, the default-excluded tag set would be a ONE-WAY

@@ -511,9 +511,10 @@ describe('search title resolution (#95)', () => {
     expect(hit?.title_source).toBe('summary')
   })
 
-  // Reachable only via includeUnsummarized, since an unsummarized session is
-  // otherwise withheld — but when it is reached, it must not carry a guess.
-  it('reports no title rather than inventing one when there is no summary yet', async () => {
+  // A session-tier hit on an unsummarized session has nothing to build a snippet
+  // from either, so there is no matched text to stand in (#119) and the answer
+  // must stay an honest null rather than a guess.
+  it('reports no title rather than inventing one when there is no summary and no snippet', async () => {
     query.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (typeof sql === 'string' && sql.includes('s.id = $1'))
         return params?.[0] === 2 ? rows(sessionRow({ id: 2, title: null, summary: null })) : rows()
@@ -521,8 +522,9 @@ describe('search title resolution (#95)', () => {
     })
     mockChromaSessionsOnly()
 
-    const results = await search({ query: 'anything', mode: 'semantic', includeUnsummarized: true })
+    const results = await search({ query: 'anything', mode: 'semantic' })
     const hit = results.find(r => r.session_id === 2)
+    expect(hit?.snippet).toBeNull()
     expect(hit?.title).toBeNull()
     expect(hit?.title_source).toBe('none')
   })
@@ -549,46 +551,152 @@ describe('search title resolution (#95)', () => {
   })
 })
 
-// Operator direction on #95: "let's not even surface sessions until they are
-// properly summarized and indexed." An unsummarized session has no real title
-// and no session-tier vector, so surfacing it puts an untriageable row in front
-// of the caller. It is withheld by default and reachable on request.
-describe('unsummarized sessions are withheld (#95)', () => {
-  it('does not return a session that has no summary', async () => {
-    query.mockImplementation(async (sql: string, params?: unknown[]) => {
-      if (typeof sql === 'string' && sql.includes('s.id = $1'))
-        return params?.[0] === 2 ? rows(sessionRow({ id: 2, title: null, summary: null })) : rows()
+// Issue #119 reversed the #95-era withholding. The justification was that an
+// unsummarized session has no title and no session-tier vector — but no
+// session-tier vector means it could never arrive at the session tier anyway, so
+// the filter only ever dropped message-tier hits, which are the ones carrying a
+// highlighted snippet and a cursor. It hid 60% of the live index, worst exactly
+// when the summarizer was behind.
+describe('unsummarized sessions are searched by default (#119)', () => {
+  const unsummarizedMessageHit = () => {
+    query.mockImplementation(async (sql: string) => {
+      if (typeof sql === 'string' && sql.includes('WHERE m.id = $1'))
+        return rows({
+          ...sessionRow({ id: 2, title: null, summary: null }),
+          message_id: 900,
+          content_text: 'the deploy failed on migration 022',
+        })
       return rows()
     })
-    mockChromaSessionsOnly()
+    querySimilar.mockImplementation(async (collection: string) =>
+      collection === 'convo-messages'
+        ? { ids: [['msg-900']], distances: [[0.2]] }
+        : { ids: [[]], distances: [[]] }
+    )
+  }
 
-    expect(await search({ query: 'anything', mode: 'semantic' })).toEqual([])
-  })
+  it('returns a message-tier hit from a session that has no summary', async () => {
+    unsummarizedMessageHit()
 
-  it('returns it when the caller explicitly asks for unsummarized sessions', async () => {
-    query.mockImplementation(async (sql: string, params?: unknown[]) => {
-      if (typeof sql === 'string' && sql.includes('s.id = $1'))
-        return params?.[0] === 2 ? rows(sessionRow({ id: 2, title: null, summary: null })) : rows()
-      return rows()
-    })
-    mockChromaSessionsOnly()
-
-    const results = await search({ query: 'anything', mode: 'semantic', includeUnsummarized: true })
+    const results = await search({ query: 'deploy', mode: 'semantic' })
     expect(results.map(r => r.session_id)).toEqual([2])
+    expect(results[0].matched_tier).toBe('message')
+    expect(results[0].cursor).toEqual({ message_id: 900 })
   })
 
-  it('withholds them in the text arm too, not only the semantic arms', async () => {
+  it('returns the same thing whether or not the retired flag is passed', async () => {
+    unsummarizedMessageHit()
+    const without = await search({ query: 'deploy', mode: 'semantic' })
+    query.mockClear()
+    querySimilar.mockClear()
+    unsummarizedMessageHit()
+    const with_ = await search({ query: 'deploy', mode: 'semantic', includeUnsummarized: true })
+    expect(with_).toEqual(without)
+  })
+
+  it('no longer filters on summary in the text arm either', async () => {
     query.mockResolvedValue(rows())
     await search({ query: 'anything', mode: 'text' })
     const ftsCall = query.mock.calls.find(c => String(c[0]).includes('ranked_messages'))
-    expect(String(ftsCall?.[0])).toContain('s.summary IS NOT NULL')
+    expect(String(ftsCall?.[0])).not.toContain('s.summary IS NOT NULL')
+  })
+})
+
+// An untitled row headed by nothing but an id cannot be triaged, so the text
+// that matched takes the title's place — labelled, per-query, never stored.
+describe('an untitled hit is headed by its matched text (#119)', () => {
+  const ftsRow = (over: Row = {}) => ({
+    session_id: 2,
+    message_id: 900,
+    title: null,
+    summary: null,
+    project_name: 'proj',
+    project_path: '/p/proj',
+    source_name: 'claude_code',
+    data_class: 'coding',
+    started_at: new Date('2026-01-01T00:00:00Z'),
+    message_count: 10,
+    rank: 0.9,
+    project_id: 7,
+    headline: 'the **deploy** failed on migration 022',
+    ...over,
   })
 
-  it('drops that condition when unsummarized sessions are requested', async () => {
-    query.mockResolvedValue(rows())
-    await search({ query: 'anything', mode: 'text', includeUnsummarized: true })
-    const ftsCall = query.mock.calls.find(c => String(c[0]).includes('ranked_messages'))
-    expect(String(ftsCall?.[0])).not.toContain('s.summary IS NOT NULL')
+  const mockFts = (over: Row = {}) => {
+    query.mockImplementation(async (sql: string) =>
+      typeof sql === 'string' && sql.includes('ranked_messages') ? rows(ftsRow(over)) : rows()
+    )
+  }
+
+  it('uses the matched text as the title, marked as such', async () => {
+    mockFts()
+
+    const results = await search({ query: 'deploy', mode: 'text' })
+    expect(results[0].title).toBe('the deploy failed on migration 022')
+    expect(results[0].title_source).toBe('snippet')
+  })
+
+  it('keeps the highlight markers in the snippet and out of the title', async () => {
+    mockFts()
+
+    const results = await search({ query: 'deploy', mode: 'text' })
+    expect(results[0].snippet).toContain('**deploy**')
+    expect(results[0].title).not.toContain('**')
+  })
+
+  // No snippet means there is nothing to promote. The row must stay untitled
+  // rather than acquire an empty heading, and title_source must not claim
+  // 'snippet' for a title it did not supply.
+  it('leaves an untitled hit untitled when there is no snippet to promote', async () => {
+    mockFts({ headline: null })
+
+    const results = await search({ query: 'deploy', mode: 'text' })
+    expect(results[0].title).toBeNull()
+    expect(results[0].title_source).not.toBe('snippet')
+  })
+
+  // A headline that is nothing but highlight markers strips to an empty
+  // string. Heading the row with blank space is worse than leaving it
+  // untitled, so an empty result falls back rather than being promoted.
+  it('does not promote a snippet that is empty once the markers are stripped', async () => {
+    mockFts({ headline: '** **' })
+
+    const results = await search({ query: 'deploy', mode: 'text' })
+    expect(results[0].title).toBeNull()
+    expect(results[0].title_source).not.toBe('snippet')
+  })
+
+  it('leaves a real title alone', async () => {
+    mockFts({ title: 'Fixing the build' })
+
+    const results = await search({ query: 'deploy', mode: 'text' })
+    expect(results[0].title).toBe('Fixing the build')
+    expect(results[0].title_source).toBe('source')
+  })
+
+  it('renders the matched text where the title goes, without repeating it', async () => {
+    const formatted = formatSearchResults([
+      {
+        session_id: 4268,
+        project_name: 'proj',
+        project_path: '/p/proj',
+        source: 'claude_code',
+        data_class: 'coding',
+        title: 'the deploy failed on migration 022',
+        title_source: 'snippet',
+        date: new Date('2026-01-01T00:00:00Z'),
+        score: 0.5,
+        matched_tier: 'message',
+        snippet: 'the **deploy** failed on migration 022',
+        cursor: { message_id: 900 },
+      },
+    ])
+    expect(formatted).toContain('1. the **deploy** failed on migration 022 — _matched text')
+    expect(formatted).toContain('Cursor: message 900')
+    // Once in the headline, not again underneath: one terse line per hit.
+    expect(formatted.match(/failed on migration 022/g)).toHaveLength(1)
+    // Never bolded like a real title — that is the visual tell.
+    expect(formatted).not.toContain('**the **deploy**')
   })
 })
 

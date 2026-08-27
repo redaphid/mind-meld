@@ -4,17 +4,19 @@
 // tools; these mappers are the single seam between the two, so the HTTP
 // contract can stay stable while the query layer evolves.
 
-import type { SearchResult } from './search.js'
+import type { SearchResult, SearchTitleSource } from './search.js'
 import type { TitleSource } from './title.js'
 import type { SessionDigest, MessagesResult, RenderedMessage, SessionMessage } from './session.js'
 
 export type SearchHitDto = {
   sessionId: number
-  // Null when the session has no source-supplied title and is not yet
-  // summarized. `titleSource` distinguishes a real title from a derived one,
-  // so a client never has to guess whether a title means anything (issue #95).
+  // Null when the session has no source-supplied title, is not yet summarized,
+  // and the hit carries no matched text to stand in. `titleSource` distinguishes
+  // a real title from a derived one, so a client never has to guess whether a
+  // title means anything (issue #95) — `snippet` means it is the matched region,
+  // not a topic (issue #119).
   title: string | null
-  titleSource: TitleSource
+  titleSource: SearchTitleSource
   project: string
   projectPath: string | null
   source: string

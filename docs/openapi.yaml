@@ -355,11 +355,13 @@ paths:
             default: false
         - name: includeUnsummarized
           in: query
+          deprecated: true
           description: |
-            Include sessions that have not been summarized yet. Excluded by
-            default: such a session has no title and no session-level vector, so
-            it can only arrive as an untriageable result. Pass true to reach the
-            indexing backlog deliberately (issue #95).
+            No-op, kept for one release so existing callers do not break. Sessions
+            that have not been summarized yet are searched by default now: the
+            filter could only ever remove message-tier hits — the ones carrying a
+            highlighted snippet and a cursor — and on the live index it withheld
+            60% of sessions (issue #119).
           schema:
             type: boolean
             default: false
@@ -1858,22 +1860,26 @@ components:
           type: integer
         title:
           description: |
-            The session's title, resolved and returned whole. Null when the
-            session has no source-supplied title and has not been summarized
-            yet — a title is never fabricated from message content, because a
-            misleading title is worse for triage than an absent one. Use
-            `snippet` and `titleSource` in that case.
+            The session's title, resolved and returned whole. When the session has
+            no source-supplied title and has not been summarized yet, this is the
+            matched text instead (`titleSource: snippet`, highlight markers
+            stripped — they stay in `snippet`), so an untitled hit is still
+            triageable. Null only when there is no matched text either. A title is
+            never fabricated from unrelated message content, because a misleading
+            title is worse for triage than an absent one.
           oneOf:
             - type: 'null'
             - type: string
         titleSource:
           description: |
             How the title was obtained. `source` means the origin system supplied
-            it; `summary` means it was derived from the session summary; `none`
-            means the session has neither and `title` is null. A title is never
-            fabricated from message content (issue #95).
+            it; `summary` means it was derived from the session summary; `snippet`
+            means the session has neither and `title` holds the region this query
+            matched, not a topic (issue #119); `none` means it has none of those
+            and `title` is null. A title is never fabricated from message content
+            unrelated to the query (issue #95).
           type: string
-          enum: [source, summary, none]
+          enum: [source, summary, snippet, none]
         project:
           type: string
         projectPath:
