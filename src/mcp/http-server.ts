@@ -524,6 +524,14 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
       // nothing could ever ask to see them again.
       tags: listParam(req.query.tag),
       excludeTags: listParam(req.query.excludeTag),
+      // Same one-way-door argument as the two above, and the same fix.
+      // ?includeNoise=true lifts both the "useless" hiding and the ranking
+      // penalty, so the UI and curl can reach reported noise for debugging.
+      //
+      // Deliberately NOT added to docs/openapi.yaml: that file is a BIND MOUNT
+      // into the running container, so editing it deploys. Documenting the new
+      // REST params is task 334, same as 327's.
+      includeNoise: boolParam(req.query.includeNoise),
     })
   } catch (error) {
     // A typo'd class is a caller mistake, not a server fault — 400, with the
