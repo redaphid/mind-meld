@@ -54,10 +54,11 @@ vi.mock('./tags.js', () => ({
   defaultExcludedTags: () => ['useless'],
 }))
 
-const doSaveNote = vi.fn(async () => ({ sessionId: 42, title: 'a note', dataClass: 'notes' }))
+const doWriteNote = vi.fn(async () => ({ sessionId: 42, title: 'a note', dataClass: 'notes', tags: ['note'] }))
 vi.mock('./notes.js', () => ({
-  saveNote: (...args: unknown[]) => doSaveNote(...(args as [])),
-  formatSavedNote: () => 'SAVED NOTE',
+  writeNote: (...args: unknown[]) => doWriteNote(...(args as [])),
+  formatWrittenNote: () => 'WRITTEN NOTE',
+  NOTE_TAG: 'note',
 }))
 
 const { createMcpServer } = await import('./tools.js')
@@ -104,6 +105,7 @@ const EXPECTED_TOOLS = [
   'saveNote',
   'search',
   'stats',
+  'writeNote',
 ]
 
 describe('shared MCP tool surface', () => {
@@ -287,14 +289,69 @@ describe('every advertised tool executes', () => {
     await client.close()
   })
 
-  it('runs saveNote, passing text and title through to the notes layer', async () => {
+  it('runs writeNote, passing text, title and tags through to the notes layer', async () => {
+    const client = await connect()
+    const result = await client.callTool({
+      name: 'writeNote',
+      arguments: { text: 'remember this', title: 'Reminder', tags: ['decision'] },
+    })
+    expect(text(result)).toBe('WRITTEN NOTE')
+    expect(doWriteNote).toHaveBeenCalledWith({
+      text: 'remember this',
+      title: 'Reminder',
+      tags: ['decision'],
+    })
+    await client.close()
+  })
+
+  // The automatic "note" tag is applied in the notes layer, not here, so the
+  // tool must NOT accept it as an argument or pre-seed it — otherwise a caller
+  // could reasonably think it was optional.
+  it('offers tags on writeNote without asking the caller to supply the automatic one', async () => {
+    const write = (await advertisedTools()).find(t => t.name === 'writeNote')!
+    const properties = (write.inputSchema as { properties: Record<string, unknown> }).properties
+    expect(properties).toHaveProperty('tags')
+
+    const client = await connect()
+    await client.callTool({ name: 'writeNote', arguments: { text: 'no tags given' } })
+    expect(doWriteNote).toHaveBeenLastCalledWith({ text: 'no tags given', title: undefined, tags: undefined })
+    await client.close()
+  })
+
+  // Task 329 renamed this tool from the earlier `saveNote` draft, and this
+  // file used to assert the old name was NOT offered. That assertion was
+  // correct only while `saveNote` had never shipped. v1.22.0 released #131 and
+  // put it on the live tool surface, so removing the name outright would break
+  // callers already using it; his ruling is to keep it briefly, deprecated.
+  //
+  // Both halves of the shim are asserted on purpose, so that deleting one
+  // without the other fails here rather than in production.
+  it('still advertises the deprecated saveNote name alongside writeNote', async () => {
+    const names = (await advertisedTools()).map(t => t.name)
+    expect(names).toContain('writeNote')
+    expect(names).toContain('saveNote')
+  })
+
+  it('marks saveNote deprecated and points at writeNote, so an LLM prefers the new name', async () => {
+    const save = (await advertisedTools()).find(t => t.name === 'saveNote')!
+    expect(save.description ?? '').toMatch(/DEPRECATED/)
+    expect(save.description ?? '').toContain('writeNote')
+  })
+
+  // The alias must be the SAME write path, not a second one - a note written
+  // through the old name would otherwise miss the automatic "note" tag.
+  it('routes saveNote through writeNote, so the alias is not a second write path', async () => {
     const client = await connect()
     const result = await client.callTool({
       name: 'saveNote',
       arguments: { text: 'remember this', title: 'Reminder' },
     })
-    expect(text(result)).toBe('SAVED NOTE')
-    expect(doSaveNote).toHaveBeenCalledWith({ text: 'remember this', title: 'Reminder' })
+    expect(text(result)).toBe('WRITTEN NOTE')
+    expect(doWriteNote).toHaveBeenLastCalledWith({
+      text: 'remember this',
+      title: 'Reminder',
+      tags: undefined,
+    })
     await client.close()
   })
 

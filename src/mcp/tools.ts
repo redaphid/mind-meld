@@ -16,8 +16,8 @@ import {
 } from './session.js'
 import { getHealth, formatHealth } from './health.js'
 import { resolveTitle } from './title.js'
-import { saveNote, formatSavedNote } from './notes.js'
 import { applyTags, removeTags, getTags, formatTagWrite, defaultExcludedTags, type TagTarget } from './tags.js'
+import { writeNote, formatWrittenNote, NOTE_TAG } from './notes.js'
 
 // addTag/removeTag both take an optional sessionId and an optional messageId
 // and require exactly one. Which granularity to use is the tagging agent's
@@ -429,32 +429,87 @@ reported, not an error.`,
   )
 
   server.tool(
-    'saveNote',
-    `Explicitly save a short freeform note into mindmeld's store - for capturing
-something worth keeping right now (a decision, a reminder, a fact) rather than
-waiting for a full conversation to sync and get indexed later.
+    'writeNote',
+    `Write something into mindmeld deliberately, so it is searchable later.
 
-This is the tool to reach for from a client with no transcript-sync pipeline
-of its own (e.g. Claude web/mobile via claude.ai) - without it, nothing typed
-there ever reaches the index, unlike Claude Code sessions which sync
-automatically.
+Everything else in mindmeld arrived by syncing a transcript off disk. This is
+the one tool that puts something in on purpose — reach for it to capture a
+decision, a fact, or a reminder now, rather than hoping a conversation about it
+gets synced and indexed later. It is also the only write path available to a
+client with no transcript of its own (Claude web/mobile via claude.ai), where
+nothing typed would otherwise ever reach the index.
 
-Stored as its own one-message session under a dedicated source classified
-dataClass "notes" - the same convention already used by other non-coding
-sources (Vikunja, agent-ops). The session summary is set to the note text
-immediately, so it is searchable by full text and by session-tier match right
-away, with no wait on the async summarizer.
+FREESTANDING: a note stands on its own. It does not attach to a session or a
+message, and there is no parameter to make it do so.
 
-IMPORTANT: search() defaults to dataClass ["coding"]. A saved note will NOT
-show up in a default search - pass dataClass: ["notes"] (or ["*"]) to reach it.
-Use search/getSession/getMessages to find and read notes back later.`,
+TAGS: every note is automatically tagged "${NOTE_TAG}" — you do not pass it and
+you cannot turn it off. That tag is what distinguishes something written on
+purpose from synced material, so search({ tags: ["${NOTE_TAG}"] }) returns
+notes and nothing else. Any additional tags are yours to choose; the vocabulary
+is open, so invent whatever is useful and expect no error for a new word.
+
+Stored as its own one-message session under a source classified dataClass
+"notes", the convention other non-coding sources already use (Vikunja,
+agent-ops). The session summary is set to the note text immediately, so it is
+searchable by full text and by session-tier match right away, with no wait on
+the async summarizer.
+
+IMPORTANT: search() defaults to dataClass ["coding"]. A note will NOT show up
+in a plain search — pass dataClass: ["notes"] (or ["*"]) to reach it. Use
+search/getSession/getMessages to find and read notes back later.`,
     {
-      text: z.string().min(1).describe('The note content to save'),
+      text: z.string().min(1).describe('The note content to write'),
       title: z.string().optional().describe('Optional short title. Derived from the note text when omitted.'),
+      tags: z
+        .array(z.string())
+        .optional()
+        .describe(`Optional extra tags, on top of the automatic "${NOTE_TAG}" tag. Free-form — any word or phrase.`),
     },
-    async ({ text, title }) => {
-      const note = await saveNote({ text, title })
-      return { content: [{ type: 'text', text: formatSavedNote(note) }] }
+    async ({ text, title, tags }) => {
+      const note = await writeNote({ text, title, tags })
+      return { content: [{ type: 'text', text: formatWrittenNote(note) }] }
+    }
+  )
+
+  // DEPRECATED ALIAS - kept deliberately, and only briefly.
+  //
+  // When this branch was written, `saveNote` had never shipped, so renaming it
+  // to `writeNote` cost nothing and this file deliberately offered no alias.
+  // That stopped being true with v1.22.0, which released #131 and put
+  // `saveNote` on the live tool surface. Removing a name the running server
+  // already advertises would break callers mid-flight, so the old name stays
+  // through one deprecation window.
+  //
+  // This is the SAME implementation, not a second write path: it delegates to
+  // writeNote and so gets the automatic "note" tag on exactly the same terms.
+  //
+  // REMOVAL CONDITION - this is a migration shim, not a permanent dual
+  // surface. Delete this whole `server.tool('saveNote', ...)` block, and the
+  // 'saveNote' entry in EXPECTED_TOOLS plus the three saveNote tests in
+  // tools.test.ts, in the first release cut after one full release cycle
+  // passes with no observed `saveNote` call.
+  //
+  // The alias lives ONLY here, on the tool surface. notes.ts deliberately
+  // exports no `saveNote` binding - this handler calls writeNote() directly -
+  // so removal is confined to this file and its test.
+  server.tool(
+    'saveNote',
+    `DEPRECATED - use writeNote instead. This name is kept only so callers
+written against the v1.22.0 tool surface keep working, and it will be removed.
+
+Behaviour is identical to writeNote, including the automatic "${NOTE_TAG}" tag.
+See writeNote for the full description.`,
+    {
+      text: z.string().min(1).describe('The note content to write'),
+      title: z.string().optional().describe('Optional short title. Derived from the note text when omitted.'),
+      tags: z
+        .array(z.string())
+        .optional()
+        .describe(`Optional extra tags, on top of the automatic "${NOTE_TAG}" tag. Free-form - any word or phrase.`),
+    },
+    async ({ text, title, tags }) => {
+      const note = await writeNote({ text, title, tags })
+      return { content: [{ type: 'text', text: formatWrittenNote(note) }] }
     }
   )
 
