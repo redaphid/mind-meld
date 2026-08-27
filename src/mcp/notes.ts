@@ -18,14 +18,14 @@ import { applyTags } from './tags.js'
 // spec and the framing there ("mindmeld is read-only to agents; this is the
 // write path").
 //
-// This branch originally argued for no `saveNote` alias on the grounds that
-// the name had never shipped. That reasoning expired: v1.22.0 released #131,
-// so `saveNote` IS on the live tool surface and callers can already be using
-// it. The old name is kept briefly, but only where it is actually observable:
-// as an MCP tool named `saveNote` in tools.ts, which delegates to writeNote().
-// There is deliberately no alias EXPORT here - nothing imports one, and two
-// exported bindings for one function is duplicate surface with no caller.
-// The removal condition lives with the registration in tools.ts.
+// An earlier draft called this `saveNote`, and v1.22.0 (#131) did briefly ship
+// that name on the live tool surface. It is deliberately NOT carried forward.
+// This is a rename, not a dual surface: two names for one write path leaves a
+// calling LLM guessing which to reach for. tools.test.ts asserts that
+// `saveNote` is not advertised, so it cannot creep back as a convenience.
+//
+// The consequence is accepted knowingly. When this merges, the `saveNote` tool
+// that v1.22.0 published stops being offered and callers move to `writeNote`.
 
 export type WriteNoteParams = {
   text: string

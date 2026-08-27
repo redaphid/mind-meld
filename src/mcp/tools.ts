@@ -471,48 +471,6 @@ search/getSession/getMessages to find and read notes back later.`,
     }
   )
 
-  // DEPRECATED ALIAS - kept deliberately, and only briefly.
-  //
-  // When this branch was written, `saveNote` had never shipped, so renaming it
-  // to `writeNote` cost nothing and this file deliberately offered no alias.
-  // That stopped being true with v1.22.0, which released #131 and put
-  // `saveNote` on the live tool surface. Removing a name the running server
-  // already advertises would break callers mid-flight, so the old name stays
-  // through one deprecation window.
-  //
-  // This is the SAME implementation, not a second write path: it delegates to
-  // writeNote and so gets the automatic "note" tag on exactly the same terms.
-  //
-  // REMOVAL CONDITION - this is a migration shim, not a permanent dual
-  // surface. Delete this whole `server.tool('saveNote', ...)` block, and the
-  // 'saveNote' entry in EXPECTED_TOOLS plus the three saveNote tests in
-  // tools.test.ts, in the first release cut after one full release cycle
-  // passes with no observed `saveNote` call.
-  //
-  // The alias lives ONLY here, on the tool surface. notes.ts deliberately
-  // exports no `saveNote` binding - this handler calls writeNote() directly -
-  // so removal is confined to this file and its test.
-  server.tool(
-    'saveNote',
-    `DEPRECATED - use writeNote instead. This name is kept only so callers
-written against the v1.22.0 tool surface keep working, and it will be removed.
-
-Behaviour is identical to writeNote, including the automatic "${NOTE_TAG}" tag.
-See writeNote for the full description.`,
-    {
-      text: z.string().min(1).describe('The note content to write'),
-      title: z.string().optional().describe('Optional short title. Derived from the note text when omitted.'),
-      tags: z
-        .array(z.string())
-        .optional()
-        .describe(`Optional extra tags, on top of the automatic "${NOTE_TAG}" tag. Free-form - any word or phrase.`),
-    },
-    async ({ text, title, tags }) => {
-      const note = await writeNote({ text, title, tags })
-      return { content: [{ type: 'text', text: formatWrittenNote(note) }] }
-    }
-  )
-
   server.prompt(
     'context',
     'Find relevant past conversations for your current project',
