@@ -11,7 +11,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
-import { search, findProjectsByPath, UnknownDataClassError } from './search.js'
+import { searchWithDiagnostics, findProjectsByPath, UnknownDataClassError } from './search.js'
 import { IngestPayloadSchema, ingestConversation, MissingDataClassError } from './ingest.js'
 import { getSessionDigest, getMessages, getMessageById } from './session.js'
 import { createMcpServer } from './tools.js'
@@ -475,6 +475,18 @@ const intParam = (raw: unknown, fallback: number) => {
 
 const boolParam = (raw: unknown) => raw === 'true' || raw === '1'
 
+// A repeatable OR comma-separated query param: ?tag=a&tag=b and ?tag=a,b both
+// give ["a","b"]. Absent stays undefined, which every caller below distinguishes
+// from an empty list -- "not asked for" and "asked for nothing" mean different
+// things to the search layer.
+const listParam = (raw: unknown): string[] | undefined => {
+  if (raw === undefined) return undefined
+  const parts = (Array.isArray(raw) ? raw.map(String) : String(raw).split(','))
+    .map((s) => s.trim())
+    .filter(Boolean)
+  return parts.length > 0 ? parts : undefined
+}
+
 // Search over the same index the MCP tool uses — same fusion, same filters —
 // returning the structured results rather than the MCP text rendering.
 app.get('/api/search', apiRoute('Search', async (req, res) => {
@@ -490,17 +502,11 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
 
   // ?dataClass=coding&dataClass=personal or ?dataClass=coding,personal both
   // work; absent means the search-layer default (coding only).
-  const rawDataClass = req.query.dataClass
-  const dataClass =
-    rawDataClass === undefined
-      ? undefined
-      : (Array.isArray(rawDataClass) ? rawDataClass.map(String) : String(rawDataClass).split(','))
-          .map(s => s.trim())
-          .filter(Boolean)
+  const dataClass = listParam(req.query.dataClass)
 
-  let results
+  let outcome
   try {
-    results = await search({
+    outcome = await searchWithDiagnostics({
       query: q,
       negativeQuery: typeof req.query.not === 'string' ? req.query.not : undefined,
       mode: mode && ['semantic', 'text', 'hybrid'].includes(mode) ? mode : 'hybrid',
@@ -515,7 +521,13 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
       // instead of a 400 on an argument that used to be required to see half
       // the index. /api/sessions below is a different filter; it still applies.
       includeUnsummarized: boolParam(req.query.includeUnsummarized),
-      dataClass: dataClass?.length ? dataClass : undefined,
+      dataClass,
+      // Without these two, the default-excluded tag set would be a ONE-WAY
+      // DOOR over HTTP: a search here still hides "useless"-tagged sessions
+      // (the filter lives in the search layer, not the tool layer), but
+      // nothing could ever ask to see them again.
+      tags: listParam(req.query.tag),
+      excludeTags: listParam(req.query.excludeTag),
     })
   } catch (error) {
     // A typo'd class is a caller mistake, not a server fault — 400, with the
@@ -533,9 +545,14 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
     status: 'ok',
     query: q,
     mode: mode ?? 'hybrid',
-    count: results.length,
+    count: outcome.results.length,
     projectIds,
-    results: results.map(toSearchHit),
+    // Additive and null on a healthy search, so nothing that ignores it breaks.
+    // Non-null means the vector arms were skipped and these results came from
+    // full text alone — the difference between "no such conversation" and "the
+    // GPU gate was shut", which are indistinguishable from the results list.
+    degraded: outcome.degraded,
+    results: outcome.results.map(toSearchHit),
   })
 }))
 

@@ -29,10 +29,28 @@ Routing is by naming convention, so adding a server is adding a name to a list:
 https://<gateway-host>/mcp/<service>   ->   https://<service>.<ORIGIN_DOMAIN>/mcp
 ```
 
-`MCP_SERVICES` is the allowlist of which names are real. Origins keep their
+One of those names can be the default, and then the path is optional:
+
+```
+https://<gateway-host>/mcp   ->   https://<DEFAULT_MCP_SERVICE>.<ORIGIN_DOMAIN>/mcp
+https://<gateway-host>/      ->   the same
+```
+
+That exists for the aggregator case: when one server already fronts every
+other, naming it in the URL is ceremony, and `https://<gateway-host>/mcp` is
+the endpoint to hand to a client. Publishing the root means an unauthenticated
+`GET /` is a `401` challenge rather than a landing page; the OAuth endpoints
+are matched ahead of it and are unaffected.
+
+`MCP_SERVICES` is the allowlist of which names are real, and the default is
+resolved through it like any other name. Origins keep their
 Access protection and need no changes; the gateway authenticates to them with
 an Access **service token**, and forwards the authorized user's email as
 `X-Forwarded-Email` for any origin that cares.
+
+`ADD-MCP-HUB.md` walks the whole of that end to end for a second service — the
+deploy, the Access application, the tunnel hostname, and what each credential
+is allowed to see.
 
 Security decisions worth knowing before touching this:
 
@@ -70,7 +88,8 @@ Cloudflare-side setup (dashboard or API), once per gateway:
    step 2.
 
 Then in claude.ai: Settings → Connectors → Add custom connector →
-`https://<gateway-host>/mcp/<service>`. Discovery, registration and the
+`https://<gateway-host>/mcp` (or `https://<gateway-host>/mcp/<service>` to
+reach one that is not the default). Discovery, registration and the
 Access-backed login all follow from there.
 
 ## The ingest spool
@@ -102,8 +121,17 @@ content. The host configures `INGEST_SPOOL_URL` / `INGEST_SPOOL_CLIENT_ID` /
 
 ```bash
 H=https://<gateway-host>
+curl $H/.well-known/oauth-protected-resource/mcp             # 200, JSON
 curl $H/.well-known/oauth-protected-resource/mcp/<service>   # 200, JSON
 curl $H/.well-known/oauth-authorization-server               # 200, JSON
+curl -X POST $H/mcp                                          # 401 + WWW-Authenticate: Bearer
 curl -X POST $H/mcp/<service>                                # 401 + WWW-Authenticate: Bearer
 curl -i $H/authorize                                         # 302 into your Access login
 ```
+
+Each metadata document's `resource` must equal the URL a client actually
+calls, and the `resource_metadata` in the `401` challenge must point back at
+that document. Both are derived from the request path, so they agree by
+construction — but a mismatch is invisible except as a connector that will not
+add, so it is worth reading the two outputs against each other after any
+change to routing.

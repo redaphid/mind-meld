@@ -2,13 +2,14 @@ import assert from 'node:assert'
 import { query } from '../db/postgres.js'
 import { querySimilar } from '../db/chroma.js'
 import { config } from '../config.js'
-import { getOllamaClient } from '../embeddings/ollama.js'
+import { getInteractiveOllamaClient } from '../embeddings/ollama.js'
 import { subtractVectors, normalizeVector, addVectors, scaleVector } from '../utils/vector-math.js'
 import { projectPathVariants, isWindowsBackedPath } from '../utils/project-path.js'
 import { fuseRanks, type RankedList } from './rrf.js'
 import { buildSnippet, ts_headline_options } from './snippet.js'
 import { resolveTitle, type TitleSource } from './title.js'
 import { parseSinceDate } from './since.js'
+import { resolveTagFilter, passesTagFilter, getSessionTags, type TagFilter } from './tags.js'
 import { LAST_ACTIVITY_SQL, lastActivity } from './last-activity.js'
 
 const PROJECT_BOOST = 0.5
@@ -38,6 +39,13 @@ export type SearchParams = {
   // existing callers do not break on an argument that used to matter.
   includeUnsummarized?: boolean
   dataClass?: string[]
+  // Open-vocabulary agent tags (src/mcp/tags.ts). `tags` narrows to things
+  // carrying any of them; `excludeTags` hides things carrying any of them, on
+  // top of the configured default-excluded set. Unknown tags are NOT an error
+  // here -- an unused tag simply matches nothing, which is the honest answer
+  // for a vocabulary anyone may extend at any time.
+  tags?: string[]
+  excludeTags?: string[]
 }
 
 // Which effective data classes this search may see. null means unfiltered.
@@ -119,6 +127,9 @@ export type SearchResult = {
   matched_tier: MatchedTier
   snippet: string | null
   cursor?: SearchCursor
+  // Session-level tags, attached after ranking so a caller can see what a
+  // result has been judged as without a second call. Absent when untagged.
+  tags?: string[]
 }
 
 // A session can be hit by several arms; we keep the first (best-ranked) hit's
@@ -144,8 +155,15 @@ const parseWeightedIds = (params: string[]): WeightedId[] =>
     })
     .filter((item) => item.id.length > 0)
 
+// Search is the one Ollama caller with a person waiting on it, so it uses the
+// interactive client: one attempt, seconds not minutes, and no waiting out a
+// GPU-gate cooldown. When that fails the semantic arms are skipped and the
+// caller is told the results are full-text only — see `degraded` below.
 const getQueryEmbedding = async (text: string) => {
-  const response = await getOllamaClient().embed({ model: config.embeddings.model, input: text })
+  const response = await getInteractiveOllamaClient().embed({
+    model: config.embeddings.model,
+    input: text,
+  })
   return response.embeddings[0]
 }
 
@@ -380,6 +398,12 @@ const baseResult = (s: SessionRow, score: number, tier: MatchedTier): SearchResu
   snippet: null,
 })
 
+// `messageId` is the message this hit is anchored to, when there is one. It
+// only matters to the tag filter, which can hide an individual message without
+// hiding its whole session -- see passesTagFilter for why that asymmetry
+// exists. Session-anchored arms pass nothing and are judged on session tags
+// alone.
+
 // No summary filter here, deliberately (issue #119). Withholding unsummarized
 // sessions was meant to keep untriageable rows out, on the reasoning that such a
 // session has no title and no session-tier vector — but the second half of that
@@ -395,16 +419,40 @@ const passesFilters = (
   params: { source?: string; projectOnly?: boolean },
   sinceDate: Date | null,
   projectIds: number[],
-  dataClasses: string[] | null
+  dataClasses: string[] | null,
+  tagFilter: TagFilter,
+  messageId?: number
 ) => {
   if (dataClasses && !dataClasses.includes(session.data_class)) return false
   if (params.source && session.source_name !== params.source) return false
   if (sinceDate && lastActivity(session) < sinceDate) return false
   if (params.projectOnly && !projectIds.includes(session.project_id)) return false
+  if (!passesTagFilter(tagFilter, session.id, messageId)) return false
   return true
 }
 
-export const search = async (params: SearchParams): Promise<SearchResult[]> => {
+// Why a search returned less than it was asked for, or null when it ran whole.
+//
+// The semantic arms need a query vector, and the only thing that can produce
+// one is an Ollama behind a GPU gate that is entitled to say "not now".
+// Full-text needs nothing but Postgres, so it still works — and handing those
+// results back immediately is better than making someone wait for a vector that
+// is not coming. What must not happen is handing them back *silently*: full
+// text matches words, not meaning, so a caller who believes it got a semantic
+// search will read far too much into a miss.
+export type SearchDegradation = {
+  // The semantic arms were skipped. In hybrid mode the results are full-text
+  // only; in `semantic` mode there are no results at all.
+  semantic: false
+  reason: string
+}
+
+export type SearchOutcome = {
+  results: SearchResult[]
+  degraded: SearchDegradation | null
+}
+
+export const searchWithDiagnostics = async (params: SearchParams): Promise<SearchOutcome> => {
   const limit = params.limit ?? 8
   const mode = params.mode ?? 'hybrid'
   const includeAutomated = params.includeAutomated ?? false
@@ -423,6 +471,10 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
   const sinceDate = parseSinceDate(params.since)
   const dataClasses = resolveDataClasses(params)
   if (dataClasses) await assertKnownDataClasses(dataClasses)
+  // Resolved once and shared by every arm. Note this runs even with no tag
+  // params: the configured default-excluded set ("useless") applies to a plain
+  // search too, which is the whole point of it being a default.
+  const tagFilter = await resolveTagFilter(params)
   // Chroma knows nothing about data classes, so an active class filter can
   // starve the semantic arms (~70% of sessions may be filtered out after the
   // fetch). Over-fetch harder when a filter is on to compensate.
@@ -439,6 +491,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
   const hitBySession = new Map<number, Hit>()
   const inProject = new Set<number>()
   const rankedLists: RankedList[] = []
+  let degraded: SearchDegradation | null = null
 
   // First arm to claim a session wins its tier/cursor/snippet source. Arms run
   // session → chunk → message → fts; later, fusion across all arms decides rank.
@@ -472,7 +525,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
           const score = 1 - (sessionHits.distances?.[0]?.[i] ?? 1)
           const session = await getSessionById(sessionId, includeAutomated)
           if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses)) continue
+          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
           record(baseResult(session, score, 'session'), session.project_id, session.summary, null)
           sessionRanked.push(session.id)
         }
@@ -488,7 +541,7 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
           const score = 1 - (chunkHits.distances?.[0]?.[i] ?? 1)
           const session = await getSessionByChunkId(chunkId, includeAutomated)
           if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses)) continue
+          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
           if (seen.has(session.id)) continue
           seen.add(session.id)
           const result = baseResult(session, score, 'chunk')
@@ -510,7 +563,8 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
           const score = 1 - (messageHits.distances?.[0]?.[i] ?? 1)
           const session = await getSessionByMessageId(messageId, includeAutomated)
           if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses)) continue
+          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter, session.message_id))
+            continue
           if (seen.has(session.id)) continue
           seen.add(session.id)
           const result = baseResult(session, score, 'message')
@@ -521,7 +575,12 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         rankedLists.push(messageRanked)
       }
     } catch (e) {
-      console.error('Semantic search failed:', e)
+      // Reached in seconds now rather than after ~120s of retrying a shut gate:
+      // getQueryEmbedding uses the interactive client, which does not wait one
+      // out. The reason travels with the results instead of only to the log.
+      const reason = e instanceof Error ? e.message : String(e)
+      console.error('Semantic search failed, returning full-text results only:', reason)
+      degraded = { semantic: false, reason }
     }
   }
 
@@ -555,6 +614,23 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
         `NOT to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $${nextParam++})`
       )
       values.push(params.excludeTerms)
+    }
+
+    // The SAME resolved filter the semantic arms use, pushed into SQL rather
+    // than applied to the rows afterwards. Filtering here matters because this
+    // arm has a LIMIT: dropping tagged rows in JS would let excluded sessions
+    // consume the result budget and silently shrink the answer.
+    if (tagFilter.includedSessions) {
+      conditions.push(`s.id = ANY($${nextParam++}::int[])`)
+      values.push([...tagFilter.includedSessions])
+    }
+    if (tagFilter.excludedSessions.size > 0) {
+      conditions.push(`s.id <> ALL($${nextParam++}::int[])`)
+      values.push([...tagFilter.excludedSessions])
+    }
+    if (tagFilter.excludedMessages.size > 0) {
+      conditions.push(`m.id <> ALL($${nextParam++}::bigint[])`)
+      values.push([...tagFilter.excludedMessages])
     }
 
     values.push(limit * 2)
@@ -639,11 +715,39 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> => {
     return { ...hit.result, score, snippet, ...titleFromSnippet(hit.result, snippet) }
   })
   results.sort((a, b) => b.score - a.score)
-  return results.slice(0, limit)
+
+  // Decorate only the page actually returned, so a wide candidate set costs
+  // one small query rather than one per discarded hit.
+  const page = results.slice(0, limit)
+  const tagsBySession = await getSessionTags(page.map((r) => r.session_id))
+  for (const result of page) {
+    const tags = tagsBySession.get(result.session_id)
+    if (tags && tags.length > 0) result.tags = tags
+  }
+
+  return { results: page, degraded }
 }
 
-export const formatSearchResults = (results: SearchResult[], projectIds: number[] = []) => {
-  if (results.length === 0) return 'No matching conversations found.'
+// The plain form, for callers that have nothing useful to do with the
+// diagnostics. Everything user-facing should prefer searchWithDiagnostics and
+// say when the answer was only half-computed.
+export const search = async (params: SearchParams): Promise<SearchResult[]> =>
+  (await searchWithDiagnostics(params)).results
+
+// An LLM reading this cannot see the log line, and "no results" reads as "this
+// conversation does not exist" — a conclusion it will then act on. So a
+// degraded search says so in the text, including when it found nothing.
+const degradedNote = (degraded: SearchDegradation | null) =>
+  degraded
+    ? `\n\nNOTE: full-text results only — semantic search was unavailable (${degraded.reason}). Meaning-based matches are missing, so absence here is not evidence a conversation does not exist. Retry shortly for a full search.`
+    : ''
+
+export const formatSearchResults = (
+  results: SearchResult[],
+  projectIds: number[] = [],
+  degraded: SearchDegradation | null = null
+) => {
+  if (results.length === 0) return `No matching conversations found.${degradedNote(degraded)}`
 
   const output = results
     .map((r, i) => {
@@ -668,6 +772,9 @@ export const formatSearchResults = (results: SearchResult[], projectIds: number[
       const heading = showsSnippetAsTitle
         ? `${r.snippet} — _matched text; session not summarized yet_`
         : `**${r.title ?? `Session ${r.session_id} (no title — not summarized yet)`}**`
+      // Shown only when there are any, so an untagged corpus reads exactly as
+      // it did before tags existed.
+      const tags = r.tags?.length ? `\n   Tags: ${r.tags.join(', ')}` : ''
       // Printing the snippet again under a headline that already is the snippet
       // is noise in a surface whose whole promise is one terse line per hit.
       const snippetLine = showsSnippetAsTitle ? '' : `\n   ${r.snippet ?? '(no snippet)'}`
@@ -675,9 +782,9 @@ export const formatSearchResults = (results: SearchResult[], projectIds: number[
    Session ID: ${r.session_id}
    Project: ${r.project_name} (${r.source}, ${r.data_class})
    Date: ${r.date.toISOString().split('T')[0]}
-   Score: ${r.score.toFixed(3)} | Matched: ${r.matched_tier}${cursor}${snippetLine}`
+   Score: ${r.score.toFixed(3)} | Matched: ${r.matched_tier}${cursor}${tags}${snippetLine}`
     })
     .join('\n\n')
 
-  return `Found ${results.length} relevant conversations:\n\n${output}`
+  return `Found ${results.length} relevant conversations:\n\n${output}${degradedNote(degraded)}`
 }

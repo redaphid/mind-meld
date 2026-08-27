@@ -72,6 +72,21 @@ export const ingestConversation = async (payload: IngestPayload) => {
   }
 
   await queries.updateSessionStats(sessionId)
+  // update_session_stats() recomputes message_count, tokens and the date range
+  // but deliberately does not touch content_chars, so this second call is not
+  // redundant -- it is the only thing on this path that maintains it.
+  //
+  // Without it content_chars was written by exactly one writer: the embedder,
+  // which sets `sessions.content_chars` and `embeddings.content_chars_at_embed`
+  // to the same number in the same pass. The re-embed predicate in
+  // pending.ts (`s.content_chars > COALESCE(e.content_chars_at_embed, 0)`) then
+  // compares a value against itself and can never be true, so an ingested
+  // session was summarised once and never again no matter how much it grew.
+  // Measured on a live chat thread: content_chars pinned at 1144 against 2207
+  // real characters, its summary two days stale while new messages kept
+  // arriving every few hours.
+  // claude-code.ts and verify.ts already pair the two calls; ingest did not.
+  await queries.updateSessionContentChars(sessionId)
 
   return { sourceId: source.id, projectId, sessionId, messagesInserted, dataClass: source.data_class }
 }

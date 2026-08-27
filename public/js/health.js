@@ -15,7 +15,9 @@ import { fmtNum, fmtExact, timeAgo } from './util.js'
 
 const GB = 1024 * 1024 * 1024
 const fmtGb = bytes => `${(bytes / GB).toFixed(1)} GB`
-const fmtMbAsGb = mb => `${(mb / 1024).toFixed(1)} GB`
+// The gate reports GPU load as a percentage summed over every engine of every
+// non-Ollama process, so values above 100 are real and must not be clamped away.
+const fmtPct = pct => `${Math.round(pct)}%`
 
 const fmtCountdown = seconds => {
   if (seconds == null) return null
@@ -198,22 +200,22 @@ export const LoadCard = ({ system }) => {
           : g.gpuInUseNow
             ? html`<${Pill} kind="warn">GPU busy<//>`
             : html`<${Pill} kind="good">GPU free<//>`}
-        ${g.otherVramMb != null &&
+        ${g.otherUtilPct != null &&
         html`<span class="faint" style="font-size:12px">
-          ${fmtMbAsGb(g.otherVramMb)} held by other programs
-          ${g.busyThresholdMb != null ? ` · over ${fmtMbAsGb(g.busyThresholdMb)} counts as busy` : ''}
+          ${fmtPct(g.otherUtilPct)} used by other programs
+          ${g.busyThresholdPct != null ? ` · over ${fmtPct(g.busyThresholdPct)} counts as busy` : ''}
         </span>`}
       </div>
-      ${g.otherVramMb != null &&
-      g.busyThresholdMb > 0 &&
+      ${g.otherUtilPct != null &&
+      g.busyThresholdPct > 0 &&
       html`<${Bar}
-        value=${Math.min(g.otherVramMb, g.busyThresholdMb * 2)}
-        total=${g.busyThresholdMb * 2}
+        value=${Math.min(g.otherUtilPct, g.busyThresholdPct * 2)}
+        total=${g.busyThresholdPct * 2}
         tone=${g.gpuInUseNow ? 'var(--amber)' : 'var(--green)'}
       />`}
       <div class="faint" style="font-size:11px;margin-top:4px">
         ${g.present
-          ? 'VRAM held by non-Ollama processes, measured by the gate. No container here has GPU access.'
+          ? 'GPU utilization by non-Ollama processes, measured by the gate. No container here has GPU access.'
           : 'No gate present, so GPU load cannot be measured from inside a container.'}
       </div>
 

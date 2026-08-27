@@ -39,6 +39,19 @@ function getEnvBool(key: string, defaultValue: boolean): boolean {
   return value.toLowerCase() === "true" || value === "1";
 }
 
+// A comma-separated env var as a list. An explicitly empty value ("") means an
+// empty list, not "fall back to the default" -- otherwise a setting like
+// MINDMELD_DEFAULT_EXCLUDED_TAGS could never be turned off from the
+// environment, only changed to something else.
+function getEnvList(key: string, defaultValue: string[]): string[] {
+  const value = process.env[key];
+  if (value === undefined) return defaultValue;
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
 export const config = {
   // Which computer this process is running on. Several machines sync into the
   // same database, so every project a sync stamps carries its origin. Falls
@@ -57,6 +70,18 @@ export const config = {
     // observed ~265KB/day for a sync container this is a few MB per machine
     // per fortnight; set 0 to keep everything.
     retentionDays: getEnvInt("LOG_RETENTION_DAYS", 14),
+  },
+
+  tags: {
+    // Tags whose presence hides a session from search unless the caller asks
+    // for them by name. "useless" is the first member and the reason the set
+    // exists: it replaces a separate soft-delete flag with one ordinary tag,
+    // so hiding a session stays reversible (task 326).
+    //
+    // Configurable precisely so a second hidden tag never needs a code change.
+    // Note this is the ONLY place tags are treated specially -- the vocabulary
+    // itself stays open, and nothing here restricts what tags may be created.
+    defaultExcluded: getEnvList("MINDMELD_DEFAULT_EXCLUDED_TAGS", ["useless"]),
   },
 
   // PostgreSQL
@@ -93,6 +118,27 @@ export const config = {
     // running fine.
     url: getEnv("OLLAMA_URL", "http://127.0.0.1:11434"),
     timeoutMs: getEnvInt("OLLAMA_TIMEOUT_MS", 120000), // 2 minutes
+    // The ceiling for a query someone is waiting on, which is a different
+    // question entirely from how long a background batch may take.
+    //
+    // A search embeds its query through the same gated client as the batch
+    // pipeline, so on a closed gate it inherited the batch settings: three
+    // attempts, each Retry-After clamped to retryMaxDelayMs, ~120 seconds of
+    // silence before the caller got FTS-only results anyway. Nobody waits two
+    // minutes for a search box. The vector arm is an *enhancement* over
+    // full-text here — when it cannot be had promptly, the honest move is to
+    // return the full-text results now and say they are degraded.
+    //
+    // Bounds the whole interactive attempt: one try, no retries, and no more
+    // than this long queueing for the tunnel slot either.
+    //
+    // Not tighter than this on purpose. A single request over the SSH tunnel
+    // measures ~4-6s (see maxConcurrency below), so a 4s deadline would keep
+    // cutting off embeds that were about to succeed — and every one of those is
+    // a search quietly answered from full text alone. The failure this bounds
+    // is a gate holding work for minutes; it does not need a tight number to
+    // catch that, and a loose one costs nothing when the vector arrives.
+    interactiveTimeoutMs: getEnvInt("OLLAMA_INTERACTIVE_TIMEOUT_MS", 8000),
     maxRetries: getEnvInt("OLLAMA_MAX_RETRIES", 3),
     retryDelayMs: getEnvInt("OLLAMA_RETRY_DELAY_MS", 5000), // 5 seconds between retries
     // Ceiling on how long a single 503 Retry-After may park a request. A GPU

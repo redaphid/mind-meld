@@ -7,15 +7,22 @@ vi.mock('../db/chroma.js', () => ({ getCollectionStats: vi.fn() }))
 
 const { parseGate, toResidentModels, GATE_ABSENT, readCpu } = await import('./system-status.js')
 
-// A real holding response, as the proxy actually sends it.
+// A holding response in the exact shape ollama-proxy's GET /_gate returns.
+//
+// This fixture previously claimed to be "as the proxy actually sends it" while
+// carrying `other_vram_mb` / `busy_threshold_mb`, keys the proxy has never
+// emitted. Because parseGate maps every field with `?? null`, the mismatch
+// could not throw — it just resolved both to null, and the GPU panel rendered
+// blank forever while this test passed. The load signal is GPU *utilization*
+// percent, summed across engines, so it can exceed 100.
 const HOLDING = {
   open: false,
   gpu_in_use_now: true,
   quiet_seconds: 6,
   required_quiet_seconds: 900,
   hold_reason: 'gpu_busy',
-  other_vram_mb: 9566,
-  busy_threshold_mb: 4000,
+  other_util_pct: 96.4,
+  busy_threshold_pct: 10,
   status: 'GPU is in use by other applications right now.',
 }
 
@@ -28,10 +35,24 @@ describe('parseGate', () => {
       quietSeconds: 6,
       requiredQuietSeconds: 900,
       holdReason: 'gpu_busy',
-      otherVramMb: 9566,
-      busyThresholdMb: 4000,
+      otherUtilPct: 96.4,
+      busyThresholdPct: 10,
       status: 'GPU is in use by other applications right now.',
     })
+  })
+
+  // The regression that left the GPU panel blank: the consumer read MB-named
+  // keys the proxy does not send. Reading a percentage the proxy DOES send is
+  // the contract, and a null here means the panel has nothing to draw.
+  it('reads the utilization keys the proxy emits, not VRAM ones', () => {
+    expect(parseGate(HOLDING).otherUtilPct).toBe(96.4)
+    expect(parseGate({ other_vram_mb: 9566, busy_threshold_mb: 4000 }).otherUtilPct).toBeNull()
+  })
+
+  // Summed across every engine of every non-Ollama process, so >100 is real
+  // and must survive rather than being clamped or rejected.
+  it('keeps a utilization figure above 100 intact', () => {
+    expect(parseGate({ ...HOLDING, other_util_pct: 147.2 }).otherUtilPct).toBe(147.2)
   })
 
   it('passes the proxy status sentence through whole', () => {

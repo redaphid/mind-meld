@@ -6,13 +6,16 @@ vi.mock('../db/postgres.js', () => ({ query: (...args: unknown[]) => query(...ar
 const querySimilar = vi.fn()
 vi.mock('../db/chroma.js', () => ({ querySimilar: (...args: unknown[]) => querySimilar(...args) }))
 
+// Search embeds its query through the INTERACTIVE client — one attempt, a few
+// seconds — because a person is waiting on it. `embed` is a mock so a test can
+// make the query vector unavailable, which is what a shut GPU gate looks like
+// from here.
+const embed = vi.fn(async () => ({ embeddings: [new Array(1024).fill(0.1)] }))
 vi.mock('../embeddings/ollama.js', () => ({
-  getOllamaClient: () => ({
-    embed: async () => ({ embeddings: [new Array(1024).fill(0.1)] }),
-  }),
+  getInteractiveOllamaClient: () => ({ embed: (...args: unknown[]) => embed(...(args as [])) }),
 }))
 
-const { search, resolveDataClasses, formatSearchResults, findProjectsByPath } =
+const { search, searchWithDiagnostics, resolveDataClasses, formatSearchResults, findProjectsByPath } =
   await import('./search.js')
 
 type Row = Record<string, unknown>
@@ -62,6 +65,8 @@ const mockChromaSessionsOnly = () => {
 beforeEach(() => {
   query.mockReset()
   querySimilar.mockReset()
+  embed.mockReset()
+  embed.mockResolvedValue({ embeddings: [new Array(1024).fill(0.1)] })
 })
 
 describe('resolveDataClasses', () => {
@@ -692,6 +697,76 @@ describe('an untitled hit is headed by its matched text (#119)', () => {
     expect(formatted.match(/failed on migration 022/g)).toHaveLength(1)
     // Never bolded like a real title — that is the visual tell.
     expect(formatted).not.toContain('**the **deploy**')
+  })
+})
+
+// A search runs with someone waiting on it, and the vector arm depends on a GPU
+// that is entitled to say "not now". Before this, a shut gate meant ~120s of
+// retries inside the shared client and then full-text results handed back with
+// no indication anything had been skipped — the caller could not tell "no such
+// conversation" from "the semantic half never ran".
+describe('when the query vector cannot be had', () => {
+  const gateShut = () => {
+    embed.mockRejectedValue(new Error('503 GPU is in use by other applications'))
+    query.mockImplementation(async (sql: string) => {
+      if (typeof sql === 'string' && sql.includes('ranked_messages'))
+        return rows({
+          session_id: 2,
+          message_id: 99,
+          title: 'Fixing the build',
+          summary: 'summary',
+          project_name: 'proj',
+          project_path: '/p/proj',
+          source_name: 'claude_code',
+          data_class: 'coding',
+          started_at: new Date('2026-01-01T00:00:00Z'),
+          message_count: 10,
+          rank: 0.9,
+          project_id: 7,
+          headline: 'the <b>build</b>',
+        })
+      return rows()
+    })
+    mockChromaSessionsOnly()
+  }
+
+  beforeEach(gateShut)
+
+  it('still returns the full-text results rather than failing', async () => {
+    const { results } = await searchWithDiagnostics({ query: 'build', mode: 'hybrid' })
+    expect(results.map(r => r.session_id)).toEqual([2])
+  })
+
+  it('says the results are degraded, and why', async () => {
+    const { degraded } = await searchWithDiagnostics({ query: 'build', mode: 'hybrid' })
+    expect(degraded?.semantic).toBe(false)
+    expect(degraded?.reason).toContain('GPU is in use')
+  })
+
+  // One attempt. The retrying client is for background work that must not be
+  // lost; here, waiting out a cooldown is worse than answering now.
+  it('does not retry the embedding', async () => {
+    await searchWithDiagnostics({ query: 'build', mode: 'hybrid' })
+    expect(embed).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports nothing degraded when the vector arrives', async () => {
+    embed.mockResolvedValue({ embeddings: [new Array(1024).fill(0.1)] })
+    mockDbForSemantic()
+    const { degraded } = await searchWithDiagnostics({ query: 'build', mode: 'semantic' })
+    expect(degraded).toBeNull()
+  })
+
+  // An LLM reading the rendered text cannot see the server log, and will treat
+  // an empty result as proof the conversation does not exist.
+  it('warns in the rendered text, including when nothing matched', () => {
+    const note = formatSearchResults([], [], { semantic: false, reason: 'gate shut' })
+    expect(note).toContain('full-text results only')
+    expect(note).toContain('gate shut')
+  })
+
+  it('leaves the rendered text alone on a healthy search', () => {
+    expect(formatSearchResults([])).toBe('No matching conversations found.')
   })
 })
 

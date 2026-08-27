@@ -183,6 +183,59 @@ GROUP BY sess HAVING COUNT(DISTINCT who) > 1
 ORDER BY chunk_passes DESC;
 ```
 
+### A batch that embeds nothing ends the run
+
+`generatePendingEmbeddings` selects from a global queue with `ORDER BY m.id` and
+nothing claims a row, so a batch that embeds nothing leaves *exactly* the same
+rows pending — and the next iteration selects them again. Until 1.21.0 that was
+an infinite loop: `hasMore` was assigned once and never reassigned, and the
+catch around the batch counted the error and continued. With the GPU gate
+answering 503 to every embed, 39 iterations ran in 90 minutes against 260
+pending messages, the error counter passing 3500.
+
+The loop now counts rows that actually **left** the queue (`processed +
+skipped` — embedded, or marked `UNEMBEDDABLE`). `MAX_STALLED_BATCHES`
+consecutive batches that drain nothing end the run, with the reason in
+`BatchEmbeddingStats.stalled`. Two things about this are deliberate:
+
+- **Ending is the safe direction.** The queue is durable and nothing is lost;
+  the next cycle resumes on the same rows. Spinning is what costs — GPU budget,
+  log volume, and the single-flight lock in `src/mcp/sync-run.ts`, which is what
+  greys out "Run ingestion now". One run held it 75+ minutes with zero progress.
+- **Progress is measured, not inferred from exceptions.** A batch whose every
+  message fails summarization throws nothing, embeds nothing and marks nothing —
+  the same infinite loop with the error counter never moving.
+
+`sync-run` treats a stalled embed pass as a reason to skip the aggregate drain
+too: that is the same Ollama through the same gate, only 5-10 minutes per
+session, and the lock is held throughout.
+
+### Interactive search fails fast; background work waits
+
+Both halves reach one Ollama, and they want opposite things from a failure.
+Background work must not be lost, so it retries and waits out a `Retry-After`.
+A search has a person attached to it, and its vector arm is an *enhancement*
+over full-text — so it gets `getInteractiveOllamaClient()`: one attempt,
+`OLLAMA_INTERACTIVE_TIMEOUT_MS`, no cooldown waiting. It previously shared the
+batch client and hung ~120s on a shut gate before returning full-text results
+**silently**.
+
+The bounded wait covers queueing as well as the request. All Ollama traffic in
+a process is serialized through `withOllamaGate`, and in the `mcp` service that
+same process also drains the embedding queue — so a search could sit behind a
+session summarization holding the only slot for minutes without having issued a
+request at all. Capping retries alone would not have fixed it.
+
+When the vector cannot be had, results come back from full text with
+`degraded` set (REST) or a note appended (MCP text). Say so, always: full text
+matches words, not meaning, so a caller told nothing will read an empty result
+as proof the conversation does not exist.
+
+`mcp` is a worker too, and was the one service never given `OLLAMA_TIMEOUT_MS` —
+its background summarization was capped at the 120s default while a chunk pass
+legitimately takes 18-110s. It is set in `docker-compose.override.yml` with the
+others.
+
 ### Why summarization is genuinely slow
 
 Session summarization is the real cost, and it is legitimately expensive: a
@@ -252,8 +305,16 @@ count, so the overview probes each one (`src/mcp/system-status.ts`):
   described above, and its `/_gate` endpoint distinguishes "holding your work
   because a game has the card" from "broken". A plain Ollama 404s that path,
   reported as `present: false`, not as an error.
-- **GPU load** comes from the gate's `other_vram_mb`, because no mindmeld
-  container has GPU access and nothing inside one can run `nvidia-smi`.
+- **GPU load** comes from the gate's `other_util_pct` (with
+  `busy_threshold_pct` as the line above which it counts as busy), because no
+  mindmeld container has GPU access and nothing inside one can run
+  `nvidia-smi`. It is **utilization percent, not VRAM**, summed across every
+  engine of every non-Ollama process — so a value over 100 is real. This doc
+  and `system-status.ts` said `other_vram_mb` / `busy_threshold_mb` until
+  1.21.0; the proxy has never emitted those keys, `parseGate` maps every field
+  with `?? null`, and so the GPU panel sat blank instead of failing. When the
+  gate's payload changes, `src/mcp/system-status.test.ts` holds the fixture
+  that has to change with it.
 - **CPU** is `os.loadavg()`, which is the Docker VM's load and not the host's —
   and is `[0,0,0]` on Windows, hence `loadAvailable`. "Idle" and "not measured"
   must not draw the same empty bar.

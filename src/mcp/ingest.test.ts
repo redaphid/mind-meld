@@ -9,6 +9,7 @@ const { queryMock, queriesMock } = vi.hoisted(() => ({
     upsertSession: vi.fn(),
     insertMessage: vi.fn(),
     updateSessionStats: vi.fn(),
+    updateSessionContentChars: vi.fn(),
   },
 }))
 
@@ -56,6 +57,7 @@ beforeEach(() => {
   queriesMock.upsertSession.mockResolvedValue(11)
   queriesMock.insertMessage.mockResolvedValue(101)
   queriesMock.updateSessionStats.mockResolvedValue(undefined)
+  queriesMock.updateSessionContentChars.mockResolvedValue(undefined)
 })
 
 describe('IngestPayloadSchema dataClass', () => {
@@ -128,6 +130,19 @@ describe('ingestConversation', () => {
     const result = await ingestConversation(twoMessages)
     expect(result.messagesInserted).toBe(1)
     expect(queriesMock.updateSessionStats).toHaveBeenCalledWith(11)
+  })
+
+  // update_session_stats() does not maintain content_chars, so if ingest does
+  // not call this the only writer left is the embedder -- which sets
+  // sessions.content_chars and embeddings.content_chars_at_embed to the same
+  // value in one pass. pending.ts then asks whether content_chars has grown
+  // past a watermark it wrote itself, which is never true, and the session is
+  // summarised once and never again. Observed on a live chat thread:
+  // content_chars pinned at 1144 against 2207 real characters, its summary two
+  // days stale while new messages kept arriving.
+  it('refreshes content_chars so a growing session can be re-summarised', async () => {
+    await ingestConversation(payload({ dataClass: 'meetings' }))
+    expect(queriesMock.updateSessionContentChars).toHaveBeenCalledWith(11)
   })
 
   it('passes the sender machine and OS through, and null when unknown', async () => {
