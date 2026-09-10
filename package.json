@@ -1,6 +1,6 @@
 {
   "name": "@redaphid/mindmeld",
-  "version": "1.23.0",
+  "version": "1.24.0",
   "description": "Unified conversation index for Claude Code with PostgreSQL + Chroma",
   "type": "module",
   "packageManager": "pnpm@10.11.0",
@@ -35,6 +35,7 @@
     "sync:embeddings": "tsx src/index.ts embeddings",
     "summarize:transcript": "tsx scripts/summarize-transcript.ts",
     "verify": "tsx src/index.ts verify",
+    "memories": "tsx src/index.ts memories",
     "compute:centroids": "tsx scripts/compute-centroids.ts",
     "mark:warmups": "tsx scripts/mark-warmups.ts",
     "quarantine": "tsx scripts/retry-quarantine.ts",

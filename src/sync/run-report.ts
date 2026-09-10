@@ -27,6 +27,16 @@ export function buildRunReport(result: FullSyncResult): RunReport {
     `  History: ${result.history.entries} entries ` +
       `(${result.history.malformedLines} malformed, ${result.history.invalidTimestamps} unusable timestamps)`
   );
+  // Memories always print, including the all-zero line. Their whole point is
+  // that they are backed up nowhere else, so "this run looked at them and
+  // found nothing new" has to be visible; silence on a quiet run is
+  // indistinguishable from the phase never running at all.
+  lines.push(
+    `  Memories: ${result.memories.memoriesIndexed} indexed across ` +
+      `${result.memories.memoryDirsFound} project(s), ` +
+      `${result.memories.versionsInserted} new version(s) ` +
+      `(${result.memories.unchanged} unchanged, ${result.memories.skipped} skipped)`
+  );
   lines.push(`  Embeddings: ${result.embeddings.messagesEmbedded} embedded`);
   if (result.spool.configured) {
     lines.push(
