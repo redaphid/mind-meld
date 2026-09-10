@@ -325,6 +325,59 @@ problem above, made visible. `/api/embedding-series` is the same pipeline over
 time, bucketed; a single averaged rate cannot tell a steady drain from a burst
 two hours ago.
 
+## Claude Code memories are indexed AND backed up
+
+Alongside transcripts, sync indexes the memory files under
+`~/.claude/projects/<slug>/memory/*.md` (`src/sync/claude-memory.ts`). They are
+the densest text in the corpus -- one distilled, already-explained fact per
+file -- and they are the only part of it that exists **nowhere else**: not in
+git, not in any export. A memory is edited in place and deleted outright when
+it turns out to be wrong, so a correction destroys what it corrects.
+
+So this is a backup, not just an index, and the backup falls out of the storage
+model rather than being a second mechanism:
+
+- a memory is a **session** (`external_id = 'memory:<file name>'`)
+- every distinct **version** of its text is a **message** on that session
+  (`role = 'memory'`, `external_id = 'version:<sha256 of the file>'`)
+
+Content-addressing is what makes that work. Re-syncing an unchanged file
+inserts nothing (`ON CONFLICT DO NOTHING`), an edit appends the next version,
+and a deletion appends nothing and removes nothing -- so the last indexed text
+outlives the file. Two machines syncing the same memory converge on one row
+instead of racing to append duplicates. `versionsInserted: 0` with a non-zero
+`unchanged` is the healthy steady state, which is why the run report prints the
+memory line even when every number on it is zero: silence would be
+indistinguishable from the phase never having run.
+
+**Why sessions/messages and not a `memories` table.** Memories get semantic
+search, full-text search, chunking, tags and the embedding queue with no
+changes to any of them -- `src/embeddings/pending.ts` selects on
+`role != 'tool'`, so a memory version enters the queue the moment it is
+written. A dedicated table would have needed every one of those paths taught
+about it, and the ones nobody remembered to teach would have been silently
+empty. Memories also attach to the **same project row** as that project's
+transcripts, so a hit on a memory and a hit on the conversation that produced
+it agree about where they came from. Memory sync passes the raw directory-name
+fallback as the project path and therefore can never overwrite a path that
+transcript sync verified from a session cwd.
+
+```bash
+pnpm run memories                      # every backed-up memory, with its version count
+pnpm run memories versions -a <project-slug> <memory-name>   # its full history
+pnpm run memories restore              # write the latest version of each back to disk
+pnpm run memories restore -- -o ./out  # ...into a directory instead, grouped by project
+```
+
+`restore` **refuses by default** to overwrite a file whose text differs from the
+stored version, and names every file it skipped. That is the dangerous
+direction: the file on disk may be *newer* than anything indexed (edited since
+the last sync), and a blind restore would destroy exactly the unbacked-up text
+this feature exists to protect. `--force` overrides it.
+
+A memory whose file is gone still lists and still restores -- that case is the
+whole point, and `src/sync/memory-restore.test.ts` covers it.
+
 ## When sync cannot process a record
 
 Nothing is dropped. A record that fails to parse or insert goes to

@@ -1,4 +1,5 @@
 import { syncClaudeCode, syncClaudeHistory } from './claude-code.js';
+import { syncClaudeMemories, emptyMemoryStats, type MemorySyncStats } from './claude-memory.js';
 import { drainIngestSpool } from './ingest-spool.js';
 import { generatePendingEmbeddings, updateAggregateEmbeddings, AGGREGATE_BATCH_SIZE } from '../embeddings/batch.js';
 import { ensureEmbeddingModel } from '../embeddings/ollama.js';
@@ -24,6 +25,11 @@ export interface FullSyncResult {
     malformedLines: number;
     invalidTimestamps: number;
   };
+  // Claude Code memories (src/sync/claude-memory.ts). Reported separately from
+  // claudeCode even though they land in the same tables, because "0 new
+  // versions" is the healthy steady state here and would look like a stalled
+  // sync if it were folded into the message count.
+  memories: MemorySyncStats;
   // The edge ingest spool (src/sync/ingest-spool.ts). `configured: false`
   // means this machine has no spool env set, which is normal, not idle.
   spool: {
@@ -67,6 +73,7 @@ export async function runFullSync(options?: {
     durationMs: 0,
     claudeCode: { projectsProcessed: 0, sessionsProcessed: 0, messagesInserted: 0, skipped: 0, quarantined: 0 },
     history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
+    memories: emptyMemoryStats(),
     spool: { configured: false, drained: 0, quarantined: 0 },
     embeddings: { messagesEmbedded: 0, sessionsUpdated: 0 },
     standDown: false,
@@ -111,6 +118,21 @@ export async function runFullSync(options?: {
         console.error(error);
         errors.push(error);
       }
+    }
+
+    // Memories (~/.claude/projects/*/memory/*.md). Runs even when transcript
+    // sync above recorded errors: the two read different files, and a corpus
+    // that exists ONLY on this disk must not go un-backed-up because some
+    // unrelated transcript was unreadable.
+    try {
+      console.log('\n--- Syncing Claude memories ---');
+      const memoryStats = await syncClaudeMemories({ incremental: options?.incremental });
+      result.memories = memoryStats;
+      errors.push(...memoryStats.errors);
+    } catch (e) {
+      const error = `Claude memory sync failed: ${e}`;
+      console.error(error);
+      errors.push(error);
     }
   }
 

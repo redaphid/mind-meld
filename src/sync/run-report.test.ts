@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { buildRunReport } from './run-report.js';
 import type { FullSyncResult } from './orchestrator.js';
+import { emptyMemoryStats } from './claude-memory.js';
 
 const result = (over: Partial<FullSyncResult> = {}): FullSyncResult => ({
   startTime: new Date('2026-08-01T00:00:00Z'),
@@ -14,6 +15,7 @@ const result = (over: Partial<FullSyncResult> = {}): FullSyncResult => ({
     quarantined: 0,
   },
   history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
+  memories: emptyMemoryStats(),
   spool: { configured: false, drained: 0, quarantined: 0 },
   embeddings: { messagesEmbedded: 100, sessionsUpdated: 5 },
   standDown: false,
