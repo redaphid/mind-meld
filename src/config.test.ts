@@ -18,6 +18,7 @@ const MANAGED = [
   'MACHINE_OS',
   'WSL_DISTRO_NAME',
   'CLAUDE_CODE_PATH',
+  'CODEX_PATH',
   'LOG_RETENTION_DAYS',
   'SYNC_INCREMENTAL',
 ] as const;
@@ -131,6 +132,13 @@ describe('source paths from the environment', () => {
     // presents as "no conversations found" rather than as an error.
     expect((await loadConfig({ CLAUDE_CODE_PATH: '/mnt/data/claude' })).sources.claudeCode.path).toBe(
       '/mnt/data/claude',
+    );
+  });
+
+  it('configures the Codex home independently', async () => {
+    expect((await loadConfig({})).sources.codex.path).toBe(join(HOME, '/.codex'));
+    expect((await loadConfig({ CODEX_PATH: '/mnt/data/codex' })).sources.codex.path).toBe(
+      '/mnt/data/codex',
     );
   });
 });

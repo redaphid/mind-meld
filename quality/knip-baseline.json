@@ -22,7 +22,6 @@
     "types:src/mcp/search.ts:SearchCursor",
     "types:src/mcp/session.ts:SessionMetadata",
     "types:src/parsers/claude-messages.ts:AssistantContent",
-    "types:src/parsers/claude-messages.ts:BadLine",
     "types:src/parsers/claude-messages.ts:ClaudeMessage",
     "types:src/parsers/claude-messages.ts:HistoryEntry",
     "types:src/parsers/claude-messages.ts:LineMetadata",

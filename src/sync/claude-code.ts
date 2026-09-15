@@ -142,7 +142,8 @@ export type SessionSyncResult = {
 export async function syncSession(
   sourceId: number,
   projectId: number,
-  session: ParsedSession
+  session: ParsedSession,
+  sourceName = 'claude_code'
 ): Promise<SessionSyncResult> {
   let quarantined = 0;
   const errors: string[] = [];
@@ -159,7 +160,7 @@ export async function syncSession(
     error: unknown;
   }) => {
     const id = await quarantine({
-      source: 'claude_code',
+      source: sourceName,
       filePath: session.filePath,
       sessionExternalId: session.sessionId,
       projectId,
@@ -278,6 +279,7 @@ export async function syncSession(
         contentJson: message.contentJson,
         toolName: message.toolName,
         toolInput: message.toolInput,
+        toolResult: message.toolResult,
         thinkingText: message.thinkingText,
         model: message.model,
         inputTokens: message.inputTokens,

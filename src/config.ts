@@ -229,6 +229,10 @@ export const config = {
       path: expandPath(getEnv("CLAUDE_CODE_PATH", "~/.claude")),
       name: "claude_code",
     },
+    codex: {
+      path: expandPath(getEnv("CODEX_PATH", "~/.codex")),
+      name: "codex",
+    },
   },
 
   // Sync

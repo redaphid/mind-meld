@@ -1,6 +1,6 @@
 # Mindmeld
 
-**Your AI conversations, searchable.** Mindmeld indexes every Claude Code
+**Your AI conversations, searchable.** Mindmeld indexes every Claude Code and Codex
 conversation on your machines into one local index, and hands it back to
 Claude through MCP — so "how did I solve this last time?" has an answer.
 
@@ -8,7 +8,8 @@ Nothing leaves your hardware. Postgres, Chroma, and Ollama all run locally; ther
 are no cloud calls and no API keys.
 
 ```
-  ~/.claude/projects/*.jsonl ──▶ sync ─▶ Postgres (metadata + full-text)
+  ~/.claude/projects/*.jsonl ──┐
+  ~/.codex/{sessions,archived_sessions}/**/*.jsonl ──▶ sync ─▶ Postgres (metadata + full-text)
                                     │     Chroma  (vectors: messages, chunks,
                                     │              sessions, projects)
                                     └─▶ Ollama (summaries + embeddings)
@@ -96,13 +97,15 @@ toward or away from a style of work — see [USAGE.md](docs/USAGE.md#weighted-ce
 
 ## Running the sync
 
-Sync is a CLI, not a service. It scans each machine's own `~/.claude/projects`,
+Sync is a CLI, not a service. It scans each machine's own `~/.claude/projects`
+and `~/.codex/sessions` (plus `archived_sessions` when present),
 so **every machine you work on needs its own sync** pointed at the shared index.
 
 ```bash
 pnpm install
 pnpm run sync                 # incremental (default)
 pnpm run sync -- --full       # ignore incremental state, re-scan everything
+pnpm run sync:codex           # Codex only
 ```
 
 To run it hourly on Linux, install the `mindmeld-sync` systemd user timer:
@@ -181,6 +184,7 @@ the containers.
 | `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | `bge-m3` / `1024` | Changing the model requires re-embedding everything |
 | `SUMMARIZE_MODEL` | `qwen3:8b` | Compose overrides this per-deployment |
 | `CLAUDE_CODE_PATH` | `~/.claude` | Same on macOS and Linux |
+| `CODEX_PATH` | `~/.codex` | Codex active and archived rollout files |
 | `SYNC_INTERVAL_SECONDS` | `3600` | Used by the sync loop scripts |
 | `CENTROID_INTERVAL_SECONDS` | `25200` | Centroid recompute, every 7 hours |
 | `WARMUP_INTERVAL_SECONDS` | `21600` | Warmup-session filtering |

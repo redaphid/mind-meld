@@ -78,6 +78,7 @@ services:
       SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-3600}
     volumes:
       - ${CLAUDE_CODE_PATH:?CLAUDE_CODE_PATH is required}:/root/.claude:ro
+      - ${CODEX_PATH:?CODEX_PATH is required}:/root/.codex:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

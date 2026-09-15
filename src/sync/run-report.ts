@@ -24,6 +24,12 @@ export function buildRunReport(result: FullSyncResult): RunReport {
       `(${result.claudeCode.skipped} skipped, ${result.claudeCode.quarantined} quarantined)`
   );
   lines.push(
+    `  Codex: ${result.codex.projectsProcessed} projects, ` +
+      `${result.codex.sessionsProcessed} sessions, ` +
+      `${result.codex.messagesInserted} messages ` +
+      `(${result.codex.skipped} skipped, ${result.codex.quarantined} quarantined)`
+  );
+  lines.push(
     `  History: ${result.history.entries} entries ` +
       `(${result.history.malformedLines} malformed, ${result.history.invalidTimestamps} unusable timestamps)`
   );
@@ -35,7 +41,7 @@ export function buildRunReport(result: FullSyncResult): RunReport {
     );
   }
 
-  const quarantined = result.claudeCode.quarantined + result.spool.quarantined;
+  const quarantined = result.claudeCode.quarantined + result.codex.quarantined + result.spool.quarantined;
   if (quarantined > 0) {
     lines.push(
       `  Quarantined: ${quarantined} record(s) kept in sync_quarantine — waiting, not lost. ` +

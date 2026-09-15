@@ -6,7 +6,6 @@ import { program } from 'commander';
 import { runFullSync, getSyncStatus } from './sync/orchestrator.js';
 import { buildRunReport } from './sync/run-report.js';
 import { verifyClaudeCode, formatVerifyReport, verifyExitCode } from './sync/verify.js';
-import { syncClaudeCode } from './sync/claude-code.js';
 import { generatePendingEmbeddings, updateAggregateEmbeddings } from './embeddings/batch.js';
 import { closePool, query } from './db/postgres.js';
 import { getCollectionStats, listCollections } from './db/chroma.js';
@@ -21,7 +20,7 @@ installFlushOnExit();
 
 program
   .name('mindmeld')
-  .description('Unified conversation index for Claude Code')
+  .description('Unified conversation index for Claude Code and Codex')
   .version('0.1.0');
 
 const SYNC_TIMER = 'mindmeld-sync.timer';
@@ -72,13 +71,13 @@ program
   .description('Sync conversations from all sources')
   .option('-i, --incremental', 'Only sync new/modified files')
   .option('-f, --full', 'Full sync (ignore incremental)')
-  .option('-s, --source <source>', 'Only sync specific source (claude_code)')
+  .option('-s, --source <source>', 'Only sync specific source (claude_code, codex)')
   .option('--skip-embeddings', 'Skip embedding generation')
   .action(async (options) => {
     try {
       // An unknown --source used to silently sync nothing and exit 0 — the
       // same invisible-failure class as #29. Reject it loudly instead.
-      const KNOWN_SOURCES = ['claude_code'] as const;
+      const KNOWN_SOURCES = ['claude_code', 'codex'] as const;
       if (options.source && !KNOWN_SOURCES.includes(options.source)) {
         console.error(
           `Unknown source "${options.source}". Valid sources: ${KNOWN_SOURCES.join(', ')}`
@@ -87,7 +86,7 @@ program
         return;
       }
       const sources = options.source
-        ? [options.source as 'claude_code']
+        ? [options.source as 'claude_code' | 'codex']
         : undefined;
 
       // Determine incremental mode: false if --full is set, true if --incremental is set, default to true
@@ -211,7 +210,7 @@ program
   .command('search <query>')
   .description('Search conversations')
   .option('-l, --limit <number>', 'Maximum results', '20')
-  .option('-s, --source <source>', 'Filter by source (claude_code)')
+  .option('-s, --source <source>', 'Filter by source (claude_code, codex)')
   .action(async (searchQuery, options) => {
     try {
       const result = await query(
@@ -250,6 +249,7 @@ program
     console.log(`Chroma: ${config.chroma.url}`);
     console.log(`Ollama: ${config.ollama.url}`);
     console.log(`\nClaude Code path: ${config.sources.claudeCode.path}`);
+    console.log(`Codex path: ${config.sources.codex.path}`);
     console.log(`\nEmbedding model: ${config.embeddings.model}`);
     console.log(`Embedding dimensions: ${config.embeddings.dimensions}`);
     console.log(`Batch size: ${config.embeddings.batchSize}`);
