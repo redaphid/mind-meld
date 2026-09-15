@@ -6,6 +6,7 @@ import { program } from 'commander';
 import { runFullSync, getSyncStatus } from './sync/orchestrator.js';
 import { buildRunReport } from './sync/run-report.js';
 import { verifyClaudeCode, formatVerifyReport, verifyExitCode } from './sync/verify.js';
+import { listMemories, listVersions, restoreMemory } from './sync/memory-restore.js';
 import { generatePendingEmbeddings, updateAggregateEmbeddings } from './embeddings/batch.js';
 import { closePool, query } from './db/postgres.js';
 import { getCollectionStats, listCollections } from './db/chroma.js';
@@ -161,6 +162,90 @@ program
     } catch (e) {
       console.error('Embedding generation failed:', e);
       process.exit(1);
+    } finally {
+      await closePool();
+    }
+  });
+
+program
+  .command('memories [action]')
+  .description(
+    'Claude Code memory backup: list (default), versions <project> <name>, or restore'
+  )
+  .option('-p, --project <filter>', 'Only memories whose project slug or path contains this')
+  .option('-o, --out <dir>', 'Restore into this directory instead of the original location')
+  .option(
+    '--force',
+    'Overwrite a file whose text differs from the stored version (default: refuse and report)'
+  )
+  .option('-a, --args <args...>', 'Arguments for `versions`: <projectExternalId> <memoryName>')
+  .action(async (action: string | undefined, options) => {
+    try {
+      const act = action ?? 'list';
+
+      if (act === 'versions') {
+        const [projectExternalId, fileName] = options.args ?? [];
+        if (!projectExternalId || !fileName) {
+          console.error('Usage: mindmeld memories versions -a <projectExternalId> <memoryName>');
+          process.exitCode = 1;
+          return;
+        }
+        const versions = await listVersions({ projectExternalId, fileName });
+        if (versions.length === 0) {
+          console.log(`No stored versions for ${projectExternalId}/${fileName}`);
+          return;
+        }
+        console.log(`${versions.length} stored version(s) of ${fileName}:`);
+        for (const v of versions) {
+          console.log(
+            `  v${v.versionNum}  ${v.timestamp.toISOString()}  ${v.contentHash.slice(0, 12)}  ${v.content.length} chars`
+          );
+        }
+        return;
+      }
+
+      const memories = await listMemories({ projectFilter: options.project });
+
+      if (act === 'list') {
+        console.log(`${memories.length} memor(ies) backed up:`);
+        for (const m of memories) {
+          // The version count is the whole point of the list: anything above 1
+          // has superseded text that exists in no other place.
+          console.log(
+            `  ${m.projectExternalId}/${m.fileName}  v${m.versionNum}  ${m.timestamp.toISOString().slice(0, 10)}`
+          );
+        }
+        return;
+      }
+
+      if (act === 'restore') {
+        let written = 0;
+        let identical = 0;
+        const skipped: string[] = [];
+        for (const m of memories) {
+          const outcome = await restoreMemory(m, { outDir: options.out, force: options.force });
+          if (outcome.status === 'written') written++;
+          else if (outcome.status === 'identical') identical++;
+          else skipped.push(outcome.targetPath);
+        }
+        console.log(
+          `Restore complete: ${written} written, ${identical} already identical, ${skipped.length} skipped`
+        );
+        // Skips are the interesting outcome, not an aside: each one is a file
+        // on disk that differs from the backup, which usually means it is
+        // NEWER than the last sync. Naming them is what stops --force from
+        // being the reflex.
+        for (const path of skipped) {
+          console.log(`  skipped (differs on disk, use --force to overwrite): ${path}`);
+        }
+        return;
+      }
+
+      console.error(`Unknown action "${act}". Valid actions: list, versions, restore`);
+      process.exitCode = 1;
+    } catch (e) {
+      console.error('Memory command failed:', e);
+      process.exitCode = 1;
     } finally {
       await closePool();
     }
