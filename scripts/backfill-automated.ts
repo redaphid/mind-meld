@@ -31,7 +31,7 @@ const run = async () => {
      LEFT JOIN LATERAL (
        SELECT content_text FROM messages
        WHERE src.name = 'claude_code' AND session_id = s.id AND role = 'user'
-       ORDER BY sequence_num
+       ORDER BY sequence_num NULLS LAST, timestamp, id
        LIMIT 1
      ) m ON true
      WHERE s.deleted_at IS NULL AND s.is_automated = false`
