@@ -210,9 +210,9 @@ export async function runFullSync(options?: {
       console.log('\n--- Updating Aggregate Embeddings ---');
       // Drain the backlog batch-by-batch instead of one batch per sync cycle,
       // but stop after MAX_AGGREGATE_DRAIN_MS so new-message sync never starves
-      const drainStart = Date.now();
+      const deadline = Date.now() + MAX_AGGREGATE_DRAIN_MS;
       while (true) {
-        const aggregateStats = await updateAggregateEmbeddings();
+        const aggregateStats = await updateAggregateEmbeddings(deadline);
         result.embeddings.sessionsUpdated += aggregateStats.sessionsUpdated;
         if (aggregateStats.sessionsFetched < AGGREGATE_BATCH_SIZE) break;
         // The drain would otherwise keep requesting batches for the next 50
@@ -222,7 +222,7 @@ export async function runFullSync(options?: {
           console.log(STAND_DOWN_NOTICE);
           break;
         }
-        if (Date.now() - drainStart > MAX_AGGREGATE_DRAIN_MS) {
+        if (Date.now() >= deadline) {
           console.log('Aggregate drain time budget reached; remaining backlog resumes next cycle');
           break;
         }

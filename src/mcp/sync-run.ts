@@ -97,12 +97,12 @@ const runPendingEmbeddings = async (): Promise<SyncRunResult> => {
   }
 
   let sessionsUpdated = 0
-  const drainStart = Date.now()
+  const deadline = Date.now() + MAX_AGGREGATE_DRAIN_MS
   while (true) {
-    const aggregate = await updateAggregateEmbeddings()
+    const aggregate = await updateAggregateEmbeddings(deadline)
     sessionsUpdated += aggregate.sessionsUpdated
     if (aggregate.sessionsFetched < AGGREGATE_BATCH_SIZE) break
-    if (Date.now() - drainStart > MAX_AGGREGATE_DRAIN_MS) {
+    if (Date.now() >= deadline) {
       console.log('[sync-run] aggregate drain budget reached; backlog resumes next run')
       break
     }

@@ -157,7 +157,7 @@ program
       console.log(`Processed ${msgStats.processed} messages`);
 
       console.log('Updating aggregate embeddings...');
-      const aggStats = await updateAggregateEmbeddings();
+      const aggStats = await updateAggregateEmbeddings(Infinity);
       console.log(`Updated ${aggStats.sessionsUpdated} sessions`);
     } catch (e) {
       console.error('Embedding generation failed:', e);
