@@ -431,7 +431,7 @@ export const AGGREGATE_BATCH_SIZE = 100;
 
 // Update session-level embeddings with summarization for long conversations
 // Now also re-embeds sessions where content_chars has grown
-export async function updateAggregateEmbeddings(): Promise<{
+export async function updateAggregateEmbeddings(deadline: number): Promise<{
   sessionsUpdated: number;
   sessionsReembedded: number;
   sessionsFetched: number;
@@ -481,6 +481,7 @@ export async function updateAggregateEmbeddings(): Promise<{
       console.log(STAND_DOWN_NOTICE);
       break;
     }
+    if (Date.now() >= deadline) break;
 
     const isReembed = session.existing_content_chars !== null;
     let actualContentChars = 0;
