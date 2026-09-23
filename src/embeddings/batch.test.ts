@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, onTestFinished, vi } from 'vitest'
 
 // The embedding queue is global, ordered by message id, and nothing claims a
 // row. That makes "a batch that embedded nothing" indistinguishable from "the
@@ -50,7 +50,12 @@ vi.mock('../config.js', () => ({
   },
 }))
 
-import { generatePendingEmbeddings, MAX_STALLED_BATCHES } from './batch.js'
+import {
+  generatePendingEmbeddings,
+  updateAggregateEmbeddings,
+  AGGREGATE_BATCH_SIZE,
+  MAX_STALLED_BATCHES,
+} from './batch.js'
 
 const message = (id: number) => ({
   id,
@@ -182,6 +187,78 @@ describe('generatePendingEmbeddings', () => {
 
       expect(stats.stalled).toBeNull()
       expect(generateEmbeddingsMock).not.toHaveBeenCalled()
+    })
+  })
+})
+
+// A session is minutes of summarization and a batch is a hundred of them, so a
+// budget checked only between batches was measured holding the sync for 11
+// hours with no transcript read. Each summary here costs ten minutes of clock.
+describe('updateAggregateEmbeddings', () => {
+  const MINUTE = 60_000
+  const session = (id: number) => ({
+    id,
+    external_id: `session-${id}`,
+    title: 'The Rusty Conquistador furnace',
+    project_path: '/projects/example',
+    source_name: 'claude_code',
+    message_count: 1,
+    total_tokens: 0,
+    content_chars: 100,
+    started_at: null,
+    existing_content_chars: null,
+  })
+
+  let now = 0
+
+  beforeEach(() => {
+    now = 0
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+    onTestFinished(() => clock.mockRestore())
+    summarizeMock.mockImplementation(async () => {
+      now += 10 * MINUTE
+      return 'a summary long enough to pass the length check'
+    })
+    generateEmbeddingsMock.mockResolvedValue([[0.1]])
+    queryMock.mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT s.id, s.external_id')) {
+        return { rows: Array.from({ length: AGGREGATE_BATCH_SIZE }, (_, i) => session(i + 1)) }
+      }
+      if (sql.includes('SELECT id, content_text, role FROM messages')) {
+        return { rows: [{ id: 1, content_text: 'Thunderwrench HVAC Co. fixed it', role: 'user' }] }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+  })
+
+  describe('when the deadline passes partway through a batch', () => {
+    it('stops at the next session instead of finishing the batch', async () => {
+      await updateAggregateEmbeddings(25 * MINUTE)
+
+      expect(summarizeMock).toHaveBeenCalledTimes(3)
+    })
+
+    it('still reports the full batch as fetched, so the caller knows backlog remains', async () => {
+      const stats = await updateAggregateEmbeddings(25 * MINUTE)
+
+      expect(stats.sessionsFetched).toBe(AGGREGATE_BATCH_SIZE)
+    })
+  })
+
+  describe('when the deadline has already passed', () => {
+    it('summarizes nothing', async () => {
+      now = 30 * MINUTE
+      await updateAggregateEmbeddings(25 * MINUTE)
+
+      expect(summarizeMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('without a deadline', () => {
+    it('works the whole batch', async () => {
+      await updateAggregateEmbeddings(Infinity)
+
+      expect(summarizeMock).toHaveBeenCalledTimes(AGGREGATE_BATCH_SIZE)
     })
   })
 })
