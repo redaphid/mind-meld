@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   chunkMessagesWithIndices,
   summarizeChunk,
+  summarizeConversation,
   TruncationError,
 } from "./summarize.js";
 
@@ -164,4 +165,41 @@ describe("summarizeChunk garbage rejection", () => {
       );
     });
   });
+});
+
+// An echoing model used to livelock the summarizeConversation <-> combineSummaries
+// recursion: the chunk summaries came back the same size as the chunks, so the
+// recursion re-split identical text forever. Observed in production 2026-08-31 --
+// the same 28611 chars re-summarized 208 times, ~2h of GPU, ingestion stalled.
+describe("summarizeConversation when the model echoes its input", () => {
+  beforeEach(() => vi.stubGlobal("fetch", vi.fn()));
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("terminates instead of recursing on unshrunk chunk summaries", async () => {
+    // Echo the conversation back verbatim: long enough to pass MIN_SUMMARY_CHARS,
+    // carrying no control marker, never truncated -- every other guard says fine.
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      const body = JSON.parse((init as RequestInit).body as string);
+      const echoed = String(body.prompt).split("CONVERSATION:\n")[1] ?? "";
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          response: echoed.replace(/\n\nSUMMARY:$/, ""),
+          done: true,
+          prompt_eval_count: 100,
+        }),
+      } as unknown as Response;
+    });
+
+    const messages = Array.from({ length: 12 }, (_, i) =>
+      `Message ${i}: `.concat("technical detail about src/foo.ts ".repeat(400)),
+    );
+
+    const result = await summarizeConversation(messages);
+
+    expect(result.length).toBeLessThan(messages.join("").length);
+    // The old code called Ollama unboundedly; bounded now that each level shrinks.
+    expect(vi.mocked(fetch).mock.calls.length).toBeLessThan(60);
+  }, 20000);
 });
