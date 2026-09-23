@@ -2,10 +2,11 @@
  * Backfill the sessions.is_automated column on existing rows.
  *
  * Two signals, matching how new rows are classified at sync time:
- *   1. classifyAutomated() — persona-prompt prefixes on the session title's
- *      first line (Slack monitoring, curiosity curation, MCP health checks,
- *      huddle transcripts). Applied per-row in JS so the regexes stay the
- *      single source of truth shared with src/embeddings/classify.ts.
+ *   1. classifyAutomated() — persona-prompt prefixes on the first line of the
+ *      text sync classifies: the first user-role message for claude_code sessions,
+ *      which have no title since #95, and the title for every other source.
+ *      Applied per-row in JS so the regexes stay the single source of truth
+ *      shared with src/embeddings/classify.ts.
  *   2. Recurring fingerprint — the same first line appearing 20+ times is a
  *      cron-driven automated run (mirrors scripts/mark-warmups.ts step 4).
  *
@@ -21,13 +22,23 @@ const run = async () => {
   console.log('=== Backfilling sessions.is_automated ===\n')
 
   console.log('Step 1: Persona-prompt titles (classifyAutomated)...')
-  const candidates = await query<{ id: number; title: string | null }>(
-    `SELECT id, title FROM sessions
-     WHERE deleted_at IS NULL AND is_automated = false AND title IS NOT NULL`
+  const candidates = await query<{ id: number; classified_text: string | null }>(
+    `SELECT s.id,
+            CASE WHEN src.name = 'claude_code' THEN m.content_text ELSE s.title END AS classified_text
+     FROM sessions s
+     JOIN projects p ON p.id = s.project_id
+     JOIN sources src ON src.id = p.source_id
+     LEFT JOIN LATERAL (
+       SELECT content_text FROM messages
+       WHERE src.name = 'claude_code' AND session_id = s.id AND role = 'user'
+       ORDER BY sequence_num NULLS FIRST, timestamp, id
+       LIMIT 1
+     ) m ON true
+     WHERE s.deleted_at IS NULL AND s.is_automated = false`
   )
 
   const automatedIds = candidates.rows
-    .filter((row) => classifyAutomated(row.title) !== null)
+    .filter((row) => classifyAutomated(row.classified_text) !== null)
     .map((row) => row.id)
 
   let personaMarked = 0

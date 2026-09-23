@@ -217,6 +217,9 @@ export const queries = {
     projectId: number;
     externalId: string;
     title?: string;
+    // The opening user message. Claude Code sessions carry no title (#95), so
+    // this is the only place their persona prompt is visible to the classifier.
+    firstPrompt?: string;
     isAgent?: boolean;
     parentSessionId?: number;
     agentId?: string;
@@ -271,7 +274,7 @@ export const queries = {
         params.fileModifiedAt ?? null,
         params.startedAt ?? null,
         params.endedAt ?? null,
-        isAutomated(clean(params.title)),
+        isAutomated(clean(params.firstPrompt ?? params.title)),
         params.os === undefined ? clean(config.os) : clean(params.os),
       ]
     );

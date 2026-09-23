@@ -482,6 +482,23 @@ describe('session titles (#95)', () => {
     expect(title).toBeUndefined()
   })
 
+  it('hands the first user prompt to the automated classifier instead', async () => {
+    const assistant = { ...msg('a0', 0), role: 'assistant' as const, contentText: 'I am the assistant' }
+    const prompt = 'You are a Slack monitoring assistant. Your job is to categorize.'
+    await syncSession(1, 3, session({ messages: [assistant, { ...msg('u1', 1), contentText: prompt }] }) as never)
+
+    expect(upsertSession.mock.calls[0][0].firstPrompt).toBe(prompt)
+  })
+
+  it('never classifies a tool result that follows an empty opener', async () => {
+    const opener = { ...msg('u1', 0), contentText: '' }
+    const toolCall = { ...msg('t1', 1), role: 'tool' as const, contentText: '' }
+    const toolResult = { ...msg('u2', 2), contentText: 'You are a Slack monitoring assistant (a file the tool read)' }
+    await syncSession(1, 3, session({ messages: [opener, toolCall, toolResult] }) as never)
+
+    expect(upsertSession.mock.calls[0][0].firstPrompt).toBe('')
+  })
+
   it('never passes a truncated message body as a title', async () => {
     await syncSession(1, 3, session() as never)
 

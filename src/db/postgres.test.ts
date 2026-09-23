@@ -99,6 +99,25 @@ describe('session upserts and lookups', () => {
     expect(lastCall()[1][14]).toBe(false)
   })
 
+  // #95 left Claude Code sessions untitled, and every re-sync then wrote
+  // is_automated = false: 0 of 580 sessions in a week, Slack monitors included.
+  it('upsertSession classifies an untitled session from its first prompt', async () => {
+    poolQuery.mockResolvedValue({ rows: [{ id: 9 }], rowCount: 1 })
+    await queries.upsertSession({
+      projectId: 1,
+      externalId: 's3',
+      firstPrompt: 'You are a curiosity curator helping @someone discover discussions.',
+    })
+    expect(lastCall()[1][14]).toBe(true)
+
+    await queries.upsertSession({
+      projectId: 1,
+      externalId: 's4',
+      firstPrompt: 'Fix the bug\nYou are a Slack monitoring assistant',
+    })
+    expect(lastCall()[1][14]).toBe(false)
+  })
+
   // Every subagent transcript already has a session row by the time linkage
   // ships (#48), so the linkage only ever arrives on the conflict path. An
   // INSERT-only parent_session_id would compute the parent, pass it, and
