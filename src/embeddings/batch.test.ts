@@ -56,6 +56,9 @@ import {
   AGGREGATE_BATCH_SIZE,
   MAX_STALLED_BATCHES,
 } from './batch.js'
+import { getEmbeddingMetadata, upsertEmbeddings } from '../db/chroma.js'
+import { persistSessionChunks } from './chunks.js'
+import { combineSummaries } from './summarize.js'
 
 const message = (id: number) => ({
   id,
@@ -196,7 +199,7 @@ describe('generatePendingEmbeddings', () => {
 // hours with no transcript read. Each summary here costs ten minutes of clock.
 describe('updateAggregateEmbeddings', () => {
   const MINUTE = 60_000
-  const session = (id: number) => ({
+  const session = (id: number, existing_content_chars: number | null = null) => ({
     id,
     external_id: `session-${id}`,
     title: 'The Rusty Conquistador furnace',
@@ -206,13 +209,22 @@ describe('updateAggregateEmbeddings', () => {
     total_tokens: 0,
     content_chars: 100,
     started_at: null,
-    existing_content_chars: null,
+    existing_content_chars,
   })
 
+  const storedSummaries = () =>
+    queryMock.mock.calls
+      .filter(([sql]) => String(sql).startsWith('UPDATE sessions SET summary'))
+      .map(([, params]) => params[0])
+
   let now = 0
+  let queued: ReturnType<typeof session>[] = []
+  let sessionMessages: { id: number; content_text: string; role: string }[] = []
 
   beforeEach(() => {
     now = 0
+    queued = Array.from({ length: AGGREGATE_BATCH_SIZE }, (_, i) => session(i + 1))
+    sessionMessages = [{ id: 1, content_text: 'Thunderwrench HVAC Co. fixed it', role: 'user' }]
     const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
     onTestFinished(() => clock.mockRestore())
     summarizeMock.mockImplementation(async () => {
@@ -221,12 +233,8 @@ describe('updateAggregateEmbeddings', () => {
     })
     generateEmbeddingsMock.mockResolvedValue([[0.1]])
     queryMock.mockImplementation(async (sql: string) => {
-      if (sql.includes('SELECT s.id, s.external_id')) {
-        return { rows: Array.from({ length: AGGREGATE_BATCH_SIZE }, (_, i) => session(i + 1)) }
-      }
-      if (sql.includes('SELECT id, content_text, role FROM messages')) {
-        return { rows: [{ id: 1, content_text: 'Thunderwrench HVAC Co. fixed it', role: 'user' }] }
-      }
+      if (sql.includes('SELECT s.id, s.external_id')) return { rows: queued }
+      if (sql.includes('SELECT id, content_text, role FROM messages')) return { rows: sessionMessages }
       return { rows: [], rowCount: 0 }
     })
   })
@@ -259,6 +267,105 @@ describe('updateAggregateEmbeddings', () => {
       await updateAggregateEmbeddings(Infinity)
 
       expect(summarizeMock).toHaveBeenCalledTimes(AGGREGATE_BATCH_SIZE)
+    })
+  })
+
+  describe('when the queue is empty', () => {
+    it("reports nothing fetched, which is what ends the caller's drain", async () => {
+      queued = []
+      const stats = await updateAggregateEmbeddings(Infinity)
+
+      expect(stats.sessionsFetched).toBe(0)
+    })
+  })
+
+  describe('when the stand-down switch is thrown', () => {
+    it('summarizes nothing', async () => {
+      shouldStandDownMock.mockResolvedValue(true)
+      await updateAggregateEmbeddings(Infinity)
+
+      expect(summarizeMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('when Chroma already holds the session at its current size', () => {
+    it('skips the summary', async () => {
+      queued = [session(1)]
+      vi.mocked(getEmbeddingMetadata).mockResolvedValueOnce({ content_chars: 100 })
+      await updateAggregateEmbeddings(Infinity)
+
+      expect(summarizeMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('when a session has no embeddable content', () => {
+    it('skips the summary', async () => {
+      queued = [session(1)]
+      sessionMessages = []
+      await updateAggregateEmbeddings(Infinity)
+
+      expect(summarizeMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('when the embedding comes back empty', () => {
+    it('stores no vector and does not count the session as embedded', async () => {
+      queued = [session(1)]
+      generateEmbeddingsMock.mockResolvedValue([null])
+      const stats = await updateAggregateEmbeddings(Infinity)
+
+      expect(upsertEmbeddings).not.toHaveBeenCalled()
+      expect(stats.sessionsUpdated).toBe(0)
+    })
+  })
+
+  describe('when a previously embedded session has grown', () => {
+    it('counts it as re-embedded, not new', async () => {
+      queued = [session(1, 50)]
+      const stats = await updateAggregateEmbeddings(Infinity)
+
+      expect(stats).toMatchObject({ sessionsUpdated: 0, sessionsReembedded: 1 })
+    })
+  })
+
+  describe('when a long session already has chunk summaries', () => {
+    it('combines them instead of summarizing the session again', async () => {
+      queued = [session(1)]
+      const chunk = (chunkIndex: number, summary: string) => ({
+        id: chunkIndex,
+        chunkIndex,
+        startMessageId: 1,
+        endMessageId: 1,
+        summary,
+        contentChars: 100,
+      })
+      vi.mocked(persistSessionChunks).mockResolvedValueOnce([
+        chunk(0, 'Thunderwrench HVAC Co. replaced the blower'),
+        chunk(1, 'The Lair got a new thermostat'),
+      ])
+      vi.mocked(combineSummaries).mockResolvedValueOnce('both jobs, combined')
+      await updateAggregateEmbeddings(Infinity)
+
+      expect(summarizeMock).not.toHaveBeenCalled()
+      expect(storedSummaries()).toEqual(['both jobs, combined'])
+    })
+  })
+
+  describe('when the model refuses to summarize a session', () => {
+    it('marks it unsummarizable so it leaves the queue', async () => {
+      queued = [session(1)]
+      summarizeMock.mockRejectedValue(new Error('Summary too short (3 chars)'))
+      await updateAggregateEmbeddings(Infinity)
+
+      expect(storedSummaries()).toEqual(['[unsummarizable] Summary too short (3 chars)'])
+    })
+
+    it('leaves any other failure queued for the next cycle', async () => {
+      queued = [session(1)]
+      summarizeMock.mockRejectedValue(new Error('503 GPU is in use by other applications'))
+      await updateAggregateEmbeddings(Infinity)
+
+      expect(storedSummaries()).toEqual([])
     })
   })
 })
