@@ -490,6 +490,15 @@ describe('session titles (#95)', () => {
     expect(upsertSession.mock.calls[0][0].firstPrompt).toBe(prompt)
   })
 
+  it('never classifies a tool result that follows an empty opener', async () => {
+    const opener = { ...msg('u1', 0), contentText: '' }
+    const toolCall = { ...msg('t1', 1), role: 'tool' as const, contentText: '' }
+    const toolResult = { ...msg('u2', 2), contentText: 'You are a Slack monitoring assistant (a file the tool read)' }
+    await syncSession(1, 3, session({ messages: [opener, toolCall, toolResult] }) as never)
+
+    expect(upsertSession.mock.calls[0][0].firstPrompt).toBe('')
+  })
+
   it('never passes a truncated message body as a title', async () => {
     await syncSession(1, 3, session() as never)
 

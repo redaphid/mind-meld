@@ -213,7 +213,9 @@ export async function syncSession(
       // this is the only write to sessions.title (issue #95). The read path
       // derives a title from the summary instead, and shows none until then.
       title: undefined,
-      firstPrompt: session.messages.find((m) => m.role === 'user' && m.contentText)?.contentText,
+      // The first user message, even when empty: a tool result is also a user
+      // message, and skipping past an empty opener could land on one.
+      firstPrompt: session.messages.find((m) => m.role === 'user')?.contentText,
       isAgent: session.isAgent,
       parentSessionId,
       agentId: session.agentId,

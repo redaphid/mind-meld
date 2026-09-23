@@ -3,7 +3,7 @@
  *
  * Two signals, matching how new rows are classified at sync time:
  *   1. classifyAutomated() — persona-prompt prefixes on the first line of the
- *      text sync classifies: the first user message for claude_code sessions,
+ *      text sync classifies: the first user-role message for claude_code sessions,
  *      which have no title since #95, and the title for every other source.
  *      Applied per-row in JS so the regexes stay the single source of truth
  *      shared with src/embeddings/classify.ts.
@@ -30,10 +30,10 @@ const run = async () => {
      JOIN sources src ON src.id = p.source_id
      LEFT JOIN LATERAL (
        SELECT content_text FROM messages
-       WHERE session_id = s.id AND role = 'user' AND content_text IS NOT NULL
+       WHERE src.name = 'claude_code' AND session_id = s.id AND role = 'user'
        ORDER BY sequence_num
        LIMIT 1
-     ) m ON src.name = 'claude_code'
+     ) m ON true
      WHERE s.deleted_at IS NULL AND s.is_automated = false`
   )
 
