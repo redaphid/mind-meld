@@ -1,4 +1,5 @@
 import { syncClaudeCode, syncClaudeHistory } from './claude-code.js';
+import { syncCodex } from './codex.js';
 import { syncClaudeMemories, emptyMemoryStats, type MemorySyncStats } from './claude-memory.js';
 import { drainIngestSpool } from './ingest-spool.js';
 import { generatePendingEmbeddings, updateAggregateEmbeddings, AGGREGATE_BATCH_SIZE } from '../embeddings/batch.js';
@@ -14,6 +15,13 @@ export interface FullSyncResult {
   endTime: Date;
   durationMs: number;
   claudeCode: {
+    projectsProcessed: number;
+    sessionsProcessed: number;
+    messagesInserted: number;
+    skipped: number;
+    quarantined: number;
+  };
+  codex: {
     projectsProcessed: number;
     sessionsProcessed: number;
     messagesInserted: number;
@@ -50,7 +58,7 @@ export interface FullSyncResult {
 export async function runFullSync(options?: {
   incremental?: boolean;
   skipEmbeddings?: boolean;
-  sources?: 'claude_code'[];
+  sources?: Array<'claude_code' | 'codex'>;
 }): Promise<FullSyncResult> {
   const startTime = new Date();
   const errors: string[] = [];
@@ -72,6 +80,7 @@ export async function runFullSync(options?: {
     endTime: new Date(),
     durationMs: 0,
     claudeCode: { projectsProcessed: 0, sessionsProcessed: 0, messagesInserted: 0, skipped: 0, quarantined: 0 },
+    codex: { projectsProcessed: 0, sessionsProcessed: 0, messagesInserted: 0, skipped: 0, quarantined: 0 },
     history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
     memories: emptyMemoryStats(),
     spool: { configured: false, drained: 0, quarantined: 0 },
@@ -80,7 +89,7 @@ export async function runFullSync(options?: {
     errors: [],
   };
 
-  const sourcesToSync = options?.sources ?? ['claude_code'];
+  const sourcesToSync = options?.sources ?? ['claude_code', 'codex'];
 
   // Sync Claude Code
   if (sourcesToSync.includes('claude_code')) {
@@ -131,6 +140,25 @@ export async function runFullSync(options?: {
       errors.push(...memoryStats.errors);
     } catch (e) {
       const error = `Claude memory sync failed: ${e}`;
+      console.error(error);
+      errors.push(error);
+    }
+  }
+
+  if (sourcesToSync.includes('codex')) {
+    try {
+      console.log('\n--- Syncing Codex ---');
+      const codexStats = await syncCodex({ incremental: options?.incremental });
+      result.codex = {
+        projectsProcessed: codexStats.projectsProcessed,
+        sessionsProcessed: codexStats.sessionsProcessed,
+        messagesInserted: codexStats.messagesInserted,
+        skipped: codexStats.skipped,
+        quarantined: codexStats.quarantined,
+      };
+      errors.push(...codexStats.errors);
+    } catch (e) {
+      const error = `Codex sync failed: ${e}`;
       console.error(error);
       errors.push(error);
     }

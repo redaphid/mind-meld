@@ -101,6 +101,7 @@ export interface ParsedMessage {
   contentJson?: object;
   toolName?: string;
   toolInput?: object;
+  toolResult?: string;
   thinkingText?: string;
   model?: string;
   inputTokens?: number;

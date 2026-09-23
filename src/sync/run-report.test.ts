@@ -14,6 +14,13 @@ const result = (over: Partial<FullSyncResult> = {}): FullSyncResult => ({
     skipped: 96,
     quarantined: 0,
   },
+  codex: {
+    projectsProcessed: 2,
+    sessionsProcessed: 8,
+    messagesInserted: 120,
+    skipped: 40,
+    quarantined: 0,
+  },
   history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
   memories: emptyMemoryStats(),
   spool: { configured: false, drained: 0, quarantined: 0 },

@@ -285,7 +285,10 @@ MERGED SUMMARY:`;
     return summary;
   }
 
-  // Combined summaries are too long - recursively chunk and summarize
+  // Combined summaries are too long - recursively chunk and summarize.
+  // Termination rests on each chunk summary being strictly smaller than its
+  // chunk (assertShrunk in summarizeConversation): combined therefore shrinks at
+  // every level, so this cannot re-split identical text forever.
   console.log(
     `Combined summaries too long (${combined.length} chars), chunking recursively...`,
   );
@@ -406,7 +409,16 @@ export async function summarizeConversation(
 
     const startedAt = performance.now();
     try {
-      const summary = await summarizeChunk(chunkText, true);
+      // A chunk summary that is not smaller than its chunk makes the
+      // combineSummaries -> summarizeConversation recursion below re-split the
+      // identical text forever. Observed 2026-08-31: qwen echoed a 14798-char
+      // chunk verbatim, and the pair recursed on the same 28611 chars 208 times
+      // (~2h of GPU) while ingestion stalled behind it. Reject here so the
+      // catch's truncation fallback runs and the next level is strictly smaller.
+      const summary = assertShrunk(
+        chunkText,
+        await summarizeChunk(chunkText, true),
+      );
       chunkSummaries.push(summary);
       console.log(
         `Chunk ${i + 1} summarized to ${summary.length} chars in ${((performance.now() - startedAt) / 1000).toFixed(1)}s`,
