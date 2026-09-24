@@ -1,6 +1,7 @@
 import assert from 'node:assert'
 import { query } from '../db/postgres.js'
 import { querySimilar } from '../db/chroma.js'
+import { sessionIdFromVectorId } from '../db/vector-ids.js'
 import { config } from '../config.js'
 import { getInteractiveOllamaClient } from '../embeddings/ollama.js'
 import { subtractVectors, normalizeVector, addVectors, scaleVector } from '../utils/vector-math.js'
@@ -466,9 +467,11 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
   //
   // Asking for the "useless" tag by name also counts as asking for noise. A
   // search for tags:["useless"] that then ranked every result down by its
-  // resemblance to "useless" would be fighting itself.
+  // resemblance to "useless" would be fighting itself. includeAutomated is the
+  // same request: automated sessions are part of the noise corpus, so the
+  // penalty would demote exactly what was asked for.
   const wantsNoisePenalty =
-    params.includeNoise !== true && !tagFilter.includeTags.includes(USELESS_TAG)
+    params.includeNoise !== true && !tagFilter.includeTags.includes(USELESS_TAG) && !includeAutomated
   // Chroma knows nothing about data classes, so an active class filter can
   // starve the semantic arms (~70% of sessions may be filtered out after the
   // fetch). Over-fetch harder when a filter is on to compensate.
@@ -519,7 +522,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       if (sessionHits.ids[0]) {
         const sessionRanked: RankedList = []
         for (let i = 0; i < sessionHits.ids[0].length; i++) {
-          const sessionId = parseInt(sessionHits.ids[0][i].replace('session-', ''))
+          const sessionId = sessionIdFromVectorId(sessionHits.ids[0][i])
           const score = 1 - (sessionHits.distances?.[0]?.[i] ?? 1)
           const session = await getSessionById(sessionId, includeAutomated)
           if (!session) continue

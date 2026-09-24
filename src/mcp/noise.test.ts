@@ -242,6 +242,9 @@ describe('clustering the two sources of noise', () => {
   })
 })
 
+const corpusLoads = () =>
+  query.mock.calls.filter((call) => String(call[0]).includes('s.is_automated OR EXISTS')).length
+
 describe('the cluster cache', () => {
   it('does not re-cluster within the cache window', async () => {
     seedCorpus([axis(0), axis(4)])
@@ -265,6 +268,24 @@ describe('the cluster cache', () => {
     invalidateNoiseClusters()
     await getNoiseClusters(1000)
     expect(getEmbeddingsByIds).toHaveBeenCalledTimes(2)
+  })
+
+  it('shares one build between searches that miss the cache together', async () => {
+    seedCorpus([axis(0), axis(4)])
+    const [a, b] = await Promise.all([getNoiseClusters(1000), getNoiseClusters(1000)])
+    expect(a).toBe(b)
+    expect(corpusLoads()).toBe(1)
+  })
+
+  // A report that lands while clusters are being built must not be cached over
+  // by the build that started before it.
+  it('does not cache a build that a report overtook', async () => {
+    seedCorpus([axis(0)])
+    const stale = getNoiseClusters(1000)
+    invalidateNoiseClusters()
+    await stale
+    await getNoiseClusters(1000)
+    expect(corpusLoads()).toBe(2)
   })
 
   // Ranking help is an enhancement; retrieval is the product. A corpus that

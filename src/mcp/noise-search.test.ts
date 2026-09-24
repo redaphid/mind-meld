@@ -254,6 +254,19 @@ describe('reported noise, end to end through search', () => {
     expect(results.every((r) => r.noise_damping === null)).toBe(true)
   })
 
+  // Automated sessions are part of the corpus, so a search that asks for them
+  // would otherwise demote exactly what it asked for.
+  it('does not penalize a search that asks for automated sessions', async () => {
+    const { results } = await searchWithDiagnostics({
+      query: 'anything',
+      mode: 'semantic',
+      dataClass: ['*'],
+      limit: 10,
+      includeAutomated: true,
+    })
+    expect(results.every((r) => r.noise_damping === null)).toBe(true)
+  })
+
   it('reports no damping at all when the penalty is off', async () => {
     const { results } = await searchWithDiagnostics({
       query: 'anything',

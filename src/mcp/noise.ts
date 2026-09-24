@@ -1,6 +1,7 @@
 import { config } from '../config.js'
 import { query } from '../db/postgres.js'
 import { getEmbeddingsByIds, hasId } from '../db/chroma.js'
+import { sessionVectorId } from '../db/vector-ids.js'
 import { cosineSimilarity, normalizeVector } from '../utils/vector-math.js'
 
 // NEGATIVE-VECTOR RANKING (task 326).
@@ -36,8 +37,6 @@ import { cosineSimilarity, normalizeVector } from '../utils/vector-math.js'
 // `pnpm run noise:eval` measures all of this against the live index.
 
 export const USELESS_TAG = 'useless'
-
-const sessionVectorId = (sessionId: number) => `session-${sessionId}`
 
 // Whether a session has a summary vector to teach the penalty with. A session
 // reported before it was summarized joins the corpus once it is.
@@ -213,19 +212,19 @@ export const clusterNoise = (corpus: readonly NoiseVector[]): number[][] =>
 type ClusterCache = { centroids: number[][]; computedAt: number; size: number }
 let cache: ClusterCache | null = null
 
+// Clustering ~2k vectors takes most of a second. Concurrent searches that miss
+// the cache share one build instead of each running their own, and a report
+// that lands mid-build bumps the generation so that build is not cached over it.
+let building: Promise<number[][]> | null = null
+let generation = 0
+
 export const invalidateNoiseClusters = (): void => {
   cache = null
+  building = null
+  generation++
 }
 
-// The current noise cluster centroids, rebuilt at most once per cache window.
-//
-// Returns an empty array when nothing has been reported, and every caller reads
-// that as "no penalty" rather than as an error -- on a fresh install the noise
-// corpus is empty, and search has to behave exactly as it did before any of
-// this existed.
-export const getNoiseClusters = async (now = Date.now()): Promise<number[][]> => {
-  if (cache && now - cache.computedAt < config.noise.clusterCacheMs) return cache.centroids
-
+const buildClusters = async (now: number, startedAt: number): Promise<number[][]> => {
   let centroids: number[][] = []
   let size = 0
   try {
@@ -233,15 +232,33 @@ export const getNoiseClusters = async (now = Date.now()): Promise<number[][]> =>
     size = corpus.length
     centroids = clusterNoise(corpus)
   } catch (e) {
-    // A missing or unreachable noise collection has to degrade to "no penalty",
-    // never to a failed search. Ranking help is an enhancement; retrieval is
-    // the product.
+    // An unreadable corpus has to degrade to "no penalty", never to a failed
+    // search. Ranking help is an enhancement; retrieval is the product.
     console.error('Noise clusters unavailable, ranking penalty disabled for this search:', e)
-    centroids = []
   }
-
-  cache = { centroids, computedAt: now, size }
+  if (startedAt === generation) cache = { centroids, computedAt: now, size }
   return centroids
+}
+
+// The current noise cluster centroids, rebuilt at most once per cache window.
+//
+// Returns an empty array when nothing counts as noise, and every caller reads
+// that as "no penalty" rather than as an error -- on a fresh install the noise
+// corpus is empty, and search has to behave exactly as it did before any of
+// this existed.
+export const getNoiseClusters = async (now = Date.now()): Promise<number[][]> => {
+  if (cache && now - cache.computedAt < config.noise.clusterCacheMs) return cache.centroids
+  if (!building) {
+    const startedAt = generation
+    building = (async () => {
+      try {
+        return await buildClusters(now, startedAt)
+      } finally {
+        if (startedAt === generation) building = null
+      }
+    })()
+  }
+  return building
 }
 
 // Cosine similarity to the closest noise cluster; -Infinity with no clusters.
