@@ -46,15 +46,15 @@ function getEnvFloat(key: string, defaultValue: number): number {
   return Number.isFinite(parsed) ? parsed : defaultValue;
 }
 
-// A comma-separated env var as a list. An explicitly empty value ("") means an
+// A separated (comma by default) env var as a list. An explicitly empty value ("") means an
 // empty list, not "fall back to the default" -- otherwise a setting like
 // MINDMELD_DEFAULT_EXCLUDED_TAGS could never be turned off from the
 // environment, only changed to something else.
-function getEnvList(key: string, defaultValue: string[]): string[] {
+function getEnvList(key: string, defaultValue: string[], separator = ","): string[] {
   const value = process.env[key];
   if (value === undefined) return defaultValue;
   return value
-    .split(",")
+    .split(separator)
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
 }
@@ -77,6 +77,15 @@ export const config = {
     // observed ~265KB/day for a sync container this is a few MB per machine
     // per fortnight; set 0 to keep everything.
     retentionDays: getEnvInt("LOG_RETENTION_DAYS", 14),
+  },
+
+  automated: {
+    // Opening-line prefixes that mark a session as an automated run, on top of
+    // the built-in AUTOMATED_PATTERNS in src/embeddings/classify.ts. For persona
+    // prompts that belong to one deployment and not in a public repo. Matched
+    // literally against the start of the first line. Separated by `|`, not
+    // commas, because an opening line routinely contains a comma.
+    prefixes: getEnvList("MINDMELD_AUTOMATED_PREFIXES", [], "|"),
   },
 
   tags: {

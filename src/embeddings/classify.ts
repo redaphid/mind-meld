@@ -1,3 +1,4 @@
+import { config } from '../config.js'
 import { stripScaffolding, isScaffoldingOnly } from '../utils/strip-scaffolding.js'
 
 // Patterns that indicate tool output, boilerplate, or noise — not worth embedding
@@ -68,6 +69,8 @@ export const classifyNoise = (text: string, dataClass?: string | null): string |
 // Persona prompts that mark a session as an automated, non-interactive run
 // (Slack monitoring, curiosity curation, MCP health checks, huddle transcripts).
 // These show up as the leading line of the session title / first user message.
+// Deployment-specific prompts are added through config.automated.prefixes
+// rather than here.
 const AUTOMATED_PATTERNS = [
   /^You are a Slack monitoring assistant/,
   /^You are a curiosity curator/,
@@ -82,6 +85,8 @@ export const classifyAutomated = (title: string | null): string | null => {
   const firstLine = title.split('\n')[0].trim()
   const matched = AUTOMATED_PATTERNS.find((p) => p.test(firstLine))
   if (matched) return `pattern:${matched.source}`
+  const prefix = config.automated.prefixes.find((p) => firstLine.startsWith(p))
+  if (prefix) return `prefix:${prefix}`
   return null
 }
 

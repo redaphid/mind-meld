@@ -76,6 +76,7 @@ services:
       OLLAMA_URL: ${OLLAMA_URL:?OLLAMA_URL is required}
       SUMMARIZE_MODEL: ${SUMMARIZE_MODEL:-qwen3:4b-instruct}
       SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS:-3600}
+      MINDMELD_AUTOMATED_PREFIXES: ${MINDMELD_AUTOMATED_PREFIXES:-}
     volumes:
       - ${CLAUDE_CODE_PATH:?CLAUDE_CODE_PATH is required}:/root/.claude:ro
       - ${CODEX_PATH:?CODEX_PATH is required}:/root/.codex:ro
@@ -127,6 +128,7 @@ services:
       CHROMA_PORT: 8000
       OLLAMA_URL: ${OLLAMA_URL:?OLLAMA_URL is required}
       MCP_PORT: 3000
+      MINDMELD_AUTOMATED_PREFIXES: ${MINDMELD_AUTOMATED_PREFIXES:-}
     ports:
       - "${MCP_HTTP_PORT:-3000}:3000"
     extra_hosts:
