@@ -135,8 +135,9 @@ export type SearchResult = {
   tags?: string[]
   // The factor the noise penalty multiplied this result's score by: 1 is
   // untouched. Null when the result could not be scored at all -- the penalty
-  // was off, nothing counts as noise, or the session has no summary vector yet
-  // -- which is a different answer from "scored and found clean".
+  // was off (includeNoise, includeAutomated, or tags:["useless"]), nothing
+  // counts as noise, or the session has no summary vector yet -- which is a
+  // different answer from "scored and found clean".
   noise_damping?: number | null
 }
 
