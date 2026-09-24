@@ -1437,7 +1437,8 @@ components:
 
     Status:
       type: object
-      required: [status, version, sync, totals, pendingEmbeddings, quarantined, chroma, latestSession]
+      required:
+        [status, version, sync, totals, pendingEmbeddings, vectorisedMessages, quarantined, chroma, latestSession]
       properties:
         status:
           type: string
@@ -1486,6 +1487,16 @@ components:
                 automated sessions, and any session that ended within the last 30
                 minutes — the embedder defers those rather than re-summarizing a
                 live conversation as it grows, so they are not queued work yet.
+        vectorisedMessages:
+          type: integer
+          description: |
+            Messages that already have a `convo-messages` embedding, drawn from
+            the same population as `pendingEmbeddings.messages`. Coverage is
+            `vectorisedMessages / (vectorisedMessages + pendingEmbeddings.messages)`.
+            `totals.embeddings / totals.messages` is not coverage: it counts
+            session, chunk and noise-marker rows on top and tool output,
+            fragments and deleted sessions below, and once read 51% with 67
+            messages actually waiting.
         quarantined:
           type: integer
           description: |

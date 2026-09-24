@@ -17,7 +17,11 @@ import { getSessionDigest, getMessages, getMessageById } from './session.js'
 import { createMcpServer } from './tools.js'
 import { getSyncStatus } from '../sync/orchestrator.js'
 import { startSyncRun, getSyncRunState } from './sync-run.js'
-import { pendingMessagesCount, pendingSessionsCount } from '../embeddings/pending.js'
+import {
+  pendingMessagesCount,
+  pendingSessionsCount,
+  vectorisedMessagesCount,
+} from '../embeddings/pending.js'
 import { getThroughput, clampWindow } from './throughput.js'
 import { readSystemStatus } from './system-status.js'
 import { getSummaryStatus } from './summary-status.js'
@@ -207,10 +211,11 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
     // so what this screen calls pending is what a worker will actually pick up.
     // Counting anything looser advertised a 32k backlog against zero real work.
     const pendingMessagesQuery = pendingMessagesCount()
-    const pendingMessages = await query<{ count: string }>(
-      pendingMessagesQuery.sql,
-      pendingMessagesQuery.params,
-    )
+    const vectorisedMessagesQuery = vectorisedMessagesCount()
+    const [pendingMessages, vectorisedMessages] = await Promise.all([
+      query<{ count: string }>(pendingMessagesQuery.sql, pendingMessagesQuery.params),
+      query<{ count: string }>(vectorisedMessagesQuery.sql, vectorisedMessagesQuery.params),
+    ])
 
     const pendingSessionsQuery = pendingSessionsCount(config.chroma.collections.sessions)
     const pendingSessions = await query<{ count: string }>(
@@ -266,6 +271,7 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
         messages: parseInt(pendingMessages.rows[0]?.count ?? '0', 10),
         sessions: parseInt(pendingSessions.rows[0]?.count ?? '0', 10),
       },
+      vectorisedMessages: parseInt(vectorisedMessages.rows[0]?.count ?? '0', 10),
       quarantined,
       chroma: { collections: chromaCollections },
       latestSession: latest

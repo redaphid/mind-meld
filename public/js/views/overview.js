@@ -404,8 +404,8 @@ export const OverviewView = () => {
   const s = status.data
   const totals = s?.totals ?? {}
   const pending = s?.pendingEmbeddings ?? {}
-  const embedded = Number(totals.embeddings ?? 0)
-  const messages = Number(totals.messages ?? 0)
+  const vectorised = Number(s?.vectorisedMessages ?? 0)
+  const embeddable = vectorised + Number(pending.messages ?? 0)
 
   return html`
     ${status.error &&
@@ -423,10 +423,10 @@ export const OverviewView = () => {
 
     <${Card} title="Embedding coverage">
       <div class="m" style="margin:0;font-size:13px">
-        <span>${pct(embedded, messages)}% of messages vectorised</span>
-        <span class="right faint">${fmtExact(embedded)} / ${fmtExact(messages)}</span>
+        <span>${pct(vectorised, embeddable)}% of embeddable messages vectorised</span>
+        <span class="right faint">${fmtExact(vectorised)} / ${fmtExact(embeddable)}</span>
       </div>
-      <${Bar} value=${embedded} total=${messages} />
+      <${Bar} value=${vectorised} total=${embeddable} />
       <div class="m" style="margin-top:10px">
         <${Pill} kind=${pending.messages > 0 ? 'warn' : 'good'}>
           ${fmtNum(pending.messages ?? 0)} messages pending
