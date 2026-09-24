@@ -4,6 +4,7 @@ import {
   embeddableSessions,
   pendingMessagesCount,
   pendingSessionsCount,
+  vectorisedMessagesCount,
 } from "./pending.js";
 
 // This module exists to stop one specific, silent failure: the dashboard
@@ -104,5 +105,34 @@ describe("the counters and the selectors cannot drift", () => {
     expect(pendingSessionsCount("convo-sessions").params).toEqual([
       "convo-sessions",
     ]);
+  });
+});
+
+// The coverage bar once divided every embeddings row (sessions, chunks, noise
+// markers) by every message (tool output, fragments, deleted sessions) and read
+// 51% against 67 messages of real work. Done and pending must split one
+// population, so each side has to apply every filter the other does.
+describe("vectorisedMessagesCount", () => {
+  const { sql } = vectorisedMessagesCount();
+  const eligibility = [
+    "m.content_text IS NOT NULL",
+    "LENGTH(m.content_text) > 10",
+    "m.role != 'tool'",
+    "s.deleted_at IS NULL",
+    "s.is_automated = false",
+  ];
+
+  it("counts only messages the embedder would ever work", () => {
+    for (const filter of eligibility) expect(sql).toContain(filter);
+  });
+
+  it("shares that population with the pending count", () => {
+    for (const filter of eligibility) expect(pendingMessagesCount().sql).toContain(filter);
+  });
+
+  it("counts a message once it has a message vector", () => {
+    expect(sql).toContain("e.chroma_collection = 'convo-messages'");
+    expect(sql).toContain("e.id IS NOT NULL");
+    expect(sql).not.toContain("e.id IS NULL");
   });
 });
