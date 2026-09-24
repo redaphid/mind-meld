@@ -1,4 +1,4 @@
-import { chooseClusterCount, sphericalKMeans, nearestSimilarity, noiseDamping, type NoiseVector } from './noise.js'
+import { clusterNoise, nearestSimilarity, noiseDamping, type NoiseVector } from './noise.js'
 
 // Measures whether the noise penalty does its one job: damp results that look
 // like reported noise, and leave real conversations alone. Pure, so the numbers
@@ -20,7 +20,7 @@ export type EvalInput = {
   // Sessions nobody would call noise, in the same space as `subjects`.
   real: number[][]
   // Real sessions known to sit close to the noise, reported one by one.
-  hard: NoiseVector[]
+  hard: { sessionId: number; vector: number[] }[]
   weight: number
   // The similarity below which a result pays nothing, given the clusters it
   // will be scored against.
@@ -89,13 +89,11 @@ const summarize = (similarities: number[], dampings: number[]): SetReport => ({
   },
 })
 
-const clustersOf = (vectors: number[][]) => sphericalKMeans(vectors, chooseClusterCount(vectors.length))
-
 export type EvalDump = { noiseSimilarities: number[]; realSimilarities: number[]; realFoldSimilarities: number[] }
 
 export const evaluateNoise = (input: EvalInput): EvalReport & EvalDump => {
   const folds = input.folds ?? 5
-  const full = clustersOf(input.corpus.map((c) => c.vector))
+  const full = clusterNoise(input.corpus)
   const floor = input.floorFor(full)
 
   // The AUC compares like with like: held-out noise and real sessions scored
@@ -107,7 +105,7 @@ export const evaluateNoise = (input: EvalInput): EvalReport & EvalDump => {
   for (let fold = 0; fold < folds; fold++) {
     const held = input.corpus.filter((c) => c.sessionId % folds === fold && input.subjects.has(c.sessionId))
     if (held.length === 0) continue
-    const trained = clustersOf(input.corpus.filter((c) => c.sessionId % folds !== fold).map((c) => c.vector))
+    const trained = clusterNoise(input.corpus.filter((c) => c.sessionId % folds !== fold))
     const foldFloor = input.floorFor(trained)
     for (const { sessionId } of held) {
       const subject = input.subjects.get(sessionId)

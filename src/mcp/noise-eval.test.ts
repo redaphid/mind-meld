@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 
 // The eval is pure; these only stop noise.ts from loading real clients.
 vi.mock('../db/postgres.js', () => ({ query: vi.fn() }))
-vi.mock('../db/chroma.js', () => ({ getAllEmbeddings: vi.fn() }))
+vi.mock('../db/chroma.js', () => ({ getEmbeddingsByIds: vi.fn(), hasId: vi.fn() }))
 vi.mock('../embeddings/ollama.js', () => ({}))
 
 const { auc, quantile, evaluateNoise } = await import('./noise-eval.js')
@@ -33,7 +33,7 @@ const blob = (centre: number[], n: number, offset: number) =>
   Array.from({ length: n }, (_, i) => jitter(centre, offset + i))
 
 const corpusOf = (vectors: number[][], firstId = 1000) =>
-  vectors.map((vector, i) => ({ sessionId: firstId + i, vector }))
+  vectors.map((vector, i) => ({ sessionId: firstId + i, vector, source: 'automated' as const }))
 
 const selfSubjects = (corpus: { sessionId: number; vector: number[] }[]) =>
   new Map(corpus.map((c) => [c.sessionId, c.vector]))

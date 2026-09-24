@@ -165,19 +165,6 @@ export function getInteractiveOllamaClient(): Ollama {
 // this way. Refusing lets the caller summarize instead, which loses far less.
 const NO_TRUNCATE = { truncate: false, keep_alive: "30m" } as const;
 
-// Generate embedding for a single text
-export async function generateEmbedding(text: string): Promise<number[]> {
-  const ollama = getOllamaClient();
-
-  const response = await ollama.embed({
-    model: config.embeddings.model,
-    input: text,
-    ...NO_TRUNCATE,
-  });
-
-  return response.embeddings[0];
-}
-
 // Sanitize text for embedding - remove problematic characters
 function sanitizeText(text: string): string {
   return text

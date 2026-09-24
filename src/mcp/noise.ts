@@ -1,25 +1,26 @@
 import { config } from '../config.js'
 import { query } from '../db/postgres.js'
-import { getAllEmbeddings, upsertEmbeddings, deleteEmbeddings } from '../db/chroma.js'
-import { generateEmbedding } from '../embeddings/ollama.js'
+import { getEmbeddingsByIds, hasId } from '../db/chroma.js'
+import { sessionVectorId } from '../db/vector-ids.js'
 import { cosineSimilarity, normalizeVector } from '../utils/vector-math.js'
 
 // NEGATIVE-VECTOR RANKING (task 326).
 //
 // Tagging a session "useless" hides that ONE session. This module is the other
-// half: it learns what the reported sessions look like, so that sessions nobody
-// has got round to reporting -- but which are the same KIND of noise -- rank
-// lower too. Without it, every piece of noise has to be reported individually
-// and search never gets ahead of the person feeding it.
+// half: it learns what noise looks like, so that sessions nobody has got round
+// to reporting -- but which are the same KIND of noise -- rank lower too.
+// Without it, every piece of noise has to be reported individually and search
+// never gets ahead of the person feeding it.
 //
 // Three decisions here are deliberate, and each one rules out a plausible
 // alternative:
 //
-// 1. NOISE VECTORS LIVE IN THEIR OWN CHROMA COLLECTION, AND SEARCH NEVER
-//    QUERIES IT. Reported sessions are read only to build the penalty. A
-//    "hidden" flag on rows inside a searchable collection would have needed
-//    every arm to remember to filter it; a separate collection cannot be
-//    forgotten.
+// 1. THE CORPUS IS DERIVED, NEVER STORED. A session is noise when sync flagged
+//    it automated or an agent tagged it "useless" -- two facts Postgres already
+//    holds -- and its vector is the session summary vector search itself
+//    retrieves by. A separate store of copied vectors needed a write on every
+//    report and a matching delete on every undo, drifted whenever one half
+//    failed, and never learned from the automated flag at all.
 //
 // 2. THE CENTROIDS ARE CLUSTERED, NOT AVERAGED. Sentinel notifications and
 //    tool-call spam sit in different regions of embedding space. Their global
@@ -32,79 +33,15 @@ import { cosineSimilarity, normalizeVector } from '../utils/vector-math.js'
 //    somewhere nobody asked about and retrieves a different, unrelated
 //    neighbourhood. Ranking down what came back leaves retrieval honest.
 //    Measured rather than assumed -- see the sweep recorded in the PR.
-
-const NOISE_ID_PREFIX = 'noise-session-'
-const noiseId = (sessionId: number) => `${NOISE_ID_PREFIX}${sessionId}`
-
-// The text that represents a session for noise purposes.
 //
-// Prefer the summary: it is what the sessions collection itself indexes, so a
-// noise vector lands in the same neighbourhood as the session vectors it has to
-// be compared against. The title is included because for notification stubs the
-// title (of the form "<app package> - <N new likes>") carries nearly all of the
-// signal and the body carries almost none.
-export const noiseTextFor = (row: { title: string | null; summary: string | null }): string =>
-  [row.title, row.summary].filter(Boolean).join('\n').trim()
+// `pnpm run noise:eval` measures all of this against the live index.
 
-type SessionVectorRow = { title: string | null; summary: string | null; centroid_vector: string | null }
+export const USELESS_TAG = 'useless'
 
-// The vector to store for a reported session.
-//
-// centroid_vector when it exists, because it is already computed and is the
-// session's own centre of mass. When it does not, embed title+summary rather
-// than giving up: of six sessions observed polluting a live search, FIVE had no
-// centroid_vector and ALL six had a summary. Skipping the centroid-less ones
-// would have excluded the most representative noise in the corpus from the
-// corpus.
-export const resolveNoiseVector = async (sessionId: number): Promise<number[] | null> => {
-  const result = await query<SessionVectorRow>(
-    'SELECT title, summary, centroid_vector FROM sessions WHERE id = $1',
-    [sessionId]
-  )
-  const row = result.rows[0]
-  if (!row) return null
-
-  if (row.centroid_vector) {
-    try {
-      const parsed = JSON.parse(row.centroid_vector)
-      if (Array.isArray(parsed) && parsed.length > 0) return normalizeVector(parsed)
-    } catch {
-      // A corrupt centroid is not a reason to refuse the report. Fall through
-      // and embed the text instead.
-    }
-  }
-
-  const text = noiseTextFor(row)
-  if (!text) return null
-  return normalizeVector(await generateEmbedding(text))
-}
-
-// Add a session to the noise corpus. Upsert, so re-reporting a session that was
-// already reported is a no-op rather than a duplicate vector that would quietly
-// give that one session double weight in clustering.
-export const recordNoiseVector = async (sessionId: number): Promise<boolean> => {
-  const vector = await resolveNoiseVector(sessionId)
-  if (!vector) return false
-  await upsertEmbeddings(config.chroma.collections.noise, {
-    ids: [noiseId(sessionId)],
-    embeddings: [vector],
-    // No session text is stored. The vector is all the penalty needs, and the
-    // noise corpus is disproportionately personal-notification content -- there
-    // is no reason to keep a second plaintext copy of it in another store.
-    documents: [''],
-    metadatas: [{ session_id: sessionId }],
-  })
-  invalidateNoiseClusters()
-  return true
-}
-
-// Take a session back out of the noise corpus. Un-reporting has to undo BOTH
-// halves -- the tag and the vector -- or an un-reported session would carry on
-// teaching search to demote everything that looks like it.
-export const forgetNoiseVector = async (sessionId: number): Promise<void> => {
-  await deleteEmbeddings(config.chroma.collections.noise, [noiseId(sessionId)])
-  invalidateNoiseClusters()
-}
+// Whether a session has a summary vector to teach the penalty with. A session
+// reported before it was summarized joins the corpus once it is.
+export const hasNoiseVector = (sessionId: number): Promise<boolean> =>
+  hasId(config.chroma.collections.sessions, sessionVectorId(sessionId))
 
 // How many clusters for a corpus of n vectors: about one per four, capped.
 //
@@ -140,9 +77,11 @@ export const chooseClusterCount = (n: number, configured = config.noise.clusterC
 // retrieval space is cosine, so clusters have to be defined by angle rather
 // than by magnitude, or the centroids describe a geometry search does not use.
 //
-// Deterministic: the seeded PRNG means the same corpus produces the same
-// centroids in every process, which is what makes the behaviour testable and a
-// ranking change explainable rather than mysterious.
+// Deterministic: the seeded PRNG means the same corpus IN THE SAME ORDER produces
+// the same centroids in every process, which is what makes the behaviour
+// testable and a ranking change explainable rather than mysterious. The seed
+// picks centres by position, so loadNoiseCorpus fixes the order: without it,
+// writing one tag could reshuffle Postgres' row order and every cluster with it.
 export const sphericalKMeans = (
   vectors: readonly number[][],
   k: number,
@@ -219,51 +158,107 @@ export const sphericalKMeans = (
   return centroids
 }
 
-export type NoiseVector = { sessionId: number; vector: number[] }
+// Where a session's noise verdict came from. Sync flags automated runs by the
+// thousand; agents report sessions a handful at a time.
+type NoiseSource = 'automated' | 'reported'
+
+export type NoiseVector = { sessionId: number; vector: number[]; source: NoiseSource }
 
 // Every vector the penalty learns from, keyed by the session it came from. The
 // eval harness (scripts/noise-eval.ts) reads the corpus through this too, so
 // what it measures is what search clusters.
-export const loadNoiseCorpus = async (): Promise<NoiseVector[]> => {
-  const { ids, embeddings } = await getAllEmbeddings(config.chroma.collections.noise)
-  return ids.map((id, i) => ({
-    sessionId: Number(id.replace(NOISE_ID_PREFIX, '')),
-    vector: normalizeVector(embeddings[i]),
+// The vector a session is judged by, on both sides of the penalty: the corpus
+// is built from noise sessions' summary vectors and every search hit is scored
+// by its own. Comparing a message or chunk vector against summary vectors put
+// the two in different distributions, and a full-text hit had no vector at all.
+export const sessionVectors = async (sessionIds: number[]): Promise<Map<number, number[]>> => {
+  const byId = await getEmbeddingsByIds(config.chroma.collections.sessions, sessionIds.map(sessionVectorId))
+  return new Map(sessionIds.flatMap((id) => {
+    const vector = byId.get(sessionVectorId(id))
+    return vector ? [[id, normalizeVector(vector)] as const] : []
   }))
 }
+
+export const loadNoiseCorpus = async (): Promise<NoiseVector[]> => {
+  const { rows } = await query<{ id: number; is_automated: boolean }>(
+    `SELECT s.id, s.is_automated FROM sessions s
+     WHERE s.deleted_at IS NULL
+       AND (s.is_automated OR EXISTS (SELECT 1 FROM tags t WHERE t.session_id = s.id AND t.tag = $1))
+     ORDER BY s.id`,
+    [USELESS_TAG]
+  )
+  const vectors = await sessionVectors(rows.map((r) => r.id))
+  return rows.flatMap(({ id, is_automated }) => {
+    const vector = vectors.get(id)
+    return vector ? [{ sessionId: id, vector, source: is_automated ? ('automated' as const) : ('reported' as const) }] : []
+  })
+}
+
+// Each source is clustered on its own, and their clusters pooled. Clustered
+// together, a few fresh reports are outvoted by thousands of automated runs:
+// k-means re-seats every centre, the reports rarely get one of their own, and
+// some lookalikes end up LESS noise-like after a report than before it. Apart,
+// adding reports never moves an automated cluster, and a handful of reports of
+// a new kind of noise gets a centre of its own straight away. Measured on the
+// live index: reporting 5 of a 1,718-session family moved 88% of the rest
+// closer to the noise (median similarity 0.692 -> 0.812), against 86% and 0.764
+// clustered jointly.
+export const clusterNoise = (corpus: readonly NoiseVector[]): number[][] =>
+  (['automated', 'reported'] as const).flatMap((source) => {
+    const vectors = corpus.filter((c) => c.source === source).map((c) => c.vector)
+    return sphericalKMeans(vectors, chooseClusterCount(vectors.length))
+  })
 
 type ClusterCache = { centroids: number[][]; computedAt: number; size: number }
 let cache: ClusterCache | null = null
 
+// Clustering ~2k vectors takes most of a second. Concurrent searches that miss
+// the cache share one build instead of each running their own, and a report
+// that lands mid-build bumps the generation so that build is not cached over it.
+let building: Promise<number[][]> | null = null
+let generation = 0
+
 export const invalidateNoiseClusters = (): void => {
   cache = null
+  building = null
+  generation++
 }
 
-// The current noise cluster centroids, rebuilt at most once per cache window.
-//
-// Returns an empty array when nothing has been reported, and every caller reads
-// that as "no penalty" rather than as an error -- on a fresh install the noise
-// corpus is empty, and search has to behave exactly as it did before any of
-// this existed.
-export const getNoiseClusters = async (now = Date.now()): Promise<number[][]> => {
-  if (cache && now - cache.computedAt < config.noise.clusterCacheMs) return cache.centroids
-
+const buildClusters = async (now: number, startedAt: number): Promise<number[][]> => {
   let centroids: number[][] = []
   let size = 0
   try {
     const corpus = await loadNoiseCorpus()
     size = corpus.length
-    if (size > 0) centroids = sphericalKMeans(corpus.map((c) => c.vector), chooseClusterCount(size))
+    centroids = clusterNoise(corpus)
   } catch (e) {
-    // A missing or unreachable noise collection has to degrade to "no penalty",
-    // never to a failed search. Ranking help is an enhancement; retrieval is
-    // the product.
+    // An unreadable corpus has to degrade to "no penalty", never to a failed
+    // search. Ranking help is an enhancement; retrieval is the product.
     console.error('Noise clusters unavailable, ranking penalty disabled for this search:', e)
-    centroids = []
   }
-
-  cache = { centroids, computedAt: now, size }
+  if (startedAt === generation) cache = { centroids, computedAt: now, size }
   return centroids
+}
+
+// The current noise cluster centroids, rebuilt at most once per cache window.
+//
+// Returns an empty array when nothing counts as noise, and every caller reads
+// that as "no penalty" rather than as an error -- on a fresh install the noise
+// corpus is empty, and search has to behave exactly as it did before any of
+// this existed.
+export const getNoiseClusters = async (now = Date.now()): Promise<number[][]> => {
+  if (cache && now - cache.computedAt < config.noise.clusterCacheMs) return cache.centroids
+  if (!building) {
+    const startedAt = generation
+    building = (async () => {
+      try {
+        return await buildClusters(now, startedAt)
+      } finally {
+        if (startedAt === generation) building = null
+      }
+    })()
+  }
+  return building
 }
 
 // Cosine similarity to the closest noise cluster; -Infinity with no clusters.

@@ -5,36 +5,29 @@ vi.mock('../db/postgres.js', () => ({
   query: (...args: unknown[]) => query(...(args as [])),
 }))
 
-const getAllEmbeddings = vi.fn(async () => ({ ids: [] as string[], embeddings: [] as number[][] }))
-const upsertEmbeddings = vi.fn(async (..._args: unknown[]) => {})
-const deleteEmbeddings = vi.fn(async (..._args: unknown[]) => {})
+const getEmbeddingsByIds = vi.fn(async (..._args: unknown[]) => new Map<string, number[]>())
+const hasId = vi.fn(async (..._args: unknown[]) => true)
 vi.mock('../db/chroma.js', () => ({
-  getAllEmbeddings: (...args: unknown[]) => getAllEmbeddings(...(args as [])),
-  upsertEmbeddings: (...args: unknown[]) => upsertEmbeddings(...(args as [])),
-  deleteEmbeddings: (...args: unknown[]) => deleteEmbeddings(...(args as [])),
-}))
-
-const generateEmbedding = vi.fn(async (_text: string) => [0, 1, 0])
-vi.mock('../embeddings/ollama.js', () => ({
-  generateEmbedding: (...args: unknown[]) => generateEmbedding(...(args as [string])),
+  getEmbeddingsByIds: (...args: unknown[]) => getEmbeddingsByIds(...(args as [])),
+  hasId: (...args: unknown[]) => hasId(...(args as [])),
 }))
 
 const mockConfig = {
-  chroma: { collections: { noise: 'convo-noise' } },
+  chroma: { collections: { sessions: 'convo-sessions' } },
   noise: { penaltyWeight: 0.35, similarityFloor: 0.55, clusterCount: 0, clusterCacheMs: 300000 },
 }
 vi.mock('../config.js', () => ({ config: mockConfig }))
 
 const {
-  noiseTextFor,
-  resolveNoiseVector,
-  recordNoiseVector,
-  forgetNoiseVector,
+  USELESS_TAG,
+  hasNoiseVector,
+  loadNoiseCorpus,
   chooseClusterCount,
   sphericalKMeans,
   getNoiseClusters,
   invalidateNoiseClusters,
   noiseDamping,
+  clusterNoise,
 } = await import('./noise.js')
 
 // A unit vector pointing along one axis of a small space, so "different region
@@ -48,7 +41,8 @@ const between = (a: number[], b: number[], t: number): number[] => a.map((x, i) 
 beforeEach(() => {
   vi.clearAllMocks()
   mockConfig.noise = { penaltyWeight: 0.35, similarityFloor: 0.55, clusterCount: 0, clusterCacheMs: 300000 }
-  getAllEmbeddings.mockResolvedValue({ ids: [], embeddings: [] })
+  query.mockResolvedValue({ rows: [], rowCount: 0 })
+  getEmbeddingsByIds.mockResolvedValue(new Map())
   invalidateNoiseClusters()
 })
 
@@ -166,124 +160,149 @@ describe('the noise damping factor', () => {
   })
 })
 
-describe('the text that stands in for a session', () => {
-  it('puts the title first, because for a stub the title is the whole signal', () => {
-    expect(noiseTextFor({ title: 'app - N new likes', summary: 'a notification' })).toBe(
-      'app - N new likes\na notification'
-    )
+// Sessions 1..n are automated noise, each with the given summary vector.
+const seedCorpus = (vectors: number[][]) => {
+  query.mockResolvedValue({ rows: vectors.map((_, i) => ({ id: i + 1, is_automated: true })), rowCount: vectors.length })
+  getEmbeddingsByIds.mockResolvedValue(new Map(vectors.map((v, i) => [`session-${i + 1}`, v])))
+}
+
+describe('the noise corpus', () => {
+  it('is every session flagged automated or tagged useless', async () => {
+    await loadNoiseCorpus()
+    const [sql, params] = query.mock.calls[0] as [string, unknown[]]
+    expect(sql).toContain('s.is_automated OR EXISTS')
+    expect(params).toEqual([USELESS_TAG])
+    // k-means seeds by position, so an unordered corpus is an unstable one.
+    expect(sql).toContain('ORDER BY s.id')
   })
 
-  it('uses whichever half exists', () => {
-    expect(noiseTextFor({ title: null, summary: 'only a summary' })).toBe('only a summary')
-    expect(noiseTextFor({ title: 'only a title', summary: null })).toBe('only a title')
-    expect(noiseTextFor({ title: null, summary: null })).toBe('')
+  it('reads each noise session by the summary vector search retrieves it by', async () => {
+    seedCorpus([axis(0), axis(1)])
+    const corpus = await loadNoiseCorpus()
+    expect(getEmbeddingsByIds).toHaveBeenCalledWith('convo-sessions', ['session-1', 'session-2'])
+    expect(corpus).toEqual([
+      { sessionId: 1, vector: axis(0), source: 'automated' },
+      { sessionId: 2, vector: axis(1), source: 'automated' },
+    ])
+  })
+
+  it('marks a session reported by an agent apart from one sync flagged', async () => {
+    query.mockResolvedValue({ rows: [{ id: 1, is_automated: true }, { id: 2, is_automated: false }], rowCount: 2 })
+    getEmbeddingsByIds.mockResolvedValue(new Map([['session-1', axis(0)], ['session-2', axis(1)]]))
+    expect((await loadNoiseCorpus()).map((c) => c.source)).toEqual(['automated', 'reported'])
+  })
+
+  it('normalizes what it reads', async () => {
+    seedCorpus([[3, 0, 0, 0, 0, 0, 0, 0]])
+    expect((await loadNoiseCorpus())[0].vector).toEqual(axis(0))
+  })
+
+  // A session reported before it was summarized has nothing to teach yet. It
+  // joins by itself once summarization writes its vector.
+  it('leaves out a noise session that has no summary vector yet', async () => {
+    query.mockResolvedValue({ rows: [{ id: 1, is_automated: false }, { id: 2, is_automated: false }], rowCount: 2 })
+    getEmbeddingsByIds.mockResolvedValue(new Map([['session-2', axis(3)]]))
+    expect(await loadNoiseCorpus()).toEqual([{ sessionId: 2, vector: axis(3), source: 'reported' }])
+  })
+
+  it('checks a session for a summary vector in the sessions collection', async () => {
+    hasId.mockResolvedValueOnce(false)
+    expect(await hasNoiseVector(7)).toBe(false)
+    expect(hasId).toHaveBeenCalledWith('convo-sessions', 'session-7')
   })
 })
 
-describe('building a session vector for the noise corpus', () => {
-  it('prefers the session centroid when it has one', async () => {
-    query.mockResolvedValueOnce({
-      rows: [{ title: 't', summary: 's', centroid_vector: JSON.stringify([3, 0, 0]) }],
-      rowCount: 1,
-    })
-    expect(await resolveNoiseVector(1)).toEqual([1, 0, 0])
-    expect(generateEmbedding).not.toHaveBeenCalled()
+describe('clustering the two sources of noise', () => {
+  const automated = (vectors: number[][]) =>
+    vectors.map((vector, i) => ({ sessionId: i + 1, vector, source: 'automated' as const }))
+  const reported = (vectors: number[][]) =>
+    vectors.map((vector, i) => ({ sessionId: 500 + i, vector, source: 'reported' as const }))
+
+  // Thousands of automated runs must not be able to outvote a handful of
+  // reports: a new kind of noise gets a centre of its own immediately.
+  it('gives a handful of reports a cluster of their own', () => {
+    const bulk = automated(Array.from({ length: 40 }, (_, i) => between(axis(i % 4), axis((i + 1) % 4), 0.3)))
+    const fresh = reported([axis(6), between(axis(6), axis(7), 0.1)])
+    const clusters = clusterNoise([...bulk, ...fresh])
+    const probe = between(axis(6), axis(7), 0.05)
+    expect(noiseDamping(probe, clusters)).toBeLessThan(noiseDamping(probe, clusterNoise(bulk)))
   })
 
-  // The case that matters: five of the six sessions observed polluting a live
-  // search had no centroid, and all six had a summary. Refusing them would have
-  // left the most representative noise out of the noise corpus.
-  it('embeds title and summary when there is no centroid', async () => {
-    query.mockResolvedValueOnce({
-      rows: [{ title: 'a stub', summary: 'nothing happened', centroid_vector: null }],
-      rowCount: 1,
-    })
-    expect(await resolveNoiseVector(1)).toEqual([0, 1, 0])
-    expect(generateEmbedding).toHaveBeenCalledWith('a stub\nnothing happened')
+  // A report can only add noise. It must never leave anything LESS noise-like
+  // than it was, which re-seating every centre jointly could do.
+  it('never moves an automated cluster when reports are added', () => {
+    const bulk = automated([axis(0), axis(1), axis(2), between(axis(0), axis(1), 0.5)])
+    const before = clusterNoise(bulk)
+    const after = clusterNoise([...bulk, ...reported([axis(5)])])
+    expect(after.slice(0, before.length)).toEqual(before)
   })
 
-  it('falls back to embedding when the stored centroid is corrupt', async () => {
-    query.mockResolvedValueOnce({
-      rows: [{ title: 'a stub', summary: null, centroid_vector: 'not json' }],
-      rowCount: 1,
-    })
-    expect(await resolveNoiseVector(1)).toEqual([0, 1, 0])
-  })
-
-  it('has no vector for a session with no title and no summary', async () => {
-    query.mockResolvedValueOnce({ rows: [{ title: null, summary: null, centroid_vector: null }], rowCount: 1 })
-    expect(await resolveNoiseVector(1)).toBeNull()
-  })
-
-  it('has no vector for a session that does not exist', async () => {
-    query.mockResolvedValueOnce({ rows: [], rowCount: 0 })
-    expect(await resolveNoiseVector(404)).toBeNull()
-  })
-
-  it('stores the vector but not the session text', async () => {
-    query.mockResolvedValueOnce({
-      rows: [{ title: 'a stub', summary: 'nothing happened', centroid_vector: null }],
-      rowCount: 1,
-    })
-    expect(await recordNoiseVector(7)).toBe(true)
-    const [collection, payload] = upsertEmbeddings.mock.calls[0] as [string, Record<string, unknown[]>]
-    expect(collection).toBe('convo-noise')
-    expect(payload.ids).toEqual(['noise-session-7'])
-    // The noise corpus is disproportionately personal notification content.
-    // The vector is all the penalty needs; a second plaintext copy is not.
-    expect(payload.documents).toEqual([''])
-  })
-
-  it('reports that it learned nothing when there was nothing to embed', async () => {
-    query.mockResolvedValueOnce({ rows: [{ title: null, summary: null, centroid_vector: null }], rowCount: 1 })
-    expect(await recordNoiseVector(7)).toBe(false)
-    expect(upsertEmbeddings).not.toHaveBeenCalled()
-  })
-
-  it('removes the vector again on un-report', async () => {
-    await forgetNoiseVector(7)
-    expect(deleteEmbeddings).toHaveBeenCalledWith('convo-noise', ['noise-session-7'])
+  it('has no clusters when there is no noise of either kind', () => {
+    expect(clusterNoise([])).toEqual([])
   })
 })
+
+const corpusLoads = () =>
+  query.mock.calls.filter((call) => String(call[0]).includes('s.is_automated OR EXISTS')).length
 
 describe('the cluster cache', () => {
   it('does not re-cluster within the cache window', async () => {
-    getAllEmbeddings.mockResolvedValue({ ids: ['a', 'b'], embeddings: [axis(0), axis(4)] })
+    seedCorpus([axis(0), axis(4)])
     await getNoiseClusters(1000)
     await getNoiseClusters(1000 + 1000)
-    expect(getAllEmbeddings).toHaveBeenCalledTimes(1)
+    expect(getEmbeddingsByIds).toHaveBeenCalledTimes(1)
   })
 
   it('re-clusters once the window has passed', async () => {
-    getAllEmbeddings.mockResolvedValue({ ids: ['a', 'b'], embeddings: [axis(0), axis(4)] })
+    seedCorpus([axis(0), axis(4)])
     await getNoiseClusters(1000)
     await getNoiseClusters(1000 + 300001)
-    expect(getAllEmbeddings).toHaveBeenCalledTimes(2)
+    expect(getEmbeddingsByIds).toHaveBeenCalledTimes(2)
   })
 
   // An agent that has just reported something must see the effect on its very
-  // next search, not up to five minutes later.
-  it('re-clusters immediately after a report invalidates it', async () => {
-    getAllEmbeddings.mockResolvedValue({ ids: ['a'], embeddings: [axis(0)] })
+  // next search, not up to five minutes later. The report tools invalidate.
+  it('re-clusters immediately once invalidated', async () => {
+    seedCorpus([axis(0)])
     await getNoiseClusters(1000)
-    query.mockResolvedValueOnce({
-      rows: [{ title: 't', summary: 's', centroid_vector: JSON.stringify([1, 0, 0]) }],
-      rowCount: 1,
-    })
-    await recordNoiseVector(9)
+    invalidateNoiseClusters()
     await getNoiseClusters(1000)
-    expect(getAllEmbeddings).toHaveBeenCalledTimes(2)
+    expect(getEmbeddingsByIds).toHaveBeenCalledTimes(2)
   })
 
-  // Ranking help is an enhancement; retrieval is the product. An unreachable
-  // noise collection must cost the penalty, never the search.
-  it('degrades to no penalty when the noise collection cannot be read', async () => {
-    getAllEmbeddings.mockRejectedValueOnce(new Error('chroma is down'))
+  it('shares one build between searches that miss the cache together', async () => {
+    seedCorpus([axis(0), axis(4)])
+    const [a, b] = await Promise.all([getNoiseClusters(1000), getNoiseClusters(1000)])
+    expect(a).toBe(b)
+    expect(corpusLoads()).toBe(1)
+  })
+
+  // A report that lands while clusters are being built must not be cached over
+  // by the build that started before it.
+  it('does not cache a build that a report overtook', async () => {
+    seedCorpus([axis(0)])
+    const stale = getNoiseClusters(1000)
+    invalidateNoiseClusters()
+    await stale
+    await getNoiseClusters(1000)
+    expect(corpusLoads()).toBe(2)
+  })
+
+  // Ranking help is an enhancement; retrieval is the product. A corpus that
+  // cannot be read must cost the penalty, never the search.
+  it('degrades to no penalty when the vectors cannot be read', async () => {
+    seedCorpus([axis(0)])
+    getEmbeddingsByIds.mockRejectedValueOnce(new Error('chroma is down'))
     expect(await getNoiseClusters(1000)).toEqual([])
     expect(noiseDamping(axis(0), await getNoiseClusters(1000))).toBe(1)
   })
 
-  it('has no clusters, and so no penalty, before anything is reported', async () => {
+  it('degrades to no penalty when the noise sessions cannot be listed', async () => {
+    query.mockRejectedValueOnce(new Error('postgres is down'))
+    expect(await getNoiseClusters(1000)).toEqual([])
+  })
+
+  it('has no clusters, and so no penalty, when nothing is noise', async () => {
     expect(await getNoiseClusters(1000)).toEqual([])
   })
 })

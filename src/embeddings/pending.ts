@@ -1,5 +1,6 @@
 import { config } from "../config.js";
 import { notWarmup } from "../mcp/title.js";
+import { SESSION_VECTOR_PREFIX } from "../db/vector-ids.js";
 
 // ONE definition of "work the embedder will actually pick up".
 //
@@ -82,7 +83,7 @@ export const embeddableSessions = (collectionParam: string): string =>
   `FROM sessions s
      JOIN projects p ON s.project_id = p.id
      JOIN sources src ON p.source_id = src.id
-     LEFT JOIN embeddings e ON e.chroma_collection = ${collectionParam} AND e.chroma_id = 'session-' || s.id::text
+     LEFT JOIN embeddings e ON e.chroma_collection = ${collectionParam} AND e.chroma_id = '${SESSION_VECTOR_PREFIX}' || s.id::text
      WHERE s.message_count > 0
        AND ${notWarmup("s")}
        AND s.deleted_at IS NULL

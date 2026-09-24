@@ -5,7 +5,6 @@
     "exports:src/db/chroma.ts:getMessagesCollection",
     "exports:src/db/chroma.ts:getProjectsCollection",
     "exports:src/db/chroma.ts:getSessionsCollection",
-    "exports:src/db/chroma.ts:hasId",
     "exports:src/db/postgres.ts:getClient",
     "exports:src/db/postgres.ts:getPool",
     "exports:src/embeddings/batch.ts:markUnembeddable",

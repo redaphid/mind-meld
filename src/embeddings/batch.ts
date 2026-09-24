@@ -6,6 +6,7 @@ import {
   getEmbeddingMetadata,
   getCollection,
 } from "../db/chroma.js";
+import { sessionVectorId } from "../db/vector-ids.js";
 import { generateEmbeddings, ensureEmbeddingModel } from "./ollama.js";
 import { summarizeConversation, ensureSummarizeModel, combineSummaries } from "./summarize.js";
 import { persistSessionChunks, SessionMessage } from "./chunks.js";
@@ -418,7 +419,7 @@ const markSessionProcessed = async (
      DO UPDATE SET content_chars_at_embed = $5`,
     [
       config.chroma.collections.sessions,
-      `session-${sessionId}`,
+      sessionVectorId(sessionId),
       config.embeddings.model,
       config.embeddings.dimensions,
       contentChars,
@@ -490,7 +491,7 @@ export async function updateAggregateEmbeddings(deadline: number): Promise<{
       // Also verify Chroma has the embedding with correct content_chars
       const chromaMetadata = await getEmbeddingMetadata(
         config.chroma.collections.sessions,
-        `session-${session.id}`,
+        sessionVectorId(session.id),
       );
 
       // If Chroma already has this embedding with sufficient content_chars,
@@ -509,7 +510,7 @@ export async function updateAggregateEmbeddings(deadline: number): Promise<{
              DO UPDATE SET content_chars_at_embed = $5`,
             [
               config.chroma.collections.sessions,
-              `session-${session.id}`,
+              sessionVectorId(session.id),
               config.embeddings.model,
               config.embeddings.dimensions,
               chromaContentChars,
@@ -571,7 +572,7 @@ export async function updateAggregateEmbeddings(deadline: number): Promise<{
 
       // Upsert to Chroma sessions collection (update if exists)
       await upsertEmbeddings(config.chroma.collections.sessions, {
-        ids: [`session-${session.id}`],
+        ids: [sessionVectorId(session.id)],
         embeddings: [embeddings[0]],
         documents: [textForEmbedding.slice(0, 2000)],
         metadatas: [
@@ -607,7 +608,7 @@ export async function updateAggregateEmbeddings(deadline: number): Promise<{
          DO UPDATE SET content_chars_at_embed = $5`,
         [
           config.chroma.collections.sessions,
-          `session-${session.id}`,
+          sessionVectorId(session.id),
           config.embeddings.model,
           config.embeddings.dimensions,
           actualContentChars,

@@ -43,11 +43,12 @@ vi.mock('./health.js', () => ({
   formatHealth: () => 'HEALTH',
 }))
 
-const doRecordNoiseVector = vi.fn(async () => true)
-const doForgetNoiseVector = vi.fn(async () => {})
+const doHasNoiseVector = vi.fn(async () => true)
+const doInvalidateNoiseClusters = vi.fn()
 vi.mock('./noise.js', () => ({
-  recordNoiseVector: (...args: unknown[]) => doRecordNoiseVector(...(args as [])),
-  forgetNoiseVector: (...args: unknown[]) => doForgetNoiseVector(...(args as [])),
+  USELESS_TAG: 'useless',
+  hasNoiseVector: (...args: unknown[]) => doHasNoiseVector(...(args as [])),
+  invalidateNoiseClusters: () => doInvalidateNoiseClusters(),
 }))
 
 const doApplyTags = vi.fn(async () => ['useless'])
@@ -230,7 +231,7 @@ describe('every advertised tool executes', () => {
   // script, not by this tool, and 426 of them are personal SMS threads. So the
   // assertion that matters most here is the negative one at the bottom: no SQL
   // this tool issues may mention deleted_at.
-  it('flags rather than deletes on reportUselessSession, and records the noise vector', async () => {
+  it('flags rather than deletes on reportUselessSession, and counts it as noise at once', async () => {
     const client = await connect()
 
     query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }], rowCount: 1 } as never)
@@ -247,8 +248,24 @@ describe('every advertised tool executes', () => {
       createdBy: 'reportUselessSession',
       note: 'notification stub',
     })
-    // The vector half: reporting one session has to generalise to similar ones.
-    expect(doRecordNoiseVector).toHaveBeenCalledWith(5)
+    // The tag is what puts a session in the noise corpus; the next search has
+    // to re-cluster rather than wait out the cache.
+    expect(doInvalidateNoiseClusters).toHaveBeenCalled()
+    expect(out).toContain('similar sessions will rank lower too')
+
+    // A session with no summary vector yet is flagged all the same, and told so.
+    doHasNoiseVector.mockResolvedValueOnce(false)
+    query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }], rowCount: 1 } as never)
+    expect(
+      text(await client.callTool({ name: 'reportUselessSession', arguments: { sessionId: 8 } }))
+    ).toContain('once it is summarized')
+
+    // A Chroma outage cannot fail a report whose tag is already written.
+    doHasNoiseVector.mockRejectedValueOnce(new Error('chroma is down'))
+    query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }], rowCount: 1 } as never)
+    expect(
+      text(await client.callTool({ name: 'reportUselessSession', arguments: { sessionId: 9 } }))
+    ).toContain('flagged "useless"')
 
     // A session that does not exist is reported as such, and is not tagged.
     doApplyTags.mockClear()
@@ -266,16 +283,16 @@ describe('every advertised tool executes', () => {
     await client.close()
   })
 
-  it('undoes both halves of a report on unreportUselessSession', async () => {
+  it('undoes a report on unreportUselessSession, and takes it out of the corpus at once', async () => {
     const client = await connect()
 
     expect(
       text(await client.callTool({ name: 'unreportUselessSession', arguments: { sessionId: 5 } }))
     ).toContain('no longer flagged useless')
     expect(doRemoveTags).toHaveBeenCalledWith({ sessionId: 5 }, ['useless'])
-    // Removing the tag alone would leave the session still teaching the ranker
-    // to demote everything that looks like it.
-    expect(doForgetNoiseVector).toHaveBeenCalledWith(5)
+    // Removing the tag is what takes the session out of the noise corpus, so the
+    // next search has to re-cluster without it.
+    expect(doInvalidateNoiseClusters).toHaveBeenCalled()
 
     // Un-reporting something never reported is not an error.
     doRemoveTags.mockResolvedValueOnce([] as never)

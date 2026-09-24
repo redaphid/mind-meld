@@ -350,6 +350,8 @@ paths:
           description: |
             Include sessions classified as automated (warmups, monitoring runs).
             Excluded by default because they crowd out real conversations.
+            Automated sessions are part of the noise corpus, so asking for them
+            also switches the noise ranking penalty off.
           schema:
             type: boolean
             default: false
@@ -1917,8 +1919,9 @@ components:
           description: |
             The factor the noise penalty multiplied `score` by, where 1 means
             untouched. Null when the hit could not be scored: the penalty was
-            off (`includeNoise=true`), nothing counts as noise yet, or the hit
-            carried no vector. Null is a different answer from 1.
+            off (`includeNoise=true`, `includeAutomated=true`, or `tag=useless`),
+            nothing counts as noise yet, or the session has no summary vector
+            yet. Null is a different answer from 1.
           oneOf:
             - type: 'null'
             - type: number

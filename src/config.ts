@@ -154,12 +154,6 @@ export const config = {
       sessions: "convo-sessions",
       projects: "convo-projects",
       chunks: "convo-chunks",
-      // Vectors of sessions an agent reported as useless. SEARCH NEVER QUERIES
-      // THIS COLLECTION -- it is read only to build the ranking penalty. Keeping
-      // it outside the four searchable collections is what makes "reported
-      // sessions go somewhere search does not look" structurally true rather
-      // than true only while somebody remembers to filter it out.
-      noise: "convo-noise",
     },
   },
 
