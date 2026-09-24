@@ -150,6 +150,15 @@ describe('evaluateNoise', () => {
     expect(seen).toHaveLength(6)
   })
 
+  it('computes the AUC from exactly the similarities it dumps', () => {
+    const corpus = corpusOf(blob(axis(0), 30, 0))
+    const real = blob(axis(1), 12, 700)
+    const report = evaluateNoise({ ...base, corpus, subjects: selfSubjects(corpus), real })
+
+    expect(report.realFoldSimilarities).toHaveLength(5 * real.length)
+    expect(report.auc).toBe(auc(report.noiseSimilarities, report.realFoldSimilarities))
+  })
+
   it('damps nothing when the corpus is empty', () => {
     const report = evaluateNoise({ ...base, corpus: [], subjects: new Map(), real: [axis(1), axis(2)] })
 

@@ -11,6 +11,7 @@
  * ship with this output from before and after it.
  */
 import 'dotenv/config'
+import assert from 'node:assert'
 import { writeFileSync } from 'node:fs'
 import { parseArgs } from 'node:util'
 import { config } from '../src/config.js'
@@ -22,6 +23,8 @@ import { resolveDataClasses } from '../src/mcp/search.js'
 import { normalizeVector } from '../src/utils/vector-math.js'
 
 const REAL_SAMPLE = 500
+const dataClasses = resolveDataClasses({})
+assert(dataClasses, 'a default search is expected to filter by data class')
 
 // pnpm forwards its own `--` separator, which parseArgs would read as the end
 // of the options.
@@ -47,7 +50,7 @@ const realSessionIds = async (): Promise<number[]> => {
        AND NOT EXISTS (SELECT 1 FROM tags t WHERE t.session_id = s.id AND t.tag = 'useless')
      ORDER BY md5(s.id::text || 'noise-eval')
      LIMIT $1`,
-    [REAL_SAMPLE * 2, resolveDataClasses({})]
+    [REAL_SAMPLE * 2, dataClasses]
   )
   return result.rows.map((r) => r.id)
 }
@@ -58,7 +61,7 @@ const real = [...(await sessionVectors(await realSessionIds())).values()].slice(
 const hardIds = values.hard ? values.hard.split(',').map(Number) : []
 const hard = [...(await sessionVectors(hardIds))].map(([sessionId, vector]) => ({ sessionId, vector }))
 
-const { noiseSimilarities, realSimilarities, ...report } = evaluateNoise({
+const { noiseSimilarities, realSimilarities, realFoldSimilarities, ...report } = evaluateNoise({
   corpus,
   subjects,
   real,
@@ -68,5 +71,8 @@ const { noiseSimilarities, realSimilarities, ...report } = evaluateNoise({
 })
 
 console.log(JSON.stringify(report))
-if (values.dump) writeFileSync(values.dump, JSON.stringify({ report, noiseSimilarities, realSimilarities }))
+// realFoldSimilarities is what the AUC compares noise against; realSimilarities
+// is what search sees, against the full corpus.
+if (values.dump)
+  writeFileSync(values.dump, JSON.stringify({ report, noiseSimilarities, realSimilarities, realFoldSimilarities }))
 await closePool()

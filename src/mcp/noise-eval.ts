@@ -91,7 +91,9 @@ const summarize = (similarities: number[], dampings: number[]): SetReport => ({
 
 const clustersOf = (vectors: number[][]) => sphericalKMeans(vectors, chooseClusterCount(vectors.length))
 
-export const evaluateNoise = (input: EvalInput): EvalReport & { noiseSimilarities: number[]; realSimilarities: number[] } => {
+export type EvalDump = { noiseSimilarities: number[]; realSimilarities: number[]; realFoldSimilarities: number[] }
+
+export const evaluateNoise = (input: EvalInput): EvalReport & EvalDump => {
   const folds = input.folds ?? 5
   const full = clustersOf(input.corpus.map((c) => c.vector))
   const floor = input.floorFor(full)
@@ -135,5 +137,6 @@ export const evaluateNoise = (input: EvalInput): EvalReport & { noiseSimilaritie
     })),
     noiseSimilarities,
     realSimilarities,
+    realFoldSimilarities,
   }
 }

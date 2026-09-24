@@ -1,3 +1,4 @@
+import assert from 'node:assert'
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { startServer, stopServer, search, mcpTool, type Hit } from './harness.js'
 
@@ -8,6 +9,8 @@ import { startServer, stopServer, search, mcpTool, type Hit } from './harness.js
 
 const { query, closePool } = await import('../src/db/postgres.js')
 const { resolveDataClasses } = await import('../src/mcp/search.js')
+const dataClasses = resolveDataClasses({})
+assert(dataClasses, 'a default search is expected to filter by data class')
 
 const REPORTED = 5
 const FIRST_WORDS = `array_to_string((regexp_split_to_array(m.content_text, '\\s+'))[1:5], ' ')`
@@ -22,7 +25,7 @@ const eligible = `
     ORDER BY sequence_num NULLS FIRST, timestamp, id LIMIT 1
   ) m ON true
   WHERE s.deleted_at IS NULL AND s.summary IS NOT NULL AND NOT s.is_automated
-    AND COALESCE(p.data_class, src.data_class) = ANY('{${resolveDataClasses({}).join(',')}}'::text[])
+    AND COALESCE(p.data_class, src.data_class) = ANY('{${dataClasses.join(',')}}'::text[])
     AND NOT EXISTS (SELECT 1 FROM tags t WHERE t.session_id = s.id)`
 
 // The largest set of sessions opened by the same five words: a templated agent
