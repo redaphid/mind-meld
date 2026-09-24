@@ -11,7 +11,7 @@ import { buildSnippet, ts_headline_options } from './snippet.js'
 import { resolveTitle, type TitleSource } from './title.js'
 import { parseSinceDate } from './since.js'
 import { resolveTagFilter, passesTagFilter, getSessionTags, type TagFilter } from './tags.js'
-import { getNoiseModel, noiseDamping, sessionVectors, USELESS_TAG, type NoiseModel } from './noise.js'
+import { getNoiseModel, noiseDamping, sessionVectors, NO_NOISE, USELESS_TAG, type NoiseModel } from './noise.js'
 import { LAST_ACTIVITY_SQL, lastActivity } from './last-activity.js'
 
 const PROJECT_BOOST = 0.5
@@ -721,12 +721,11 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
 
   const fused = fuseRanks(rankedLists)
 
-  // Fetched once per search, not once per hit: clustering re-reads the whole
-  // noise corpus, and the result is cached in noise.ts across searches.
-  // An empty array (nothing reported yet, or Chroma unreachable) makes
-  // noiseDamping return 1 for everything, so this whole block is a no-op on a
-  // corpus nobody has judged.
-  const noise: NoiseModel = wantsNoisePenalty ? await getNoiseModel() : { centroids: [], floor: 1 }
+  // Fetched once per search, not once per hit: building the model re-reads
+  // the whole noise corpus, and it is cached in noise.ts across searches. An
+  // empty model (nothing counts as noise yet, or the corpus is unreadable)
+  // damps nothing, so this whole block is a no-op on a corpus nobody judged.
+  const noise: NoiseModel = wantsNoisePenalty ? await getNoiseModel() : NO_NOISE
   const hitVectors = noise.centroids.length > 0 ? await scoringVectors([...hitBySession.keys()]) : new Map()
 
   const results = Array.from(hitBySession.values()).map((hit) => {

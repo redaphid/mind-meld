@@ -114,8 +114,10 @@ export const config = {
     // ranking shifts down roughly uniformly -- all cost and no effect.
     //
     // The floor is CALIBRATED, never fixed: it sits at this quantile of how
-    // noise-like real sessions look against the current clusters, so at most
-    // (1 - quantile) of real sessions pay anything. A fixed 0.55 was tuned on a
+    // noise-like real sessions look against the AUTOMATED clusters, so at most
+    // (1 - quantile) of real sessions pay anything for resembling automated
+    // runs. Sessions resembling something an agent reported can pay more --
+    // that is what reporting is for (see buildNoiseModel). A fixed 0.55 was tuned on a
     // 120-vector corpus; against 1,900 vectors it damped 99.4% of real sessions
     // (`pnpm run noise:eval`), because real similarity had drifted to a median
     // of 0.69. A calibrated floor moves with the corpus instead.

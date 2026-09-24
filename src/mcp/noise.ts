@@ -223,10 +223,14 @@ export const buildNoiseModel = (corpus: readonly NoiseVector[], calibration: rea
     return sphericalKMeans(vectors, chooseClusterCount(vectors.length))
   })
   const centroids = [...automated, ...reported]
+  // With no automated noise at all there is nothing stable to calibrate
+  // against, and the reported clusters are used after all. On such an index
+  // a report can partly cancel itself; an index with no floor at all would be
+  // worse, and every real deployment has automated runs.
   return { centroids, floor: calibrateFloor(automated.length > 0 ? automated : centroids, calibration) }
 }
 
-const NO_NOISE: NoiseModel = { centroids: [], floor: 1 }
+export const NO_NOISE: NoiseModel = { centroids: [], floor: 1 }
 
 let cache: (NoiseModel & { computedAt: number }) | null = null
 
