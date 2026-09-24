@@ -218,6 +218,19 @@ export const sphericalKMeans = (
   return centroids
 }
 
+export type NoiseVector = { sessionId: number; vector: number[] }
+
+// Every vector the penalty learns from, keyed by the session it came from. The
+// eval harness (scripts/noise-eval.ts) reads the corpus through this too, so
+// what it measures is what search clusters.
+export const loadNoiseCorpus = async (): Promise<NoiseVector[]> => {
+  const { ids, embeddings } = await getAllEmbeddings(config.chroma.collections.noise)
+  return ids.map((id, i) => ({
+    sessionId: Number(id.replace('noise-session-', '')),
+    vector: normalizeVector(embeddings[i]),
+  }))
+}
+
 type ClusterCache = { centroids: number[][]; computedAt: number; size: number }
 let cache: ClusterCache | null = null
 
@@ -237,12 +250,9 @@ export const getNoiseClusters = async (now = Date.now()): Promise<number[][]> =>
   let centroids: number[][] = []
   let size = 0
   try {
-    const { embeddings } = await getAllEmbeddings(config.chroma.collections.noise)
-    size = embeddings.length
-    if (size > 0) {
-      const normalized = embeddings.map((v) => normalizeVector(v))
-      centroids = sphericalKMeans(normalized, chooseClusterCount(size))
-    }
+    const corpus = await loadNoiseCorpus()
+    size = corpus.length
+    if (size > 0) centroids = sphericalKMeans(corpus.map((c) => c.vector), chooseClusterCount(size))
   } catch (e) {
     // A missing or unreachable noise collection has to degrade to "no penalty",
     // never to a failed search. Ranking help is an enhancement; retrieval is
@@ -253,6 +263,16 @@ export const getNoiseClusters = async (now = Date.now()): Promise<number[][]> =>
 
   cache = { centroids, computedAt: now, size }
   return centroids
+}
+
+// Cosine similarity to the closest noise cluster; -Infinity with no clusters.
+export const nearestSimilarity = (vector: number[], clusters: readonly number[][]): number => {
+  let nearest = -Infinity
+  for (const centroid of clusters) {
+    const similarity = cosineSimilarity(vector, centroid)
+    if (similarity > nearest) nearest = similarity
+  }
+  return nearest
 }
 
 // How much of a result's score survives its resemblance to noise.
@@ -275,12 +295,7 @@ export const noiseDamping = (
 ): number => {
   if (!vector || vector.length === 0 || clusters.length === 0 || weight <= 0) return 1
 
-  let nearest = -Infinity
-  for (const centroid of clusters) {
-    const similarity = cosineSimilarity(vector, centroid)
-    if (similarity > nearest) nearest = similarity
-  }
-
+  const nearest = nearestSimilarity(vector, clusters)
   if (!Number.isFinite(nearest) || nearest <= floor) return 1
   const headroom = 1 - floor
   const excess = headroom > 0 ? (nearest - floor) / headroom : 1

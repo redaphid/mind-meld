@@ -203,6 +203,26 @@ describe('reported noise, end to end through search', () => {
     expect(ids.indexOf(3)).toBeLessThan(ids.indexOf(2))
   })
 
+  it('reports the damping of each result, with 1 for a result scored and found clean', async () => {
+    const { results } = await searchWithDiagnostics({ query: 'anything', mode: 'semantic', dataClass: ['*'], limit: 10 })
+    const damping = new Map(results.map((r) => [r.session_id, r.noise_damping]))
+    expect(damping.get(2)).toBeLessThan(damping.get(3) as number)
+    expect(damping.get(3)).toBeLessThan(1)
+    expect(damping.get(4)).toBe(1)
+    expect(damping.get(5)).toBe(1)
+  })
+
+  it('reports no damping at all when the penalty is off', async () => {
+    const { results } = await searchWithDiagnostics({
+      query: 'anything',
+      mode: 'semantic',
+      dataClass: ['*'],
+      limit: 10,
+      includeNoise: true,
+    })
+    expect(results.every((r) => r.noise_damping === null)).toBe(true)
+  })
+
   it('behaves exactly as before when nothing has been reported', async () => {
     taggedUseless = []
     getAllEmbeddings.mockResolvedValue({ ids: [], embeddings: [] })
