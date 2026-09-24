@@ -46,7 +46,7 @@ function getEnvFloat(key: string, defaultValue: number): number {
   return Number.isFinite(parsed) ? parsed : defaultValue;
 }
 
-// A comma-separated env var as a list. An explicitly empty value ("") means an
+// A separated (comma by default) env var as a list. An explicitly empty value ("") means an
 // empty list, not "fall back to the default" -- otherwise a setting like
 // MINDMELD_DEFAULT_EXCLUDED_TAGS could never be turned off from the
 // environment, only changed to something else.
