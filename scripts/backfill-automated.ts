@@ -21,8 +21,10 @@ import { classifyAutomated } from '../src/embeddings/classify.js'
 
 // Sources whose sessions carry no title and are classified by their opening
 // prompt at sync time: both go through syncSession in src/sync/claude-code.ts.
-// Codex joined it after this script was written, so 42 Codex Slack-monitor and
-// curiosity-curator runs synced before then were never flagged.
+// Codex joined it after this script was written, so Codex Slack-monitor and
+// curiosity-curator runs synced before the classifier existed were never
+// flagged. Not the orchestrator's default source list, which only happens to
+// match: that one says what to sync, this one how a source is classified.
 const FIRST_PROMPT_SOURCES = ['claude_code', 'codex']
 
 const run = async () => {
