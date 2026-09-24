@@ -109,12 +109,22 @@ export const config = {
     // must not have.
     penaltyWeight: getEnvFloat("MINDMELD_NOISE_PENALTY_WEIGHT", 0.35),
 
-    // Similarity below this is treated as "not noise-like at all" and costs
-    // nothing. bge-m3 puts unrelated text around 0.4-0.5 cosine, so without a
-    // floor EVERY result carries some penalty and the whole ranking shifts down
-    // roughly uniformly -- which changes no order and is therefore all cost and
-    // no effect. The floor is what makes the penalty discriminative.
-    similarityFloor: getEnvFloat("MINDMELD_NOISE_SIMILARITY_FLOOR", 0.55),
+    // Similarity at or below the floor is "not noise-like at all" and costs
+    // nothing. Without a floor EVERY result carries some penalty and the whole
+    // ranking shifts down roughly uniformly -- all cost and no effect.
+    //
+    // The floor is CALIBRATED, never fixed: it sits at this quantile of how
+    // noise-like real sessions look against the AUTOMATED clusters, so at most
+    // (1 - quantile) of real sessions pay anything for resembling automated
+    // runs. Sessions resembling something an agent reported can pay more --
+    // that is what reporting is for (see buildNoiseModel). A fixed 0.55 was tuned on a
+    // 120-vector corpus; against 1,900 vectors it damped 99.4% of real sessions
+    // (`pnpm run noise:eval`), because real similarity had drifted to a median
+    // of 0.69. A calibrated floor moves with the corpus instead.
+    floorQuantile: getEnvFloat("MINDMELD_NOISE_FLOOR_QUANTILE", 0.95),
+
+    // How many real sessions the floor is calibrated against, per rebuild.
+    floorSample: getEnvInt("MINDMELD_NOISE_FLOOR_SAMPLE", 500),
 
     // Noise vectors are CLUSTERED and a result is scored against its NEAREST
     // cluster, not against one global mean. Sentinel results and tool-call spam

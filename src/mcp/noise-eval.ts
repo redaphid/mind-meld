@@ -1,4 +1,4 @@
-import { clusterNoise, nearestSimilarity, noiseDamping, type NoiseVector } from './noise.js'
+import { buildNoiseModel, nearestSimilarity, noiseDamping, quantile, type NoiseVector } from './noise.js'
 
 // Measures whether the noise penalty does its one job: damp results that look
 // like reported noise, and leave real conversations alone. Pure, so the numbers
@@ -22,9 +22,10 @@ export type EvalInput = {
   // Real sessions known to sit close to the noise, reported one by one.
   hard: { sessionId: number; vector: number[] }[]
   weight: number
-  // The similarity below which a result pays nothing, given the clusters it
-  // will be scored against.
-  floorFor: (clusters: number[][]) => number
+  // Real sessions the floor is calibrated against, as production does. Keep
+  // them apart from `real`, or the damped share comes out at 1 - quantile by
+  // construction.
+  calibration: number[][]
   folds?: number
 }
 
@@ -45,12 +46,6 @@ export type EvalReport = {
   noise: SetReport
   real: SetReport
   hard: { sessionId: number; similarity: number; damping: number }[]
-}
-
-export const quantile = (values: readonly number[], q: number): number => {
-  if (values.length === 0) return NaN
-  const sorted = [...values].sort((a, b) => a - b)
-  return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]
 }
 
 // Mann-Whitney U over ranks, ties counted half: O(n log n) rather than
@@ -93,8 +88,8 @@ export type EvalDump = { noiseSimilarities: number[]; realSimilarities: number[]
 
 export const evaluateNoise = (input: EvalInput): EvalReport & EvalDump => {
   const folds = input.folds ?? 5
-  const full = clusterNoise(input.corpus)
-  const floor = input.floorFor(full)
+  const model = buildNoiseModel(input.corpus, input.calibration)
+  const { centroids: full, floor } = model
 
   // The AUC compares like with like: held-out noise and real sessions scored
   // against the SAME fold's clusters. Scoring real sessions against the full
@@ -105,13 +100,13 @@ export const evaluateNoise = (input: EvalInput): EvalReport & EvalDump => {
   for (let fold = 0; fold < folds; fold++) {
     const held = input.corpus.filter((c) => c.sessionId % folds === fold && input.subjects.has(c.sessionId))
     if (held.length === 0) continue
-    const trained = clusterNoise(input.corpus.filter((c) => c.sessionId % folds !== fold))
-    const foldFloor = input.floorFor(trained)
+    const foldModel = buildNoiseModel(input.corpus.filter((c) => c.sessionId % folds !== fold), input.calibration)
+    const trained = foldModel.centroids
     for (const { sessionId } of held) {
       const subject = input.subjects.get(sessionId)
       if (!subject) continue
       noiseSimilarities.push(nearestSimilarity(subject, trained))
-      noiseDampings.push(noiseDamping(subject, trained, input.weight, foldFloor))
+      noiseDampings.push(noiseDamping(subject, foldModel, input.weight))
     }
     for (const v of input.real) realFoldSimilarities.push(nearestSimilarity(v, trained))
   }
@@ -119,7 +114,7 @@ export const evaluateNoise = (input: EvalInput): EvalReport & EvalDump => {
   // Real sessions are otherwise reported as search sees them: against every
   // cluster the full corpus builds.
   const realSimilarities = input.real.map((v) => nearestSimilarity(v, full))
-  const realDampings = input.real.map((v) => noiseDamping(v, full, input.weight, floor))
+  const realDampings = input.real.map((v) => noiseDamping(v, model, input.weight))
 
   return {
     corpus: { n: input.corpus.length, k: full.length },
@@ -131,7 +126,7 @@ export const evaluateNoise = (input: EvalInput): EvalReport & EvalDump => {
     hard: input.hard.map(({ sessionId, vector }) => ({
       sessionId,
       similarity: nearestSimilarity(vector, full),
-      damping: noiseDamping(vector, full, input.weight, floor),
+      damping: noiseDamping(vector, model, input.weight),
     })),
     noiseSimilarities,
     realSimilarities,

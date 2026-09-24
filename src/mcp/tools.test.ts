@@ -303,6 +303,22 @@ describe('every advertised tool executes', () => {
     await client.close()
   })
 
+  // addTag/removeTag with "useless" change the noise corpus exactly as a report
+  // does, so the next search must not wait out the cluster cache.
+  it('re-clusters at once when addTag or removeTag touches "useless"', async () => {
+    const client = await connect()
+    doInvalidateNoiseClusters.mockClear()
+    await client.callTool({ name: 'addTag', arguments: { sessionId: 5, tag: 'useless' } })
+    expect(doInvalidateNoiseClusters).toHaveBeenCalledTimes(1)
+    await client.callTool({ name: 'removeTag', arguments: { sessionId: 5, tag: 'useless' } })
+    expect(doInvalidateNoiseClusters).toHaveBeenCalledTimes(2)
+
+    doApplyTags.mockResolvedValueOnce(['keeper'] as never)
+    await client.callTool({ name: 'addTag', arguments: { sessionId: 5, tag: 'keeper' } })
+    expect(doInvalidateNoiseClusters).toHaveBeenCalledTimes(2)
+    await client.close()
+  })
+
   it('routes addTag to a session or a message, and refuses anything ambiguous', async () => {
     const client = await connect()
 

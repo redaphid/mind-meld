@@ -14,7 +14,7 @@ vi.mock('../db/chroma.js', () => ({
 
 const mockConfig = {
   chroma: { collections: { sessions: 'convo-sessions' } },
-  noise: { penaltyWeight: 0.35, similarityFloor: 0.55, clusterCount: 0, clusterCacheMs: 300000 },
+  noise: { penaltyWeight: 0.35, floorQuantile: 0.95, floorSample: 500, clusterCount: 0, clusterCacheMs: 300000 },
 }
 vi.mock('../config.js', () => ({ config: mockConfig }))
 
@@ -24,11 +24,15 @@ const {
   loadNoiseCorpus,
   chooseClusterCount,
   sphericalKMeans,
-  getNoiseClusters,
+  getNoiseModel,
+  calibrateFloor,
+  sampleRealSessionIds,
+  quantile,
   invalidateNoiseClusters,
   noiseDamping,
-  clusterNoise,
+  buildNoiseModel,
 } = await import('./noise.js')
+const { normalizeVector } = await import('../utils/vector-math.js')
 
 // A unit vector pointing along one axis of a small space, so "different region
 // of embedding space" is something a reader can see rather than infer.
@@ -38,9 +42,12 @@ const axis = (i: number, dims = 8): number[] => Array.from({ length: dims }, (_,
 // deliberately between two noise regions.
 const between = (a: number[], b: number[], t: number): number[] => a.map((x, i) => x * (1 - t) + b[i] * t)
 
+// Clusters with a floor, the way search receives them.
+const at = (centroids: number[][], floor = 0.55) => ({ centroids, floor })
+
 beforeEach(() => {
   vi.clearAllMocks()
-  mockConfig.noise = { penaltyWeight: 0.35, similarityFloor: 0.55, clusterCount: 0, clusterCacheMs: 300000 }
+  mockConfig.noise = { penaltyWeight: 0.35, floorQuantile: 0.95, floorSample: 500, clusterCount: 0, clusterCacheMs: 300000 }
   query.mockResolvedValue({ rows: [], rowCount: 0 })
   getEmbeddingsByIds.mockResolvedValue(new Map())
   invalidateNoiseClusters()
@@ -107,34 +114,34 @@ describe('the noise damping factor', () => {
   const clusters = [axis(0), axis(4)]
 
   it('leaves a result untouched when nothing has been reported', () => {
-    expect(noiseDamping(axis(0), [])).toBe(1)
+    expect(noiseDamping(axis(0), at([]))).toBe(1)
   })
 
   it('leaves a result untouched when it has no vector', () => {
     // Full-text-only hits have no embedding and must not be penalized on a guess.
-    expect(noiseDamping(null, clusters)).toBe(1)
+    expect(noiseDamping(null, at(clusters))).toBe(1)
   })
 
   it('charges nothing below the similarity floor', () => {
     // Orthogonal to every cluster: as unlike the noise as this space allows.
-    expect(noiseDamping(axis(7), clusters)).toBe(1)
+    expect(noiseDamping(axis(7), at(clusters))).toBe(1)
   })
 
   it('charges the full weight for a result sitting on a noise cluster', () => {
-    expect(noiseDamping(axis(0), clusters)).toBeCloseTo(1 - 0.35, 6)
+    expect(noiseDamping(axis(0), at(clusters))).toBeCloseTo(1 - 0.35, 6)
   })
 
   it('charges proportionally in between, not all-or-nothing', () => {
     // Deliberately placed above the floor but well short of the cluster, so a
     // step function and a ramp give different answers here.
-    const partial = noiseDamping(between(axis(0), axis(7), 0.35), clusters)
+    const partial = noiseDamping(between(axis(0), axis(7), 0.35), at(clusters))
     expect(partial).toBeGreaterThan(1 - 0.35)
     expect(partial).toBeLessThan(1)
   })
 
   it('scales with the configured weight', () => {
-    expect(noiseDamping(axis(0), clusters, 1)).toBeCloseTo(0, 6)
-    expect(noiseDamping(axis(0), clusters, 0)).toBe(1)
+    expect(noiseDamping(axis(0), at(clusters), 1)).toBeCloseTo(0, 6)
+    expect(noiseDamping(axis(0), at(clusters), 0)).toBe(1)
   })
 
   // THE REASON THE CENTROIDS ARE CLUSTERED AT ALL, and the arithmetic behind it.
@@ -155,8 +162,8 @@ describe('the noise damping factor', () => {
     const mean = regions[0].map((_, i) => regions.reduce((sum, r) => sum + r[i], 0) / regions.length)
     const onOneRegion = regions[0]
 
-    expect(noiseDamping(onOneRegion, regions)).toBeCloseTo(1 - 0.35, 6)
-    expect(noiseDamping(onOneRegion, [mean])).toBe(1)
+    expect(noiseDamping(onOneRegion, at(regions))).toBeCloseTo(1 - 0.35, 6)
+    expect(noiseDamping(onOneRegion, at([mean]))).toBe(1)
   })
 })
 
@@ -212,6 +219,63 @@ describe('the noise corpus', () => {
   })
 })
 
+const corpusLoads = () =>
+  query.mock.calls.filter((call) => String(call[0]).includes('s.is_automated OR EXISTS')).length
+
+describe('calibrating the floor', () => {
+  it('reads a quantile off a set of values', () => {
+    expect(quantile([5, 1, 4, 2, 3], 0.5)).toBe(3)
+    expect(quantile([], 0.5)).toBeNaN()
+  })
+
+  // At most (1 - quantile) of real sessions may pay anything: the floor sits at
+  // the 95th percentile of how noise-like they look.
+  it('puts the floor where only the top slice of real sessions sits above it', () => {
+    const clusters = [axis(0)]
+    const real = Array.from({ length: 20 }, (_, i) => between(axis(1), axis(0), i / 40))
+    const floor = calibrateFloor(clusters, real, 0.95)
+    const damped = real.filter((v) => noiseDamping(v, { centroids: clusters, floor }) < 1)
+    expect(damped.length).toBeLessThanOrEqual(1)
+  })
+
+  it('moves with the clusters instead of staying where it was tuned', () => {
+    const real = [between(axis(1), axis(0), 0.2), between(axis(1), axis(0), 0.4)]
+    expect(calibrateFloor([axis(0)], real, 0.95)).toBeGreaterThan(calibrateFloor([axis(5)], real, 0.95))
+  })
+
+  // An uncalibrated penalty must not guess: a floor of 1 charges nothing.
+  it('charges nothing when there is nothing to calibrate against', () => {
+    expect(calibrateFloor([axis(0)], [], 0.95)).toBe(1)
+    expect(calibrateFloor([], [axis(0)], 0.95)).toBe(1)
+  })
+
+  it('samples real sessions that nothing marks as noise, in a fixed order', async () => {
+    query.mockResolvedValueOnce({ rows: [{ id: 3 }, { id: 9 }], rowCount: 2 })
+    expect(await sampleRealSessionIds(2)).toEqual([3, 9])
+    const [sql, params] = query.mock.calls[0] as [string, unknown[]]
+    expect(sql).toContain('NOT s.is_automated')
+    expect(sql).toContain('ORDER BY md5(s.id::text)')
+    expect(params).toEqual([USELESS_TAG, 2])
+  })
+
+  it('builds the model with the floor calibrated against its own clusters', async () => {
+    query.mockImplementation(async (sql: unknown) =>
+      String(sql).includes('md5')
+        ? { rows: [{ id: 7 }], rowCount: 1 }
+        : { rows: [{ id: 1, is_automated: true }], rowCount: 1 }
+    )
+    getEmbeddingsByIds.mockImplementation(async (..._args: unknown[]) =>
+      new Map([
+        ['session-1', axis(0)],
+        ['session-7', between(axis(1), axis(0), 0.3)],
+      ])
+    )
+    const model = await getNoiseModel(1000)
+    expect(model.centroids).toEqual([axis(0)])
+    expect(model.floor).toBeCloseTo(calibrateFloor([axis(0)], [normalizeVector(between(axis(1), axis(0), 0.3))]), 12)
+  })
+})
+
 describe('clustering the two sources of noise', () => {
   const automated = (vectors: number[][]) =>
     vectors.map((vector, i) => ({ sessionId: i + 1, vector, source: 'automated' as const }))
@@ -223,56 +287,72 @@ describe('clustering the two sources of noise', () => {
   it('gives a handful of reports a cluster of their own', () => {
     const bulk = automated(Array.from({ length: 40 }, (_, i) => between(axis(i % 4), axis((i + 1) % 4), 0.3)))
     const fresh = reported([axis(6), between(axis(6), axis(7), 0.1)])
-    const clusters = clusterNoise([...bulk, ...fresh])
+    const clusters = buildNoiseModel([...bulk, ...fresh], []).centroids
     const probe = between(axis(6), axis(7), 0.05)
-    expect(noiseDamping(probe, clusters)).toBeLessThan(noiseDamping(probe, clusterNoise(bulk)))
+    expect(noiseDamping(probe, at(clusters))).toBeLessThan(noiseDamping(probe, at(buildNoiseModel(bulk, []).centroids)))
   })
 
   // A report can only add noise. It must never leave anything LESS noise-like
   // than it was, which re-seating every centre jointly could do.
   it('never moves an automated cluster when reports are added', () => {
     const bulk = automated([axis(0), axis(1), axis(2), between(axis(0), axis(1), 0.5)])
-    const before = clusterNoise(bulk)
-    const after = clusterNoise([...bulk, ...reported([axis(5)])])
+    const before = buildNoiseModel(bulk, []).centroids
+    const after = buildNoiseModel([...bulk, ...reported([axis(5)])], []).centroids
     expect(after.slice(0, before.length)).toEqual(before)
   })
 
+  // The real sample is "everything not yet marked noise", so it holds the
+  // unreported rest of whatever was just reported. Calibrated against every
+  // cluster, the report would lift the floor over its own lookalikes.
+  it('calibrates the floor against automated noise, so a report cannot cancel itself', () => {
+    const bulk = automated([axis(0), axis(1)])
+    const fresh = reported([axis(6)])
+    const lookalikes = [between(axis(6), axis(7), 0.2), between(axis(6), axis(7), 0.25)]
+    const real = [...lookalikes, between(axis(2), axis(0), 0.3), axis(3)]
+
+    const model = buildNoiseModel([...bulk, ...fresh], real)
+    expect(model.floor).toBe(buildNoiseModel(bulk, real).floor)
+    expect(lookalikes.every((v) => noiseDamping(v, model) < 1)).toBe(true)
+  })
+
+  it('calibrates against reported noise when there is no automated noise at all', () => {
+    const model = buildNoiseModel(reported([axis(6)]), [between(axis(1), axis(6), 0.4)])
+    expect(model.floor).toBeLessThan(1)
+  })
+
   it('has no clusters when there is no noise of either kind', () => {
-    expect(clusterNoise([])).toEqual([])
+    expect(buildNoiseModel([], [])).toEqual({ centroids: [], floor: 1 })
   })
 })
-
-const corpusLoads = () =>
-  query.mock.calls.filter((call) => String(call[0]).includes('s.is_automated OR EXISTS')).length
 
 describe('the cluster cache', () => {
   it('does not re-cluster within the cache window', async () => {
     seedCorpus([axis(0), axis(4)])
-    await getNoiseClusters(1000)
-    await getNoiseClusters(1000 + 1000)
-    expect(getEmbeddingsByIds).toHaveBeenCalledTimes(1)
+    await getNoiseModel(1000)
+    await getNoiseModel(1000 + 1000)
+    expect(corpusLoads()).toBe(1)
   })
 
   it('re-clusters once the window has passed', async () => {
     seedCorpus([axis(0), axis(4)])
-    await getNoiseClusters(1000)
-    await getNoiseClusters(1000 + 300001)
-    expect(getEmbeddingsByIds).toHaveBeenCalledTimes(2)
+    await getNoiseModel(1000)
+    await getNoiseModel(1000 + 300001)
+    expect(corpusLoads()).toBe(2)
   })
 
   // An agent that has just reported something must see the effect on its very
   // next search, not up to five minutes later. The report tools invalidate.
   it('re-clusters immediately once invalidated', async () => {
     seedCorpus([axis(0)])
-    await getNoiseClusters(1000)
+    await getNoiseModel(1000)
     invalidateNoiseClusters()
-    await getNoiseClusters(1000)
-    expect(getEmbeddingsByIds).toHaveBeenCalledTimes(2)
+    await getNoiseModel(1000)
+    expect(corpusLoads()).toBe(2)
   })
 
   it('shares one build between searches that miss the cache together', async () => {
     seedCorpus([axis(0), axis(4)])
-    const [a, b] = await Promise.all([getNoiseClusters(1000), getNoiseClusters(1000)])
+    const [a, b] = await Promise.all([getNoiseModel(1000), getNoiseModel(1000)])
     expect(a).toBe(b)
     expect(corpusLoads()).toBe(1)
   })
@@ -281,10 +361,10 @@ describe('the cluster cache', () => {
   // by the build that started before it.
   it('does not cache a build that a report overtook', async () => {
     seedCorpus([axis(0)])
-    const stale = getNoiseClusters(1000)
+    const stale = getNoiseModel(1000)
     invalidateNoiseClusters()
     await stale
-    await getNoiseClusters(1000)
+    await getNoiseModel(1000)
     expect(corpusLoads()).toBe(2)
   })
 
@@ -293,16 +373,16 @@ describe('the cluster cache', () => {
   it('degrades to no penalty when the vectors cannot be read', async () => {
     seedCorpus([axis(0)])
     getEmbeddingsByIds.mockRejectedValueOnce(new Error('chroma is down'))
-    expect(await getNoiseClusters(1000)).toEqual([])
-    expect(noiseDamping(axis(0), await getNoiseClusters(1000))).toBe(1)
+    expect(await getNoiseModel(1000)).toEqual({ centroids: [], floor: 1 })
+    expect(noiseDamping(axis(0), await getNoiseModel(1000))).toBe(1)
   })
 
   it('degrades to no penalty when the noise sessions cannot be listed', async () => {
     query.mockRejectedValueOnce(new Error('postgres is down'))
-    expect(await getNoiseClusters(1000)).toEqual([])
+    expect(await getNoiseModel(1000)).toEqual({ centroids: [], floor: 1 })
   })
 
   it('has no clusters, and so no penalty, when nothing is noise', async () => {
-    expect(await getNoiseClusters(1000)).toEqual([])
+    expect(await getNoiseModel(1000)).toEqual({ centroids: [], floor: 1 })
   })
 })

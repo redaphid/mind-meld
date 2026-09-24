@@ -17,7 +17,7 @@ import { parseArgs } from 'node:util'
 import { config } from '../src/config.js'
 import { query, closePool } from '../src/db/postgres.js'
 import { getEmbeddingsByIds } from '../src/db/chroma.js'
-import { loadNoiseCorpus } from '../src/mcp/noise.js'
+import { loadNoiseCorpus, sampleRealSessionIds } from '../src/mcp/noise.js'
 import { evaluateNoise } from '../src/mcp/noise-eval.js'
 import { resolveDataClasses } from '../src/mcp/search.js'
 import { normalizeVector } from '../src/utils/vector-math.js'
@@ -55,9 +55,16 @@ const realSessionIds = async (): Promise<number[]> => {
   return result.rows.map((r) => r.id)
 }
 
+// Production calibrates the floor against its own sample of real sessions; the
+// eval measures real sessions it did NOT calibrate on, or the damped share would
+// come out at 1 - quantile by construction.
+const calibrationIds = await sampleRealSessionIds(config.noise.floorSample)
+const calibration = [...(await sessionVectors(calibrationIds)).values()]
+
 const corpus = await loadNoiseCorpus()
 const subjects = await sessionVectors(corpus.map((c) => c.sessionId))
-const real = [...(await sessionVectors(await realSessionIds())).values()].slice(0, REAL_SAMPLE)
+const heldOutReal = (await realSessionIds()).filter((id) => !calibrationIds.includes(id))
+const real = [...(await sessionVectors(heldOutReal)).values()].slice(0, REAL_SAMPLE)
 const hardIds = values.hard ? values.hard.split(',').map(Number) : []
 const hard = [...(await sessionVectors(hardIds))].map(([sessionId, vector]) => ({ sessionId, vector }))
 
@@ -67,7 +74,7 @@ const { noiseSimilarities, realSimilarities, realFoldSimilarities, ...report } =
   real,
   hard,
   weight: config.noise.penaltyWeight,
-  floorFor: () => config.noise.similarityFloor,
+  calibration,
 })
 
 console.log(JSON.stringify(report))
