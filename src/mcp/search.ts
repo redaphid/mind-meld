@@ -101,6 +101,23 @@ export const listKnownDataClasses = async (): Promise<string[]> => {
   return result.rows.map((r) => r.data_class)
 }
 
+// The projects whose effective class is one of these. The full-text arm
+// filters on the ids rather than on the class expression itself: Postgres has
+// no statistics for COALESCE(p.data_class, src.data_class), guessed ~5 matching
+// projects when ~900 match, and chose a per-session nested loop that re-ran
+// to_tsvector over ~920k messages without touching the GIN index -- 60-120s a
+// search, the broadest ones hitting the statement timeout. With the ids it has
+// real statistics and matches through the index: measured against the old
+// predicate, "database migration" went 71.5s -> 2.4s and "error" 107s -> 44s.
+const projectIdsInDataClasses = async (dataClasses: string[]): Promise<number[]> =>
+  (
+    await query<{ id: number }>(
+      `SELECT p.id FROM projects p JOIN sources src ON src.id = p.source_id
+       WHERE COALESCE(p.data_class, src.data_class) = ANY($1::text[])`,
+      [dataClasses]
+    )
+  ).rows.map((r) => r.id)
+
 const assertKnownDataClasses = async (dataClasses: string[]) => {
   const known = await listKnownDataClasses()
   // An empty vocabulary means the migration hasn't classified anything yet;
@@ -619,8 +636,8 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     }
 
     if (dataClasses) {
-      conditions.push(`COALESCE(p.data_class, src.data_class) = ANY($${nextParam++}::text[])`)
-      values.push(dataClasses)
+      conditions.push(`s.project_id = ANY($${nextParam++}::int[])`)
+      values.push(await projectIdsInDataClasses(dataClasses))
     }
 
     if (params.excludeTerms) {
@@ -688,7 +705,10 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       JOIN sessions s ON rm.session_id = s.id
       JOIN projects p ON s.project_id = p.id
       JOIN sources src ON p.source_id = src.id
-      ORDER BY rm.rank DESC
+      -- ts_rank ties are common (short messages saturate it), and without a
+      -- tie-break which tied session makes the cut depended on the plan. The
+      -- most recently indexed session wins a tie.
+      ORDER BY rm.rank DESC, rm.session_id DESC
       LIMIT ${limitParam}`,
       values
     )

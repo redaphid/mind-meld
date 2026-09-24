@@ -3,7 +3,8 @@
  *
  * Two signals, matching how new rows are classified at sync time:
  *   1. classifyAutomated() — persona-prompt prefixes on the first line of the
- *      text sync classifies: the first user-role message for claude_code sessions,
+ *      text sync classifies: the first user-role message for sources synced through
+ *      syncSession (claude_code and codex),
  *      which have no title since #95, and the title for every other source.
  *      Applied per-row in JS so the regexes stay the single source of truth
  *      shared with src/embeddings/classify.ts.
@@ -18,23 +19,32 @@
 import { query } from '../src/db/postgres.js'
 import { classifyAutomated } from '../src/embeddings/classify.js'
 
+// Sources whose sessions carry no title and are classified by their opening
+// prompt at sync time: both go through syncSession in src/sync/claude-code.ts.
+// Codex joined it after this script was written, so Codex Slack-monitor and
+// curiosity-curator runs synced before the classifier existed were never
+// flagged. Not the orchestrator's default source list, which only happens to
+// match: that one says what to sync, this one how a source is classified.
+const FIRST_PROMPT_SOURCES = ['claude_code', 'codex']
+
 const run = async () => {
   console.log('=== Backfilling sessions.is_automated ===\n')
 
   console.log('Step 1: Persona-prompt titles (classifyAutomated)...')
   const candidates = await query<{ id: number; classified_text: string | null }>(
     `SELECT s.id,
-            CASE WHEN src.name = 'claude_code' THEN m.content_text ELSE s.title END AS classified_text
+            CASE WHEN src.name = ANY($1::text[]) THEN m.content_text ELSE s.title END AS classified_text
      FROM sessions s
      JOIN projects p ON p.id = s.project_id
      JOIN sources src ON src.id = p.source_id
      LEFT JOIN LATERAL (
        SELECT content_text FROM messages
-       WHERE src.name = 'claude_code' AND session_id = s.id AND role = 'user'
+       WHERE src.name = ANY($1::text[]) AND session_id = s.id AND role = 'user'
        ORDER BY sequence_num NULLS FIRST, timestamp, id
        LIMIT 1
      ) m ON true
-     WHERE s.deleted_at IS NULL AND s.is_automated = false`
+     WHERE s.deleted_at IS NULL AND s.is_automated = false`,
+    [FIRST_PROMPT_SOURCES]
   )
 
   const automatedIds = candidates.rows
