@@ -68,21 +68,97 @@ const QUEUE_STATES = {
 // wants the abbreviated count and the detail line under it wants the exact one.
 const plural = (n, word) => `${word}${Number(n) === 1 ? '' : 's'}`
 
-const QueueThroughput = () => {
+// `/api/throughput` measures whether the queue moved. It cannot say *why* it
+// did not, because everything capable of holding the pipeline back sits outside
+// it: the GPU gate in front of Ollama refuses embed and summarize work with a
+// 503 while the card is busy, the stand-down switch parks ingestion on purpose,
+// and an unreachable Ollama stops it dead. All three arrive at throughput as a
+// rate of zero and used to render as a bare "Stalled" — which reads as "mindmeld
+// is broken" when in fact mindmeld is waiting, correctly, on something it does
+// not control. That is the whole complaint this function answers.
+//
+// The rule: a queue that is not moving *because something identifiable is
+// holding it* is waiting, and the chip must name what for. Only an unexplained
+// standstill keeps the word stalled.
+const blockedBy = (system, standDown) => {
+  if (standDown?.standingDown)
+    return {
+      kind: 'warn',
+      label: 'Standing down',
+      why: `ingestion yielded the GPU on purpose${standDown.reason ? ` — ${standDown.reason}` : ''}`,
+      resumesIn: standDown.secondsRemaining,
+    }
+
+  const o = system?.ollama
+  if (!o) return null
+
+  if (!o.reachable)
+    return {
+      kind: 'bad',
+      label: 'Ollama unreachable',
+      why: o.error ?? 'the embedding service is not answering',
+    }
+
+  // `present && !open` is the gate deliberately holding work back. Amber, not
+  // red: this is the proxy doing its job. The gate's own prose explanation is
+  // long and already rendered in full by the Ollama card below, so the chip
+  // carries only the part that answers "how long until it moves again".
+  if (o.gate?.present && !o.gate.open) {
+    const { quietSeconds, requiredQuietSeconds } = o.gate
+    const remaining =
+      Number.isFinite(quietSeconds) && Number.isFinite(requiredQuietSeconds)
+        ? Math.max(0, requiredQuietSeconds - quietSeconds)
+        : null
+    return {
+      kind: 'warn',
+      label: 'Waiting for GPU',
+      why:
+        remaining == null
+          ? 'the GPU gate is holding embedding and summarization'
+          : `the card has been quiet ${fmtDuration(quietSeconds)} of the ${fmtDuration(
+              requiredQuietSeconds
+            )} this gate requires — any other app touching the GPU restarts that count`,
+      resumesIn: remaining,
+    }
+  }
+
+  return null
+}
+
+const QueueThroughput = ({ system, summaries }) => {
   const t = useApi('/api/throughput', { minutes: 60 })
+  const standDown = useApi('/api/stand-down')
 
   useEffect(() => {
-    const id = setInterval(t.reload, 15000)
+    const id = setInterval(() => {
+      t.reload()
+      standDown.reload()
+    }, 15000)
     return () => clearInterval(id)
-  }, [t.reload])
+  }, [t.reload, standDown.reload])
 
   if (t.error) return html`<div class="faint" style="margin-top:10px;font-size:13px">throughput unavailable</div>`
   if (!t.data) return null
 
   const { state, queue, rates, eta, window: w } = t.data
-  const meta = QUEUE_STATES[state] ?? { label: state, kind: '' }
   const etaText = fmtDuration(eta.secondsRemaining)
   const summariesPending = queue?.summariesPending ?? 0
+
+  // A blocker only outranks the server's verdict when there is work it could be
+  // doing and that work is not moving. Two guards, both load-bearing:
+  // `moving` keeps a live drain or an in-flight summarization pass labelled as
+  // the healthy work it is even if the gate shut a moment ago, and `queued`
+  // stops "Waiting for GPU" appearing over an empty queue — with nothing to do,
+  // a closed gate is holding nothing back and "Caught up" is the honest answer.
+  const moving = state === 'draining' || state === 'summarizing'
+  const queued = (queue?.pending ?? 0) > 0 || summariesPending > 0
+  const held = moving || !queued ? null : blockedBy(system?.data, standDown.data)
+  const meta = held ?? QUEUE_STATES[state] ?? { label: state, kind: '' }
+
+  // What it is working on right this second, not what the rates averaged over
+  // the last hour. `active` is derived from summarization log lines in the last
+  // ten minutes, so it is the only signal on this screen that names a session.
+  const active = summaries?.data?.active ?? []
 
   return html`
     <div class="m" style="margin-top:10px">
@@ -102,11 +178,31 @@ const QueueThroughput = () => {
           ? 'no messages queued to embed'
           : `no messages embedded in the last ${w.minutes}m`}</span
       >`}
-      ${state === 'stalled' &&
-      html`<span>nothing embedded or summarized in the last ${w.minutes}m</span>`}
+      ${!held && state === 'stalled' &&
+      html`<span>nothing embedded or summarized in the last ${w.minutes}m — nothing is holding
+        it, so this is a fault worth looking into</span>`}
+      ${held &&
+      html`<span
+        >${fmtExact(queue.pending)} ${plural(queue.pending, 'message')} and
+        ${fmtExact(summariesPending)} ${plural(summariesPending, 'session')} waiting on it</span
+      >`}
       ${etaText && state === 'draining' &&
       html`<span class="right faint nowrap">~${etaText} remaining</span>`}
+      ${held?.resumesIn > 0 &&
+      html`<span class="right faint nowrap">retries in ~${fmtDuration(held.resumesIn)}</span>`}
     </div>
+    ${held &&
+    html`<div class="faint" style="font-size:12px;margin-top:4px;line-height:1.5">
+      ${held.why}
+    </div>`}
+    ${active.length > 0 &&
+    html`<div class="faint" style="font-size:12px;margin-top:4px">
+      now summarizing ${active.length} ${plural(active.length, 'session')} —
+      <span style="color:var(--text)">session ${active[0].sessionId}</span>, ${active[0].chunkPasses}
+      ${plural(active[0].chunkPasses, 'chunk')} in the last 10m${active.length > 1
+        ? ` · +${active.length - 1} more`
+        : ''}
+    </div>`}
     <div class="faint" style="font-size:12px;margin-top:4px">
       last ${w.minutes}m: ${fmtExact(w.embedded)} embedded, ${fmtExact(w.arrived)} arrived,
       ${fmtExact(w.summarized ?? 0)} summarized
@@ -121,11 +217,34 @@ const QueueThroughput = () => {
   `
 }
 
+// A run that has held the lock this long without embedding a message or
+// updating a session is not slow, it is stuck against something — in practice
+// the closed GPU gate, which fails every batch and is then retried forever.
+// Ten minutes is comfortably longer than the slowest healthy session pass
+// (5-10 minutes of GPU per session, per the throughput notes).
+const STUCK_AFTER_MS = 10 * 60 * 1000
+
+const elapsedMs = run => (run?.startedAt ? Date.now() - new Date(run.startedAt).getTime() : 0)
+
+const isStuck = run =>
+  !!run?.running &&
+  elapsedMs(run) > STUCK_AFTER_MS &&
+  Number(run.messagesEmbedded ?? 0) === 0 &&
+  Number(run.sessionsUpdated ?? 0) === 0
+
 // Drains pending embeddings on demand instead of waiting out the sync interval.
 // The run is detached server-side and takes minutes, so this polls rather than
 // holding a request open, and it picks up a run someone else started too.
-const IngestionRunner = ({ onFinished }) => {
+//
+// The button stays pressable while a run is in flight, deliberately. The server
+// answers a second press with 409 *and the running run's state* rather than an
+// error, and "one is already going, here is how far it has got" is the most
+// useful thing this control can say to someone who opened this page precisely
+// because nothing appears to be happening. A greyed-out button answers nothing,
+// which is how a wedged run came to look identical to a working one.
+const IngestionRunner = ({ onFinished, pending, system }) => {
   const [run, setRun] = useState(null)
+  const [feedback, setFeedback] = useState(null)
   const [error, setError] = useState(null)
   const [pressing, setPressing] = useState(false)
 
@@ -154,11 +273,28 @@ const IngestionRunner = ({ onFinished }) => {
     }
   }, [run?.running])
 
+  const queuedMessages = Number(pending?.messages ?? 0)
+  const queuedSessions = Number(pending?.sessions ?? 0)
+  const queuedText = `${fmtExact(queuedMessages)} ${plural(queuedMessages, 'message')} and ${fmtExact(
+    queuedSessions
+  )} ${plural(queuedSessions, 'session')} queued`
+
   const start = async () => {
     setError(null)
+    setFeedback(null)
     setPressing(true)
     try {
-      setRun((await requestRun()).run)
+      const body = await requestRun()
+      setRun(body.run)
+      // Both answers are reported the same way, because neither is a failure.
+      // The server's own `message` distinguishes them; the queue depth is added
+      // here because "started" on its own does not say how much there is to do.
+      setFeedback({
+        started: body.started,
+        text: body.started
+          ? `Started — ${queuedText}.`
+          : `Already running — started ${timeAgo(body.run?.startedAt)}, ${runSummary(body.run) ?? 'no progress yet'}.`,
+      })
     } catch (e) {
       setError(e.message)
     } finally {
@@ -167,22 +303,41 @@ const IngestionRunner = ({ onFinished }) => {
   }
 
   const running = !!run?.running
+  const stuck = isStuck(run)
+  const gate = system?.data?.ollama?.gate
 
   return html`
     <div style="margin-top:12px">
-      <button class="btn sm primary" disabled=${running || pressing} onClick=${start}>
-        ${running ? 'Ingesting…' : 'Run ingestion now'}
+      <button class="btn sm primary" disabled=${pressing} onClick=${start}>
+        ${pressing ? 'Starting…' : running ? 'Force run now' : 'Run ingestion now'}
       </button>
+      <span class="faint" style="margin-left:10px;font-size:13px">${queuedText}</span>
       ${running &&
-      html`<span class="faint" style="margin-left:10px;font-size:13px">
-        started ${timeAgo(run.startedAt)} — embedding pending messages
-      </span>`}
+      html`<div class="faint" style="margin-top:8px;font-size:13px">
+        run started ${timeAgo(run.startedAt)} — ${runSummary(run) ?? 'no progress yet'}
+      </div>`}
+      ${stuck &&
+      html`<div style="color:var(--amber);margin-top:8px;font-size:13px;line-height:1.5">
+        This run has made no progress since it started.
+        ${gate?.present && !gate.open
+          ? html` It is blocked on the GPU gate, so every batch fails and is retried — nothing will
+            move until the gate opens.`
+          : ''}
+        Pressing the button again will report the same run: the server allows only one at a time,
+        and clearing a wedged one needs the mcp container restarted.
+      </div>`}
       ${!running &&
       run?.finishedAt &&
       !run.error &&
-      html`<span class="faint" style="margin-left:10px;font-size:13px">
+      html`<div class="faint" style="margin-top:8px;font-size:13px">
         last run ${timeAgo(run.finishedAt)}: ${runSummary(run)}
-      </span>`}
+      </div>`}
+      ${feedback &&
+      html`<div
+        style=${`margin-top:8px;font-size:13px;color:var(--${feedback.started ? 'green' : 'amber'})`}
+      >
+        ${feedback.text}
+      </div>`}
       ${!running &&
       run?.error &&
       html`<div class="mono" style="color:var(--red);margin-top:8px;overflow-wrap:anywhere">
@@ -435,8 +590,8 @@ export const OverviewView = () => {
           ${fmtNum(pending.sessions ?? 0)} sessions pending
         <//>
       </div>
-      <${QueueThroughput} />
-      <${IngestionRunner} onFinished=${status.reload} />
+      <${QueueThroughput} system=${system} summaries=${summaries} />
+      <${IngestionRunner} onFinished=${status.reload} pending=${pending} system=${system} />
     <//>
 
     <${EmbeddingActivity} />

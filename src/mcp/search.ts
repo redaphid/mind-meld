@@ -9,6 +9,15 @@ import { fuseRanks, type RankedList } from './rrf.js'
 import { buildSnippet, ts_headline_options } from './snippet.js'
 import { resolveTitle, type TitleSource } from './title.js'
 import { parseSinceDate } from './since.js'
+import { resolveTagFilter, passesTagFilter, getSessionTags, type TagFilter } from './tags.js'
+import {
+  loadQualityVector,
+  loadSessionCentroidsByIds,
+  directionUsability,
+  qualityMultiplier,
+  GLOBAL_MEAN_VECTOR,
+  USELESS_VECTOR,
+} from '../services/quality-vectors.js'
 
 const PROJECT_BOOST = 0.5
 
@@ -37,6 +46,17 @@ export type SearchParams = {
   // true to reach one deliberately (issue #95).
   includeUnsummarized?: boolean
   dataClass?: string[]
+  // Open-vocabulary agent tags (src/mcp/tags.ts). `tags` narrows to things
+  // carrying any of them; `excludeTags` hides things carrying any of them, on
+  // top of the configured default-excluded set. Unknown tags are NOT an error
+  // here -- an unused tag simply matches nothing, which is the honest answer
+  // for a vocabulary anyone may extend at any time.
+  tags?: string[]
+  excludeTags?: string[]
+  // How hard to demote results RESEMBLING `useless`-tagged sessions, overriding
+  // config.ranking.uselessPenalty. 0 reproduces the pre-feature ranking exactly,
+  // which is what makes it usable as a control when comparing two searches.
+  uselessPenalty?: number
 }
 
 // Which effective data classes this search may see. null means unfiltered.
@@ -111,6 +131,9 @@ export type SearchResult = {
   matched_tier: MatchedTier
   snippet: string | null
   cursor?: SearchCursor
+  // Session-level tags, attached after ranking so a caller can see what a
+  // result has been judged as without a second call. Absent when untagged.
+  tags?: string[]
 }
 
 // A session can be hit by several arms; we keep the first (best-ranked) hit's
@@ -352,18 +375,26 @@ const baseResult = (s: SessionRow, score: number, tier: MatchedTier): SearchResu
   snippet: null,
 })
 
+// `messageId` is the message this hit is anchored to, when there is one. It
+// only matters to the tag filter, which can hide an individual message without
+// hiding its whole session -- see passesTagFilter for why that asymmetry
+// exists. Session-anchored arms pass nothing and are judged on session tags
+// alone.
 const passesFilters = (
   session: SessionRow,
   params: { source?: string; projectOnly?: boolean; includeUnsummarized?: boolean },
   sinceDate: Date | null,
   projectIds: number[],
-  dataClasses: string[] | null
+  dataClasses: string[] | null,
+  tagFilter: TagFilter,
+  messageId?: number
 ) => {
   if (!params.includeUnsummarized && session.summary === null) return false
   if (dataClasses && !dataClasses.includes(session.data_class)) return false
   if (params.source && session.source_name !== params.source) return false
   if (sinceDate && session.started_at < sinceDate) return false
   if (params.projectOnly && !projectIds.includes(session.project_id)) return false
+  if (!passesTagFilter(tagFilter, session.id, messageId)) return false
   return true
 }
 
@@ -383,9 +414,57 @@ export type SearchDegradation = {
   reason: string
 }
 
+// Whether results were re-ranked away from material resembling your
+// `useless`-tagged sessions, and if not, why not. Reported rather than inferred:
+// the penalty legitimately declines to run (too few labels, or labels that share
+// no direction), and a caller who assumes it is always on would read an
+// unfiltered ranking as a filtered one.
+export type QualitySteering = {
+  active: boolean
+  beta: number
+  // Present only when inactive.
+  reason?: string
+}
+
 export type SearchOutcome = {
   results: SearchResult[]
   degraded: SearchDegradation | null
+  steering: QualitySteering
+}
+
+/**
+ * Load the useless direction and decide whether it may touch this search.
+ *
+ * Returns null for the vectors whenever steering is off, so the caller cannot
+ * accidentally apply a direction that failed its usability check -- there is no
+ * "apply anyway" path to take by mistake.
+ */
+const resolveSteering = async (
+  beta: number
+): Promise<{ steering: QualitySteering; direction: number[] | null; globalMean: number[] | null }> => {
+  if (beta <= 0)
+    return { steering: { active: false, beta, reason: 'penalty disabled (beta = 0)' }, direction: null, globalMean: null }
+
+  const [useless, globalMean] = await Promise.all([
+    loadQualityVector(USELESS_VECTOR),
+    loadQualityVector(GLOBAL_MEAN_VECTOR),
+  ])
+
+  const { usable, reason } = directionUsability(useless)
+  if (!usable || !useless)
+    return { steering: { active: false, beta, reason }, direction: null, globalMean: null }
+
+  // The direction is expressed in a basis defined by the global mean. Without
+  // it, centering cannot be reproduced at query time and every similarity would
+  // be measured against the wrong origin.
+  if (!globalMean)
+    return {
+      steering: { active: false, beta, reason: 'global mean vector missing (run compute:centroids)' },
+      direction: null,
+      globalMean: null,
+    }
+
+  return { steering: { active: true, beta }, direction: useless.vector, globalMean: globalMean.vector }
 }
 
 export const searchWithDiagnostics = async (params: SearchParams): Promise<SearchOutcome> => {
@@ -402,11 +481,21 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
   )
     throw new Error('Must provide either query or centroid parameters (likeSession, likeProject, etc.)')
 
+  // After validation: an invalid call should be rejected without touching the
+  // database, and this reads two rows before anything else needs them.
+  const { steering, direction, globalMean } = await resolveSteering(
+    params.uselessPenalty ?? config.ranking.uselessPenalty
+  )
+
   const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
   const projectIds = matchingProjects.map((p) => p.id)
   const sinceDate = parseSinceDate(params.since)
   const dataClasses = resolveDataClasses(params)
   if (dataClasses) await assertKnownDataClasses(dataClasses)
+  // Resolved once and shared by every arm. Note this runs even with no tag
+  // params: the configured default-excluded set ("useless") applies to a plain
+  // search too, which is the whole point of it being a default.
+  const tagFilter = await resolveTagFilter(params)
   // Chroma knows nothing about data classes, so an active class filter can
   // starve the semantic arms (~70% of sessions may be filtered out after the
   // fetch). Over-fetch harder when a filter is on to compensate.
@@ -457,7 +546,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
           const score = 1 - (sessionHits.distances?.[0]?.[i] ?? 1)
           const session = await getSessionById(sessionId, includeAutomated)
           if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses)) continue
+          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
           record(baseResult(session, score, 'session'), session.project_id, session.summary, null)
           sessionRanked.push(session.id)
         }
@@ -473,7 +562,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
           const score = 1 - (chunkHits.distances?.[0]?.[i] ?? 1)
           const session = await getSessionByChunkId(chunkId, includeAutomated)
           if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses)) continue
+          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
           if (seen.has(session.id)) continue
           seen.add(session.id)
           const result = baseResult(session, score, 'chunk')
@@ -495,7 +584,8 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
           const score = 1 - (messageHits.distances?.[0]?.[i] ?? 1)
           const session = await getSessionByMessageId(messageId, includeAutomated)
           if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses)) continue
+          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter, session.message_id))
+            continue
           if (seen.has(session.id)) continue
           seen.add(session.id)
           const result = baseResult(session, score, 'message')
@@ -544,6 +634,23 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
         `NOT to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $${nextParam++})`
       )
       values.push(params.excludeTerms)
+    }
+
+    // The SAME resolved filter the semantic arms use, pushed into SQL rather
+    // than applied to the rows afterwards. Filtering here matters because this
+    // arm has a LIMIT: dropping tagged rows in JS would let excluded sessions
+    // consume the result budget and silently shrink the answer.
+    if (tagFilter.includedSessions) {
+      conditions.push(`s.id = ANY($${nextParam++}::int[])`)
+      values.push([...tagFilter.includedSessions])
+    }
+    if (tagFilter.excludedSessions.size > 0) {
+      conditions.push(`s.id <> ALL($${nextParam++}::int[])`)
+      values.push([...tagFilter.excludedSessions])
+    }
+    if (tagFilter.excludedMessages.size > 0) {
+      conditions.push(`m.id <> ALL($${nextParam++}::bigint[])`)
+      values.push([...tagFilter.excludedMessages])
     }
 
     values.push(limit * 2)
@@ -619,12 +726,39 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
 
   const fused = fuseRanks(rankedLists)
 
+  // Candidate centroids are fetched for every hit, not just the returned page:
+  // the penalty changes the ORDER, so anything it could promote into the page
+  // has to be scored before the slice.
+  const centroidBySession =
+    steering.active && direction && globalMean
+      ? await loadSessionCentroidsByIds(Array.from(hitBySession.keys()))
+      : new Map<number, number[]>()
+
   const results = Array.from(hitBySession.values()).map((hit) => {
-    const score = (fused.get(hit.result.session_id) ?? 0) + (inProject.has(hit.result.session_id) ? PROJECT_BOOST : 0)
+    const fusedScore =
+      (fused.get(hit.result.session_id) ?? 0) + (inProject.has(hit.result.session_id) ? PROJECT_BOOST : 0)
+    const centroid = centroidBySession.get(hit.result.session_id)
+    // A session without a centroid keeps its unpenalized score. Absence of
+    // evidence is not evidence of uselessness -- the alternative would punish
+    // every session too new or too short to have been averaged yet.
+    const score =
+      centroid && direction && globalMean
+        ? fusedScore * qualityMultiplier(centroid, direction, globalMean, steering.beta)
+        : fusedScore
     return { ...hit.result, score, snippet: buildSnippet(hit.rawSnippet, hit.headline) }
   })
   results.sort((a, b) => b.score - a.score)
-  return { results: results.slice(0, limit), degraded }
+
+  // Decorate only the page actually returned, so a wide candidate set costs
+  // one small query rather than one per discarded hit.
+  const page = results.slice(0, limit)
+  const tagsBySession = await getSessionTags(page.map((r) => r.session_id))
+  for (const result of page) {
+    const tags = tagsBySession.get(result.session_id)
+    if (tags && tags.length > 0) result.tags = tags
+  }
+
+  return { results: page, degraded, steering }
 }
 
 // The plain form, for callers that have nothing useful to do with the
@@ -661,11 +795,14 @@ export const formatSearchResults = (
       // and has not been summarized yet. Naming the session and saying so beats
       // handing a triaging LLM an instruction fragment as if it were a topic.
       const heading = r.title ?? `Session ${r.session_id} (no title — not summarized yet)`
+      // Shown only when there are any, so an untagged corpus reads exactly as
+      // it did before tags existed.
+      const tags = r.tags?.length ? `\n   Tags: ${r.tags.join(', ')}` : ''
       return `${i + 1}. **${heading}**${projectLabel}
    Session ID: ${r.session_id}
    Project: ${r.project_name} (${r.source}, ${r.data_class})
    Date: ${r.date.toISOString().split('T')[0]}
-   Score: ${r.score.toFixed(3)} | Matched: ${r.matched_tier}${cursor}
+   Score: ${r.score.toFixed(3)} | Matched: ${r.matched_tier}${cursor}${tags}
    ${r.snippet ?? '(no snippet)'}`
     })
     .join('\n\n')

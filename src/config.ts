@@ -33,10 +33,32 @@ function getEnvInt(key: string, defaultValue: number): number {
   return value ? parseInt(value, 10) : defaultValue;
 }
 
+// Separate from getEnvInt because the ranking knobs are fractions: parseInt on
+// "0.35" yields 0, which would read as "feature off" while looking configured.
+function getEnvFloat(key: string, defaultValue: number): number {
+  const value = process.env[key];
+  if (!value) return defaultValue;
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : defaultValue;
+}
+
 function getEnvBool(key: string, defaultValue: boolean): boolean {
   const value = process.env[key];
   if (!value) return defaultValue;
   return value.toLowerCase() === "true" || value === "1";
+}
+
+// A comma-separated env var as a list. An explicitly empty value ("") means an
+// empty list, not "fall back to the default" -- otherwise a setting like
+// MINDMELD_DEFAULT_EXCLUDED_TAGS could never be turned off from the
+// environment, only changed to something else.
+function getEnvList(key: string, defaultValue: string[]): string[] {
+  const value = process.env[key];
+  if (value === undefined) return defaultValue;
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
 }
 
 export const config = {
@@ -59,6 +81,37 @@ export const config = {
     retentionDays: getEnvInt("LOG_RETENTION_DAYS", 14),
   },
 
+  tags: {
+    // Tags whose presence hides a session from search unless the caller asks
+    // for them by name. "useless" is the first member and the reason the set
+    // exists: it replaces a separate soft-delete flag with one ordinary tag,
+    // so hiding a session stays reversible (task 326).
+    //
+    // Configurable precisely so a second hidden tag never needs a code change.
+    // Note this is the ONLY place tags are treated specially -- the vocabulary
+    // itself stays open, and nothing here restricts what tags may be created.
+    defaultExcluded: getEnvList("MINDMELD_DEFAULT_EXCLUDED_TAGS", ["useless"]),
+  },
+
+  ranking: {
+    // How hard a result that RESEMBLES your `useless`-tagged sessions is pushed
+    // down. Distinct from defaultExcluded above: that hides the sessions you
+    // labelled, this demotes the ones you never got to.
+    //
+    // Applied multiplicatively -- score *= (1 - beta * max(0, similarity)) --
+    // so the scale is fixed: 0 reproduces the previous ranking exactly, 1 sends
+    // a perfectly useless-aligned result to zero. It must NOT be additive: the
+    // fused RRF score tops out around 0.066, so an additive term would have to
+    // be hand-matched to RRF_K and the arm count, and would silently stop
+    // meaning the same thing if either changed.
+    //
+    // 0.35 is a deliberate default rather than a tuned optimum -- measured
+    // separation is strong (unlabelled sessions average -0.015 against the
+    // direction), so a moderate value reorders the genuinely bad without
+    // letting one signal dominate relevance. Explore with `pnpm run search:tune`.
+    uselessPenalty: getEnvFloat("MINDMELD_USELESS_PENALTY", 0.35),
+  },
+
   // PostgreSQL
   postgres: {
     host: getEnv("POSTGRES_HOST", "127.0.0.1"),
@@ -66,6 +119,24 @@ export const config = {
     user: getEnv("POSTGRES_USER", "mindmeld"),
     password: getEnv("POSTGRES_PASSWORD", "mindmeld"),
     database: getEnv("POSTGRES_DB", "conversations"),
+    // How long to wait for a connection from the pool. Was hardcoded at 2000ms,
+    // which is generous inside the compose network and too tight from a Windows
+    // host, where Docker Desktop's port forwarding can take several seconds to
+    // establish the first connection. That presented as "Connection terminated
+    // unexpectedly" from every script run on the host -- a message that says
+    // nothing about timeouts and reads like an auth or server problem.
+    //
+    // A longer limit costs nothing where connecting is fast; it only changes how
+    // long the slow case waits before giving up.
+    connectionTimeoutMs: getEnvInt("POSTGRES_CONNECTION_TIMEOUT_MS", 10000),
+    // Max pooled connections. 20 is right inside the compose network, but a
+    // script run on a Windows HOST cannot open that many at once: Docker
+    // Desktop's port forwarding drops concurrent connection attempts to a
+    // published port, and every one of them fails with "Connection terminated
+    // unexpectedly" -- measured at 12 of 12 failing while a single connection
+    // succeeded every time. Scripts that fan out queries set this to 1 and
+    // serialize instead of failing.
+    poolMax: getEnvInt("POSTGRES_POOL_MAX", 20),
   },
 
   // Chroma

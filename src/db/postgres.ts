@@ -16,9 +16,9 @@ export function getPool(): pg.Pool {
       user: config.postgres.user,
       password: config.postgres.password,
       database: config.postgres.database,
-      max: 20,
+      max: config.postgres.poolMax,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 2000,
+      connectionTimeoutMillis: config.postgres.connectionTimeoutMs,
       keepAlive: true,
       keepAliveInitialDelayMillis: 10000,
     });

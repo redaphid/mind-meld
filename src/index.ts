@@ -211,7 +211,8 @@ program
   .command('search <query>')
   .description('Search conversations')
   .option('-l, --limit <number>', 'Maximum results', '20')
-  .option('-s, --source <source>', 'Filter by source (claude_code)')
+  .option('-s, --source <source>', 'Filter by source (e.g. claude_code, android)')
+  .option('--full', 'Print full message text instead of the first 200 characters')
   .action(async (searchQuery, options) => {
     try {
       const result = await query(
@@ -228,9 +229,17 @@ program
 
       for (const row of result.rows) {
         console.log(`[${row.source_name}] ${row.project_name}`);
+        console.log(`  Session: ${row.session_id}  Message: ${row.message_id}`);
         console.log(`  Role: ${row.role}`);
-        console.log(`  Time: ${row.timestamp}`);
-        console.log(`  Content: ${row.content_text?.slice(0, 200)}...`);
+        // init-db/003-ensure-functions.sql renamed this column from `timestamp`
+        // to `message_timestamp`; reading the old name printed "Time: undefined"
+        // on every row. Accept both so the CLI works against either definition.
+        const ts = row.message_timestamp ?? row.timestamp;
+        console.log(`  Time: ${ts instanceof Date ? ts.toISOString() : ts}`);
+        const text: string = row.content_text ?? '';
+        console.log(
+          `  Content: ${options.full || text.length <= 200 ? text : text.slice(0, 200) + '...'}`
+        );
         console.log();
       }
     } catch (e) {

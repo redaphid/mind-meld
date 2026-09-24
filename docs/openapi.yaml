@@ -2,7 +2,7 @@ openapi: 3.1.0
 
 info:
   title: Mindmeld HTTP API
-  version: 1.10.0
+  version: 1.21.0
   summary: Unified conversation index for Claude Code.
   description: |
     Mindmeld indexes AI coding conversations into PostgreSQL (metadata +
@@ -15,10 +15,13 @@ info:
       paths here; see the `tools` list in `docs/USAGE.md` for the tool contracts.
     * **REST** — everything else, in one dialect: camelCase keys, a
       `{ status, <resource> }` envelope, and `{ status: 'error', error }` on
-      failure. It covers monitoring (`/health`, `/status`, `/api/logs`,
-      `/api/machines`, `/api/activity`), reading the index (`/api/search`,
-      `/api/projects`, `/api/sessions`, `/api/messages`), and ingest
-      (`/api/ingest`) for sources Mindmeld does not sync itself.
+      failure. It covers reading the index (`/api/search`, `/api/projects`,
+      `/api/sessions`, `/api/messages`), monitoring (`/health`, `/api/status`,
+      `/api/logs`, `/api/machines`, `/api/activity`, `/api/quarantine`),
+      pipeline diagnostics (`/api/system`, `/api/summaries`,
+      `/api/throughput`, `/api/embedding-series`, `/api/sync`), the GPU
+      stand-down switch (`/api/stand-down`), and ingest (`/api/ingest`) for
+      sources Mindmeld does not sync itself.
     * **UI** — `/`, the browser app in `public/`, which is built on the REST
       endpoints below and nothing else. The UI also ships as its own container
       (the `ui` compose service): a static server for `public/` that
@@ -26,6 +29,73 @@ info:
       `/openapi.yaml` to this server. Public hostnames (the Cloudflare tunnel)
       point at the `ui` service; this server keeps serving `/` too, so it
       stays fully usable standalone.
+
+    ### Read this first — why Mindmeld looks empty when it is not
+
+    Every item below has caused a caller to conclude that a conversation, or a
+    whole capability, does not exist. None of them is an error: each returns
+    `200` with a thin or empty result, which is indistinguishable from "never
+    indexed" unless you know to look.
+
+    1. **`dataClass` defaults to `coding`.** `/api/search` and the `search` MCP
+       tool see *only* `coding`-class data unless told otherwise, so a query
+       about phone messages, SMS, notes, or anything else personal returns
+       **nothing** — and looks exactly like data that was never captured.
+       Classes in use: `coding`, `meetings`, `notes`, `personal`, `test`. The
+       vocabulary is open (any lowercase label up to 32 characters), and **only
+       `coding` is visible to the default search.** Pass `?dataClass=personal`,
+       a repeated or comma-separated list, or `?dataClass=*` for everything.
+       Naming a `source` explicitly also bypasses the default. Before deciding
+       data is missing, retry with `dataClass=*`.
+    2. **A hit's `date` is its *session's* start date, not the matched
+       message's.** A phone-app session opened weeks ago still reports its
+       original start date for a message that arrived minutes ago. **Do not
+       sort or filter on it** —
+       doing so hides exactly the recent material you are looking for. To date
+       the actual content, read `messages[].timestamp` from
+       `/api/sessions/{id}/messages`. The same applies to `since`, which
+       filters on session start.
+    3. **`/api/sessions/{id}/messages` returns oldest first**, ordered by
+       `sequenceNum`. A small `limit` shows the *beginning* of the
+       conversation, never the latest — the single most common way to read a
+       long session and conclude nothing recent happened in it. For the end,
+       page with `offset`, or take the last chunk's message-id range from the
+       digest at `/api/sessions/{id}`.
+    4. **For anything recent, use `mode=text`.** Full-text search reads the
+       `messages` table directly, so a message is findable by text **the
+       instant it is written** — no embedding required. Only the *semantic*
+       arms wait on vectors, and vectorisation is GPU-bound and can lag by
+       minutes or hours (see `/api/system` for whether the GPU gate is holding
+       work, and `/api/throughput` for whether the queue is draining). The
+       default `hybrid` mode leans on those vectors and will **silently miss**
+       data newer than the embedding frontier. So for anything from the last
+       few hours, pass `mode=text` with one or two literal tokens — a rare
+       word from the exchange — and expect it to work immediately.
+    5. **`mode=text` is AND, not OR.** It uses Postgres
+       `websearch_to_tsquery`, which requires *every* unquoted term to appear
+       in the same message — so a long natural-language question reliably
+       matches nothing at all. This is why the advice above says one or two
+       literal tokens: `q=message+rates` returns hits, while adding a single
+       term that appears nowhere — `q=message+zzzqqx` — drops the count to
+       zero. A whole natural-language sentence fails for the same reason: one
+       unmatched word is enough to eliminate every row.
+    6. **A session with no summary is hidden from *every* search mode.** Both
+       the text arm and the semantic arms drop sessions whose `summary` is
+       null, on the grounds that they have no real title and cannot be triaged.
+       A just-ingested session has no summary until a summarizer pass runs, so
+       freshly pushed data can be invisible to search for that reason alone,
+       independently of embedding. Pass `includeUnsummarized=true` to reach it.
+       Combined with the point above, the reliable recipe for very recent data
+       is `mode=text&includeUnsummarized=true&dataClass=*`.
+    7. **Writing differs from reading: `POST /api/ingest` takes `content`,
+       while every read endpoint returns that same field as `text`.** Each
+       message also requires `sequenceNum`. Top-level `dataClass` is required
+       only when the ingest would create a new source; for an existing source
+       it is ignored, since ingest never reclassifies.
+
+    Also check `degraded` on every search response before drawing a conclusion:
+    non-null means the semantic arms were skipped and you are looking at
+    full-text results alone, which match words rather than meaning.
 
     ### No truncation
 
@@ -97,18 +167,46 @@ paths:
                 name: mindmeld
                 version: 1.7.1
 
-  /status:
+  /api/status:
     get:
       tags: [Monitoring]
       operationId: getStatus
       summary: Sync, embedding, and collection status
       description: |
-        Also served at `/api/status`.
-
         Aggregates per-source sync state, index totals, the embedding backlog,
         Chroma collection sizes, and the most recent non-warmup session. Queries
         Postgres on every call; Chroma is best-effort, so `chroma.collections`
         comes back empty (not an error) when Chroma is unreachable.
+
+        The same handler is served at `/status`, which is shorter to type.
+
+        `pendingEmbeddings` is the backlog a worker will actually pick up, not
+        every row without a vector. Read it next to `/api/throughput` (is it
+        draining?) and `/api/system` (is the GPU gate holding it?) — a pending
+        count alone cannot tell a healthy queue from a stalled one.
+      responses:
+        '200':
+          description: Current pipeline status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Status'
+        '500':
+          description: A backing query failed (usually Postgres unreachable).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /status:
+    get:
+      tags: [Monitoring]
+      operationId: getStatusShort
+      summary: Sync, embedding, and collection status (alias)
+      description: |
+        A real, permanent path — the same handler as `/api/status`, registered
+        under both prefixes so the status screen is reachable without the `/api`
+        prefix. Identical request and response.
       responses:
         '200':
           description: Current pipeline status.
@@ -152,16 +250,30 @@ paths:
         Upserts a source, project, and session, then inserts the supplied
         messages and recomputes the session's aggregate stats.
 
-        **Idempotency.** Source, project, and session are keyed on
-        `externalId`, so re-posting the same payload updates in place rather
-        than duplicating. Messages are inserted on conflict-do-nothing by
-        `externalId`; `messagesInserted` counts only the rows that were new, so
-        a replayed payload legitimately returns `0`.
+        **The field is `content`, not `text`.** Every read endpoint returns a
+        message body as `text`; this one accepts it as `content`. Each message
+        also requires `sequenceNum` — reads are ordered by it, not by
+        `timestamp`.
 
-        **Embeddings are not generated here.** Ingested messages join the
-        pending queue and are vectorised by the next `mindmeld embeddings` run,
-        which means they are searchable by full text immediately but by
-        semantic similarity only after that run.
+        **Synchronous.** This is a plain database write: rows land in a second
+        or two and the response reflects committed state. Nothing is queued or
+        deferred at write time.
+
+        **Idempotent — safe to replay.** Source, project, and session are keyed
+        on `externalId`, so re-posting the same payload updates in place rather
+        than duplicating. Messages are inserted on conflict-do-nothing by
+        `externalId`; `messagesInserted` counts only rows that were new, so a
+        replayed payload legitimately returns `0`. There is no need to check
+        before writing.
+
+        **Embeddings are not generated here, and are not enqueued here
+        either.** Ingested rows simply become visible to the global pending
+        predicate, and are vectorised by whichever sync worker runs next —
+        `SYNC_INTERVAL_SECONDS` defaults to 3600, and the work is GPU-bound on
+        top of that. The practical consequence: a just-ingested message is
+        findable by **full-text search immediately** (`mode=text`, plus
+        `includeUnsummarized=true` while the session still has no summary) but
+        by semantic or the default `hybrid` search only after that run.
       requestBody:
         required: true
         description: The conversation to index. Body limit is 10 MB.
@@ -279,6 +391,17 @@ paths:
           example: how did I set up the cloudflare tunnel
         - name: mode
           in: query
+          description: |
+            **`text` is the mode to use for anything recent.** It reads the
+            `messages` table directly, so a message is findable the instant it
+            is written, with no embedding required; `semantic` and the default
+            `hybrid` lean on vectors that may lag hours behind, and will
+            silently miss newer data.
+
+            The cost is that `text` uses `websearch_to_tsquery`, whose unquoted
+            terms are ANDed — every term must appear in the same message, so a
+            long natural-language question matches nothing. Use one or two
+            literal tokens with it.
           schema:
             type: string
             enum: [hybrid, semantic, text]
@@ -303,14 +426,28 @@ paths:
         - name: dataClass
           in: query
           description: |
-            Data classes to search, repeatable or comma-separated
-            (`dataClass=coding,personal`). Every source carries a class
-            (`coding`, `personal`, `meetings`, …; a project can override its
-            source's class). Defaults to `coding` only, so SMS threads and
-            meeting transcripts stay out of a coding agent's results. `*`
-            disables the filter. Values are case-insensitive; a value not in
-            the live vocabulary is a `400` naming the valid classes rather
-            than a silent empty result.
+            **Defaults to `coding` only — the single most common reason a
+            search comes back empty.** SMS threads, phone conversations,
+            meeting transcripts and notes are all invisible to a plain query,
+            and the result is indistinguishable from data that was never
+            indexed. If you are looking for anything personal and got nothing,
+            retry with `dataClass=*` before concluding it is absent.
+
+            Repeatable or comma-separated (`dataClass=coding,personal`). Every
+            source carries a class, and a project may override its source's
+            class. Classes currently in use: `coding`, `meetings`, `notes`,
+            `personal`, `test` — but the vocabulary is **open**: any lowercase
+            label up to 32 characters can be created by ingest, and only
+            `coding` is visible to the default search.
+
+            `*` anywhere in the value disables the filter entirely. Naming a
+            `source` explicitly is the other escape hatch — it bypasses the
+            default too, so `source=android` returns android hits without a
+            `dataClass` at all.
+
+            Values are trimmed and lowercased, so miscasing matches rather than
+            silently returning nothing. A value not in the live vocabulary is a
+            `400` naming the valid classes, again rather than an empty result.
           schema:
             type: array
             items:
@@ -323,6 +460,12 @@ paths:
           description: |
             Natural-language or absolute cutoff, parsed with chrono
             (`7 days ago`, `last tuesday`, `2026-01-01`).
+
+            **Filters on the session's start, not on message timestamps.** A
+            long-running session opened before the cutoff is excluded entirely,
+            including the messages it received today — so a narrow `since` can
+            hide exactly the recent material you are asking for. Prefer leaving
+            it off and reading `messages[].timestamp` to date content.
           schema:
             type: string
         - name: not
@@ -358,8 +501,14 @@ paths:
           description: |
             Include sessions that have not been summarized yet. Excluded by
             default: such a session has no title and no session-level vector, so
-            it can only arrive as an untriageable result. Pass true to reach the
-            indexing backlog deliberately (issue #95).
+            it can only arrive as an untriageable result (issue #95).
+
+            **This filter applies to every mode, including `text`** — so a
+            just-ingested session is hidden from search until a summarizer pass
+            runs, for this reason alone and independently of embedding. Pass
+            true to reach freshly pushed data or the indexing backlog
+            deliberately. The reliable recipe for very recent material is
+            `mode=text&includeUnsummarized=true&dataClass=*`.
           schema:
             type: boolean
             default: false
@@ -613,6 +762,17 @@ paths:
       operationId: getSessionMessages
       summary: Read raw messages
       description: |
+        **Messages come back oldest first**, ordered by `sequenceNum`. A small
+        `limit` therefore shows the *beginning* of the conversation and never
+        the latest — the most common way to read a long session and wrongly
+        conclude nothing recent happened in it. To reach the end, page forward
+        with `offset` (`messageCount` from the digest tells you how far), or
+        take the last chunk's message-id range from `/api/sessions/{id}`.
+
+        This is also the endpoint that can date content: `messages[].timestamp`
+        is the real time a message was written, unlike a search hit's `date`,
+        which is its session's start.
+
         Two ways to read: a window (`offset` + `limit`), or a message-id range
         (`startMessageId` + `endMessageId`, straight off a digest's chunk
         manifest). A range read ignores `offset`.
@@ -898,39 +1058,72 @@ paths:
           content:
             application/json:
               schema:
-                allOf:
-                  - $ref: '#/components/schemas/LogsPage'
-                  - type: object
-                    properties:
-                      machine:
-                        type: string
-                      isThisMachine:
-                        type: boolean
-                      activity:
-                        oneOf:
-                          - type: 'null'
-                          - $ref: '#/components/schemas/MachineActivity'
-                      sessions:
-                        type: array
-                        description: That machine's most recently synced sessions.
-                        items:
-                          $ref: '#/components/schemas/MachineSession'
+                $ref: '#/components/schemas/MachineLogsPage'
         '404':
           description: Nothing recorded for that machine.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    const: error
-                  error:
-                    type: string
-                  knownMachines:
-                    type: array
-                    items:
-                      type: string
+                $ref: '#/components/schemas/UnknownMachineError'
+
+  /logs:
+    get:
+      tags: [Monitoring]
+      operationId: getLogsShort
+      summary: Logs from every mindmeld process (alias)
+      description: |
+        A real, permanent path — the same handler as `/api/logs`, registered
+        under both prefixes because `/logs` is shorter to type on a phone.
+        Identical parameters and response; see `/api/logs`.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 100, minimum: 1, maximum: 500 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0, minimum: 0 } }
+        - { name: level, in: query, schema: { type: string, enum: [log, warn, error] } }
+        - { name: machine, in: query, schema: { type: string } }
+        - { name: service, in: query, schema: { type: string } }
+        - { name: contains, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: One page of log entries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LogsPage'
+        '400':
+          description: Bad paging or an unknown level.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /logs/{machine}:
+    get:
+      tags: [Monitoring]
+      operationId: getMachineLogsShort
+      summary: One machine's logs and indexing (alias)
+      description: |
+        A real, permanent path — the same handler as `/api/logs/{machine}`.
+        Identical parameters and response.
+      parameters:
+        - { name: machine, in: path, required: true, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 100, maximum: 500 } }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+        - { name: level, in: query, schema: { type: string, enum: [log, warn, error] } }
+        - { name: service, in: query, schema: { type: string } }
+        - { name: contains, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Logs, activity, and recent sessions for that machine.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineLogsPage'
+        '404':
+          description: Nothing recorded for that machine.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnknownMachineError'
 
   /api/quarantine:
     get:
@@ -1268,6 +1461,307 @@ paths:
                     const: ok
                   run:
                     $ref: '#/components/schemas/SyncRun'
+
+  /api/system:
+    get:
+      tags: [Monitoring]
+      operationId: getSystemStatus
+      summary: Why nothing is moving — live probes of Ollama, its GPU gate, Chroma, and CPU
+      description: |
+        "Nothing is happening" has several causes that look identical from a
+        pending count, so this probes each one. **This is the endpoint to read
+        when embeddings appear stuck**, before concluding Mindmeld is broken.
+
+        Every field is a live probe with its own 4-second timeout, run
+        concurrently, and each degrades to `reachable: false` with the reason
+        attached — so this answers even when all three dependencies are down.
+
+        * **`ollama.gate`** — `OLLAMA_URL` does not point at Ollama itself but
+          at a small GPU-gating proxy that holds Mindmeld's work back while a
+          game or another tenant has the card. Its `/_gate` endpoint separates
+          "holding your work deliberately" from "broken", which are otherwise
+          indistinguishable. A plain Ollama simply 404s that path, reported as
+          `present: false` — not an error, just no gate.
+        * **`ollama.models`** — what is resident in VRAM, with `ours` marking
+          the models this deployment configured. A chat model nobody here uses
+          sitting in VRAM means another tenant is holding the card.
+        * **`chroma`** — reachability measured by actually counting every
+          configured collection, since a Chroma that answers a heartbeat but
+          has lost its collections is broken in a way a heartbeat calls healthy.
+        * **`cpu`** — `os.loadavg()`, which is the Docker VM's load, not the
+          host's. It is `[0,0,0]` on Windows, hence `loadAvailable`: "idle" and
+          "not measured" must not render as the same empty bar.
+
+        GPU load is `otherUtilPct` — utilization percent summed across every
+        engine of every non-Ollama process, so **a value above 100 is real and
+        not a bug**. It is not VRAM. No Mindmeld container has GPU access, so
+        nothing inside one can run `nvidia-smi`; this figure comes from the
+        proxy reading Windows GPU Engine counters.
+      responses:
+        '200':
+          description: Live dependency status.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    required: [status]
+                    properties:
+                      status:
+                        type: string
+                        const: ok
+                  - $ref: '#/components/schemas/SystemStatus'
+        '500':
+          description: The probe layer itself failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /api/summaries:
+    get:
+      tags: [Monitoring]
+      operationId: getSummaryStatus
+      summary: The slow phase — what is being summarized right now
+      description: |
+        Session summarization on its own terms. Message embedding is fast
+        enough that a rate describes it well; summarization is not — a chunk
+        pass takes 18–110 seconds and a long session is roughly 8 chunks, so
+        one session is 5–10 minutes of a single shared GPU. At that speed a
+        per-minute average rounds to noise, while the questions that matter are
+        *is a session being worked right now, which one, and how far back does
+        the queue reach*.
+
+        `oldestPendingStartedAt` answers "how far behind" in a unit that means
+        something — a date, not a count.
+
+        **`active[].workers` above 1 is a real problem, not a display quirk.**
+        The embedding queue is global and nothing claims a row, so several
+        workers genuinely summarize the same session at once and throw away
+        each other's output. This endpoint is where that becomes visible;
+        `active` is read from the log stream over the last 10 minutes.
+      responses:
+        '200':
+          description: Summarization queue and current activity.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    required: [status]
+                    properties:
+                      status:
+                        type: string
+                        const: ok
+                  - $ref: '#/components/schemas/SummaryStatus'
+        '500':
+          description: Query failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /api/embedding-series:
+    get:
+      tags: [Monitoring]
+      operationId: getEmbeddingSeries
+      summary: The pipeline over time, bucketed
+      description: |
+        What `/api/throughput` averages into a single rate, kept as a series.
+        That average cannot distinguish a queue draining steadily from one that
+        did all its work in a five-minute burst two hours ago and has been idle
+        since — and those call for opposite reactions.
+
+        Three series, because the pipeline has three flows worth telling apart:
+        `arrived` (messages synced in — cheap and bursty), `embedded` (messages
+        vectorised — the fast phase), and `summarized` (sessions given an LLM
+        summary — the slow phase, single digits per minute at best, which is
+        why the UI plots it on its own scale).
+
+        Buckets are contiguous and gap-filled: an hour where nothing happened
+        is a zero, never a missing point, because a line chart that silently
+        closes gaps draws idle time as a slope.
+
+        Counts come from `embeddings.created_at`, which only moves on a row's
+        first write — a re-embed is an upsert and bumps nothing — so a pass
+        made entirely of re-embeds under-reports rather than over-reports.
+      parameters:
+        - name: minutes
+          in: query
+          description: |
+            Span to cover. Clamped to 10..1440. The bucket size is derived from
+            it to keep roughly 60 points, so the graph stays readable at both
+            one hour and one day without the caller choosing.
+          schema:
+            type: integer
+            default: 360
+            minimum: 10
+            maximum: 1440
+      responses:
+        '200':
+          description: Bucketed series, oldest bucket first.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    required: [status]
+                    properties:
+                      status:
+                        type: string
+                        const: ok
+                  - $ref: '#/components/schemas/EmbeddingSeries'
+        '500':
+          description: Query failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /api/stand-down:
+    get:
+      tags: [Monitoring]
+      operationId: getStandDown
+      summary: Is ingestion currently standing down?
+      description: |
+        Safe to poll. Prefer counting `secondsRemaining` down locally rather
+        than re-deriving it from `until` against a client clock that may not
+        agree with the server's — the workers, the UI, and Postgres run in
+        different containers and their clocks are only approximately friends.
+
+        `standingDown` is false whenever the deadline has passed; every
+        consumer should read that flag rather than comparing timestamps itself.
+      responses:
+        '200':
+          description: Current stand-down state.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    required: [status]
+                    properties:
+                      status:
+                        type: string
+                        const: ok
+                  - $ref: '#/components/schemas/StandDownState'
+        '500':
+          description: Query failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+    post:
+      tags: [Monitoring]
+      operationId: standDown
+      summary: Ask ingestion to stand down and give the GPU back
+      description: |
+        "Stop what you are doing and pick it up next cycle." Embedding and
+        summarization hold an Ollama slot for minutes at a time; this is how to
+        get the card back for a game or a render without stopping containers.
+
+        Three properties of the design are deliberate:
+
+        * **It is a deadline, not a pause flag.** A worker stands down only
+          while `stand_down_until` is in the future, so the worst case of a
+          forgotten press — or of a worker killed mid-pass — is one skipped
+          cycle. It cannot freeze the index. That is also why `minutes` is
+          capped at 240: someone who wants the index down for a day should stop
+          the container, which is visible, rather than leave a button holding
+          it down invisibly.
+        * **It gates the embedding phase, not the file sync.** Reading
+          transcripts into Postgres never touches the GPU, so conversations
+          keep being indexed while standing down; only their vectors wait.
+        * **Standing down is not an error.** A sync run that yields records it
+          separately from its error list, so monitoring does not read an
+          intentional yield as a failed sync.
+
+        The switch is a row in `sync_control`, not process state: the queue
+        runs in the sync workers while the UI runs in `mcp`, and Postgres is
+        the only thing they both hold. Workers check it at batch boundaries and
+        between sessions, so a press takes effect at the next checkpoint rather
+        than instantly — the meaningful one is per-session, since a session is
+        5–10 minutes of GPU.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                minutes:
+                  type: number
+                  description: |
+                    How long to stand down. Clamped to 1..240 and rounded; a
+                    missing or unparseable value falls back to the default
+                    rather than erroring.
+                  default: 15
+                  minimum: 1
+                  maximum: 240
+                reason:
+                  type: string
+                  nullable: true
+                  description: |
+                    Free text shown on the dashboard, so a stand-down can say
+                    who asked and why. Defaults to null.
+            examples:
+              gaming:
+                summary: Reclaim the GPU for 45 minutes
+                value:
+                  minutes: 45
+                  reason: rendering a comfy workflow
+      responses:
+        '200':
+          description: The resulting state, with the new deadline.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    required: [status]
+                    properties:
+                      status:
+                        type: string
+                        const: ok
+                  - $ref: '#/components/schemas/StandDownState'
+        '500':
+          description: The update failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
+
+  /api/stand-down/resume:
+    post:
+      tags: [Monitoring]
+      operationId: resumeSync
+      summary: Clear the stand-down early
+      description: |
+        "I finished playing, get back to work" — clearing the deadline rather
+        than waiting it out, which would otherwise cost the rest of the window.
+        Takes no body. Idempotent: resuming when nothing is standing down is
+        not an error and returns the same cleared state.
+      responses:
+        '200':
+          description: Cleared. `standingDown` is false and `secondsRemaining` is 0.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    required: [status]
+                    properties:
+                      status:
+                        type: string
+                        const: ok
+                  - $ref: '#/components/schemas/StandDownState'
+        '500':
+          description: The update failed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorStatus'
 
   /mcp:
     post:
@@ -1616,10 +2110,19 @@ components:
             payload naming an unknown `source` without a `dataClass` is
             rejected with `400`, and the error lists the classes currently in
             use. A new source's class decides who sees its data, so it must be
-            an explicit choice, never a default. An existing source's class is
-            never changed through ingest: this endpoint is unauthenticated,
-            and reclassification would silently move data across the class
-            boundary — the response reports the stored class either way.
+            an explicit choice, never a default.
+
+            Normalized on the way in — trimmed and lowercased — because a
+            source stamped `"Coding "` would be unreachable from search.
+
+            **An existing source's class is never changed through ingest, and
+            neither is an existing session's.** That is a security property,
+            not an oversight: this endpoint is unauthenticated, so a later
+            ingest must not be able to relabel `android` data as `coding` and
+            walk it across the class boundary into a coding agent's default
+            results. The response reports the stored class either way, so
+            compare `dataClass` in the result against what you sent if it
+            matters.
           examples: [meetings]
         machine:
           type: string
@@ -1687,7 +2190,12 @@ components:
           examples: ['user', 'assistant', 'system', 'tool']
         content:
           type: string
-          description: Full message text. Never pre-truncate — the index stores it whole.
+          description: |
+            Full message text. Never pre-truncate — the index stores it whole.
+
+            Note the asymmetry: the field is `content` when writing and `text`
+            when reading it back from `/api/messages/{id}` or
+            `/api/sessions/{id}/messages`.
         timestamp:
           type: string
           format: date-time
@@ -1889,6 +2397,13 @@ components:
             otherwise its source's class (`coding`, `personal`, `meetings`, …).
           examples: [coding, personal, meetings]
         date:
+          description: |
+            **The session's start time — not the timestamp of the matched
+            message.** A session opened weeks ago reports that date for a
+            message written minutes ago, so clients must not sort or filter on
+            this field: doing so hides the most recent matches. To date the
+            matched content, follow `cursor` into
+            `/api/sessions/{id}/messages` and read `messages[].timestamp`.
           oneOf:
             - type: 'null'
             - type: string
@@ -2367,4 +2882,352 @@ components:
             - type: 'null'
             - type: string
               format: date-time
+
+    MachineLogsPage:
+      description: A `LogsPage` narrowed to one machine, plus what that machine has indexed.
+      allOf:
+        - $ref: '#/components/schemas/LogsPage'
+        - type: object
+          required: [machine, isThisMachine, activity, sessions]
+          properties:
+            machine:
+              type: string
+            isThisMachine:
+              type: boolean
+              description: True when the machine asked about is the one serving the request.
+            activity:
+              description: Null when the machine ships logs but has never indexed anything.
+              oneOf:
+                - type: 'null'
+                - $ref: '#/components/schemas/MachineActivity'
+            sessions:
+              type: array
+              description: That machine's most recently synced sessions. Empty when it has no indexing activity.
+              items:
+                $ref: '#/components/schemas/MachineSession'
+
+    UnknownMachineError:
+      type: object
+      required: [status, error, knownMachines]
+      properties:
+        status:
+          type: string
+          const: error
+        error:
+          type: string
+        knownMachines:
+          type: array
+          description: |
+            Every machine that has indexed projects or shipped logs — the valid
+            values, returned so a typo is self-correcting.
+          items:
+            type: string
+
+    GateStatus:
+      type: object
+      description: |
+        The GPU-gating proxy in front of Ollama. `OLLAMA_URL` points at this
+        proxy, not at Ollama — an indirection that is invisible from inside
+        this repo and whose absence presents as ECONNREFUSED on every embed,
+        which reads like a Docker fault and is not one.
+      required:
+        [present, open, gpuInUseNow, quietSeconds, requiredQuietSeconds, holdReason, otherUtilPct, busyThresholdPct, status]
+      properties:
+        present:
+          type: boolean
+          description: |
+            False when nothing answered `/_gate` — either a plain Ollama (which
+            404s the path) or an unreachable proxy. Not an error: running
+            against real Ollama is a valid, if less polite, configuration. Every
+            other field is null when this is false.
+        open:
+          description: True when the gate is currently passing work through.
+          oneOf: [{ type: 'null' }, { type: boolean }]
+        gpuInUseNow:
+          description: Whether a non-Ollama process is using the card right now.
+          oneOf: [{ type: 'null' }, { type: boolean }]
+        quietSeconds:
+          description: How long the GPU has been quiet. The gate opens once this reaches `requiredQuietSeconds`.
+          oneOf: [{ type: 'null' }, { type: number }]
+        requiredQuietSeconds:
+          description: |
+            The continuous-quiet threshold. Because it must be *continuous*, a
+            brief burst of desktop GPU activity resets the counter — which is a
+            common reason work sits held for far longer than expected.
+          oneOf: [{ type: 'null' }, { type: number }]
+        holdReason:
+          oneOf: [{ type: 'null' }, { type: string }]
+        otherUtilPct:
+          description: |
+            GPU **utilization percent** by processes that are not Ollama, summed
+            across every engine (3D, Copy, VideoDecode, …) of every such
+            process — so it can legitimately exceed 100. This is not VRAM. It is
+            the only real GPU-load signal available here, since no Mindmeld
+            container has GPU access and nothing inside one can run `nvidia-smi`.
+          oneOf: [{ type: 'null' }, { type: number }]
+        busyThresholdPct:
+          description: The utilization above which the gate counts the card as busy.
+          oneOf: [{ type: 'null' }, { type: number }]
+        status:
+          description: |
+            The proxy's own full sentence explaining the current state, passed
+            through whole — it is already written for a human, and cutting it
+            would remove the half that says what to do.
+          oneOf: [{ type: 'null' }, { type: string }]
+
+    ResidentModel:
+      type: object
+      required: [name, sizeVramBytes, contextLength, expiresAt, ours]
+      properties:
+        name:
+          type: string
+          examples: ['qwen3:4b-instruct']
+        sizeVramBytes:
+          type: integer
+        contextLength:
+          oneOf: [{ type: 'null' }, { type: integer }]
+        expiresAt:
+          description: When Ollama will evict it from VRAM.
+          oneOf: [{ type: 'null' }, { type: string, format: date-time }]
+        ours:
+          type: boolean
+          description: |
+            Whether this is one of the models Mindmeld itself is configured to
+            use, compared on the bare name so `bge-m3` matches `bge-m3:latest`.
+            A resident model with `ours: false` means another tenant is holding
+            the card — the difference between "we are slow" and "we are queued
+            behind someone else".
+
+    SystemStatus:
+      type: object
+      required: [ollama, chroma, cpu]
+      properties:
+        ollama:
+          type: object
+          required: [url, reachable, version, error, gate, models, vramBytesTotal, configured]
+          properties:
+            url:
+              type: string
+              description: The configured `OLLAMA_URL` — an internal container address, shown so "are we pointed at the gating proxy?" is answerable from the screen.
+            reachable:
+              type: boolean
+            version:
+              oneOf: [{ type: 'null' }, { type: string }]
+            error:
+              description: Why the probe failed, or null.
+              oneOf: [{ type: 'null' }, { type: string }]
+            gate:
+              $ref: '#/components/schemas/GateStatus'
+            models:
+              type: array
+              description: Models currently resident in VRAM. Probed even when Ollama is unreachable, since a shut gate is the likeliest reason it answered nothing.
+              items:
+                $ref: '#/components/schemas/ResidentModel'
+            vramBytesTotal:
+              type: integer
+              description: Sum of `sizeVramBytes` across resident models.
+            configured:
+              type: object
+              description: The models this deployment uses, whether or not they are resident.
+              required: [embedding, summarize]
+              properties:
+                embedding:
+                  type: string
+                summarize:
+                  type: string
+        chroma:
+          type: object
+          required: [url, reachable, error, latencyMs, collections]
+          properties:
+            url:
+              type: string
+            reachable:
+              type: boolean
+              description: Measured by actually counting every configured collection, not by a heartbeat.
+            error:
+              oneOf: [{ type: 'null' }, { type: string }]
+            latencyMs:
+              oneOf: [{ type: 'null' }, { type: integer }]
+            collections:
+              type: array
+              items:
+                $ref: '#/components/schemas/ChromaCollection'
+        cpu:
+          type: object
+          required: [cores, loadAvailable, load1, load5, load15, loadPerCore, platform, uptimeSeconds, memory]
+          properties:
+            cores:
+              type: integer
+            loadAvailable:
+              type: boolean
+              description: |
+                False on Windows, where `os.loadavg()` is hardcoded to
+                `[0,0,0]`. Served as a flag rather than as a zero because
+                "idle" and "this platform does not measure it" are different
+                answers and only one of them should be drawn as an empty bar.
+            load1:
+              type: number
+              description: |
+                Unix 1-minute load average. Under Docker Desktop this is the
+                Linux VM's load, not the Windows host's — it reflects what the
+                containers are doing, which is the question being asked, but it
+                is not whole-machine CPU.
+            load5:
+              type: number
+            load15:
+              type: number
+            loadPerCore:
+              type: number
+              description: '`load1` divided by `cores` — the only form that means the same thing on a 4-core and a 32-core box.'
+            platform:
+              type: string
+              examples: ['Linux 6.6.0']
+            uptimeSeconds:
+              type: integer
+            memory:
+              type: object
+              required: [totalBytes, freeBytes]
+              properties:
+                totalBytes:
+                  type: integer
+                freeBytes:
+                  type: integer
+
+    SummaryStatus:
+      type: object
+      required: [model, sessions, oldestPendingStartedAt, recent, active]
+      properties:
+        model:
+          type: string
+          description: The summarization model this deployment is configured to use.
+        sessions:
+          type: object
+          required: [total, summarized, pending]
+          properties:
+            total:
+              type: integer
+              description: Non-deleted sessions.
+            summarized:
+              type: integer
+            pending:
+              type: integer
+              description: |
+                Same predicate as `/api/status`'s `pendingEmbeddings.sessions`
+                and `/api/throughput`'s `summariesPending` — imported, not
+                restated. Excludes sessions that ended in the last 30 minutes:
+                re-summarizing a live conversation as it grows is waste, so
+                that is deferred work, not queued work.
+        oldestPendingStartedAt:
+          description: Start of the oldest session still owed a summary — how far behind the slow phase is, as a date rather than a count. Null when caught up.
+          oneOf: [{ type: 'null' }, { type: string, format: date-time }]
+        recent:
+          type: array
+          description: The five sessions whose summaries landed most recently.
+          items:
+            type: object
+            required: [id, title, at]
+            properties:
+              id:
+                type: integer
+              title:
+                oneOf: [{ type: 'null' }, { type: string }]
+              at:
+                type: string
+                format: date-time
+        active:
+          type: array
+          description: |
+            Sessions being summarized right now, read from the log stream over
+            the last 10 minutes — the summarizer emits a line per chunk, so a
+            session appearing here is one actively holding the GPU. At most 10,
+            most recent first.
+          items:
+            type: object
+            required: [sessionId, chunkPasses, workers, lastAt]
+            properties:
+              sessionId:
+                type: integer
+              chunkPasses:
+                type: integer
+                description: Chunk summarization passes logged for this session in the window.
+              workers:
+                type: integer
+                description: |
+                  Distinct machine/service pairs working this one session.
+                  **Greater than 1 is duplicated work, not a display quirk**:
+                  the embedding queue is global and nothing claims a row, so
+                  several workers summarize the same session at once and throw
+                  away each other's output.
+              lastAt:
+                type: string
+                format: date-time
+
+    EmbeddingSeries:
+      type: object
+      required: [windowMinutes, bucketMinutes, buckets, totals, peak]
+      properties:
+        windowMinutes:
+          type: integer
+          description: The clamped window actually used.
+        bucketMinutes:
+          type: integer
+          description: Derived from the window to keep roughly 60 buckets.
+        buckets:
+          type: array
+          description: Contiguous and gap-filled, oldest first — an idle bucket is a zero, never a missing point.
+          items:
+            type: object
+            required: [at, arrived, embedded, summarized]
+            properties:
+              at:
+                type: string
+                format: date-time
+                description: Bucket start.
+              arrived:
+                type: integer
+                description: Messages synced in.
+              embedded:
+                type: integer
+                description: Messages vectorised — the fast phase.
+              summarized:
+                type: integer
+                description: Sessions given an LLM summary — the slow phase, and orders of magnitude smaller.
+        totals:
+          $ref: '#/components/schemas/SeriesCounts'
+        peak:
+          $ref: '#/components/schemas/SeriesCounts'
+
+    SeriesCounts:
+      type: object
+      required: [arrived, embedded, summarized]
+      properties:
+        arrived:
+          type: integer
+        embedded:
+          type: integer
+        summarized:
+          type: integer
+
+    StandDownState:
+      type: object
+      required: [standingDown, until, since, reason, secondsRemaining]
+      properties:
+        standingDown:
+          type: boolean
+          description: |
+            True only while the deadline is still ahead. Read this rather than
+            comparing `until` against a local clock.
+        until:
+          description: When ingestion resumes. Null when not standing down.
+          oneOf: [{ type: 'null' }, { type: string, format: date-time }]
+        since:
+          description: When the stand-down was requested.
+          oneOf: [{ type: 'null' }, { type: string, format: date-time }]
+        reason:
+          description: Free text supplied by whoever asked, shown on the dashboard.
+          oneOf: [{ type: 'null' }, { type: string }]
+        secondsRemaining:
+          type: integer
+          minimum: 0
+          description: Floor of 0. Count this down locally rather than re-deriving it from `until`.
 

@@ -16,6 +16,31 @@ import {
 } from './session.js'
 import { getHealth, formatHealth } from './health.js'
 import { resolveTitle } from './title.js'
+import { saveNote, formatSavedNote } from './notes.js'
+import { applyTags, removeTags, getTags, formatTagWrite, defaultExcludedTags, type TagTarget } from './tags.js'
+import { USELESS_VECTOR } from '../services/quality-vectors.js'
+
+// addTag/removeTag both take an optional sessionId and an optional messageId
+// and require exactly one. Which granularity to use is the tagging agent's
+// call -- a whole conversation and a single message are both legitimate things
+// to judge -- so the tool refuses to choose for them, and refuses to guess when
+// they name both.
+const resolveTagTarget = (params: { sessionId?: number; messageId?: number }): TagTarget => {
+  const { sessionId, messageId } = params
+  if (sessionId != null && messageId != null)
+    throw new Error('Pass either sessionId or messageId, not both — a tag targets one thing.')
+  if (sessionId != null) return { sessionId }
+  if (messageId != null) return { messageId }
+  throw new Error('Pass sessionId (tag a whole conversation) or messageId (tag one message).')
+}
+
+// The tool surface accepts `tag` (one) or `tags` (several) and treats them as
+// one list, so a caller never has to wrap a single tag in an array and a
+// caller with five does not need five calls.
+const collectTags = (params: { tag?: string; tags?: string[] }): string[] => [
+  ...(params.tag ? [params.tag] : []),
+  ...(params.tags ?? []),
+]
 
 // THE tool surface. Both transports — stdio (server.ts) and Streamable HTTP
 // (http-server.ts) — register from here and declare nothing of their own.
@@ -68,7 +93,14 @@ WEIGHTED CENTROID SEARCH:
 - likeProject: Boost results matching specific project(s) topics
 - unlikeProject: Suppress results matching these project(s)
 
-Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressive)`,
+Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressive)
+
+TAGS:
+- tags: only results carrying any of these (see addTag). Matches a tag on the
+  session OR on any of its messages.
+- excludeTags: hide results carrying any of these.
+- Some tags are hidden by default (currently "useless"). Naming one in "tags"
+  overrides that, so hidden results stay reachable on purpose.`,
     {
       query: z.string().optional().describe('Search query - natural language works best for semantic search (optional when using centroid params)'),
       negativeQuery: z.string().optional().describe('Negative query - pushes results away from this concept'),
@@ -86,6 +118,8 @@ Weight scale: 0.3-0.5 (gentle), 1.0 (default), 1.2-1.5 (strong), 2.0+ (aggressiv
       includeAutomated: z.boolean().optional().describe('Include automated, non-interactive sessions (Slack monitoring, curiosity curation, MCP health checks, huddle transcripts). Excluded by default.'),
       includeUnsummarized: z.boolean().optional().describe('Include sessions that have not been summarized yet. Excluded by default: an unsummarized session has no title and no session-level vector, so it can only arrive as an untriageable result. Pass true to reach the indexing backlog deliberately.'),
       dataClass: z.array(z.string()).optional().describe('Data classes to search (default ["coding"]). Sources are classified as coding, personal, meetings, etc. Pass ["*"] to search everything, or e.g. ["coding","personal"] to widen. An explicit source param bypasses this default.'),
+      tags: z.array(z.string()).optional().describe('Only return results carrying ANY of these tags (OR, not AND). Matches a tag on the session OR on any of its messages, so you do not have to know which granularity the tagging agent chose. Tags are free-form and case-insensitive; an unused tag is not an error, it simply matches nothing. Naming a tag here also overrides its default exclusion — tags:["useless"] is how you deliberately reach hidden sessions.'),
+      excludeTags: z.array(z.string()).optional().describe('Hide results carrying ANY of these tags, in addition to the default-excluded set. A tag on the session hides the whole session; a tag on a single message only hides that message\'s own hit.'),
     },
     async (params) => {
       const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
@@ -301,26 +335,147 @@ Use this to confirm the pipeline is actually keeping up, not just degrading quie
 
   server.tool(
     'reportUselessSession',
-    `Soft-delete a session that pollutes search results.
+    `Hide a session that pollutes search results, and teach search what noise looks like.
 
 Use this when search returns results that are clearly noise — automated runs,
 monitoring jobs, repeated boilerplate sessions, or anything that isn't a real
-interactive conversation. Soft-deletes the session so it stops appearing in search.
+interactive conversation.
+
+Two things happen. The session stops appearing in search (the 'useless' tag is
+excluded by default). And it joins the set that search learns a "useless"
+direction from, so sessions RESEMBLING it are demoted too, including ones nobody
+ever labelled. That second effect is why reporting is worth doing even for a
+session you will never see again.
+
+Reversible with removeTag — unlike the soft-delete this replaced, which had no
+undo anywhere in the codebase.
 
 Call this proactively whenever you get useless results back from search.`,
     {
-      sessionId: z.number().describe('Session ID to soft-delete'),
-      reason: z.string().optional().describe('Why this session is useless (for logging)'),
+      sessionId: z.number().describe('Session ID to mark useless'),
+      reason: z.string().optional().describe('Why this session is useless; stored on the tag'),
     },
     async ({ sessionId, reason }) => {
-      const result = await query(
-        `UPDATE sessions SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING id`,
-        [sessionId]
-      )
-      if (result.rowCount === 0)
-        return { content: [{ type: 'text', text: `Session ${sessionId} not found or already deleted.` }] }
-      if (reason) console.error(`Session ${sessionId} reported as useless: ${reason}`)
-      return { content: [{ type: 'text', text: `Session ${sessionId} soft-deleted.` }] }
+      // Writes the tag, NOT sessions.deleted_at. The old soft-delete was a
+      // one-way tombstone that nothing could clear, and — being a column rather
+      // than a labelled example — it could never feed the ranking direction in
+      // src/services/quality-vectors.ts. `reason` is persisted for the same
+      // reason: it used to go to stderr and vanish.
+      try {
+        await applyTags({ sessionId }, [USELESS_VECTOR], { createdBy: 'mcp', note: reason })
+      } catch {
+        return { content: [{ type: 'text', text: `Session ${sessionId} not found.` }] }
+      }
+      return {
+        content: [
+          {
+            type: 'text',
+            text:
+              `Session ${sessionId} tagged "${USELESS_VECTOR}" — hidden from search, and now part of what search steers away from. ` +
+              `Run \`pnpm run compute:centroids\` for it to affect ranking. Undo with removeTag.`,
+          },
+        ],
+      }
+    }
+  )
+
+  server.tool(
+    'addTag',
+    `Tag a session or a single message. Tags are how you record a judgement about
+something in the index so that later searches can act on it.
+
+THE VOCABULARY IS OPEN. Invent whatever tag is useful — there is no list of
+allowed tags, no registration step, and tagging with a word nobody has used
+before is not an error. Tags are trimmed and lowercased, so "Useless" and
+"useless" are the same tag.
+
+TARGET (pass exactly one):
+- sessionId — judges the whole conversation
+- messageId — judges one message, leaving the rest of the session alone
+Either is fine; pick whichever matches what you actually mean.
+
+FINDING THEM AGAIN: search({ tags: ["your-tag"] }) matches a tag on the session
+OR on any of its messages, so a message-level tag is still findable without the
+searcher knowing which granularity you chose.
+
+HIDDEN TAGS: some tags hide their session from search by default — currently
+${defaultExcludedTags().join(', ') || '(none)'}. Tag a session "useless" when
+search returns it as noise (automated runs, monitoring jobs, boilerplate) and it
+stops polluting results. This is reversible: removeTag puts it back, and
+search({ tags: ["useless"] }) still reaches it deliberately.
+
+Idempotent — re-tagging something changes nothing and is not an error.`,
+    {
+      sessionId: z.number().optional().describe('Session to tag (mutually exclusive with messageId)'),
+      messageId: z.number().optional().describe('Message to tag (mutually exclusive with sessionId)'),
+      tag: z.string().optional().describe('A tag to apply. Free-form — any word or phrase.'),
+      tags: z.array(z.string()).optional().describe('Several tags to apply at once. Combined with `tag` if both are given.'),
+      note: z.string().optional().describe('Optional free-text reason, stored with the tag as provenance.'),
+    },
+    async (params) => {
+      const target = resolveTagTarget(params)
+      const requested = collectTags(params)
+      if (requested.length === 0)
+        return { content: [{ type: 'text', text: 'No tag given. Pass tag: "something" or tags: ["a","b"].' }], isError: true }
+      const applied = await applyTags(target, requested, { createdBy: 'mcp', note: params.note })
+      const current = await getTags(target)
+      return { content: [{ type: 'text', text: formatTagWrite('Tagged', target, applied, current) }] }
+    }
+  )
+
+  server.tool(
+    'removeTag',
+    `Remove tags from a session or a message — the inverse of addTag, and the
+reason tagging is safe to do freely: nothing about it is permanent.
+
+Removing "useless" from a session returns it to normal search results.
+
+Pass exactly one of sessionId / messageId. Removing a tag that was not there is
+reported, not an error.`,
+    {
+      sessionId: z.number().optional().describe('Session to untag (mutually exclusive with messageId)'),
+      messageId: z.number().optional().describe('Message to untag (mutually exclusive with sessionId)'),
+      tag: z.string().optional().describe('A tag to remove.'),
+      tags: z.array(z.string()).optional().describe('Several tags to remove at once. Combined with `tag` if both are given.'),
+    },
+    async (params) => {
+      const target = resolveTagTarget(params)
+      const requested = collectTags(params)
+      if (requested.length === 0)
+        return { content: [{ type: 'text', text: 'No tag given. Pass tag: "something" or tags: ["a","b"].' }], isError: true }
+      const removed = await removeTags(target, requested)
+      const current = await getTags(target)
+      return { content: [{ type: 'text', text: formatTagWrite('Untagged', target, removed, current) }] }
+    }
+  )
+
+  server.tool(
+    'saveNote',
+    `Explicitly save a short freeform note into mindmeld's store - for capturing
+something worth keeping right now (a decision, a reminder, a fact) rather than
+waiting for a full conversation to sync and get indexed later.
+
+This is the tool to reach for from a client with no transcript-sync pipeline
+of its own (e.g. Claude web/mobile via claude.ai) - without it, nothing typed
+there ever reaches the index, unlike Claude Code sessions which sync
+automatically.
+
+Stored as its own one-message session under a dedicated source classified
+dataClass "notes" - the same convention already used by other non-coding
+sources (Vikunja, agent-ops). The session summary is set to the note text
+immediately, so it is searchable by full text and by session-tier match right
+away, with no wait on the async summarizer.
+
+IMPORTANT: search() defaults to dataClass ["coding"]. A saved note will NOT
+show up in a default search - pass dataClass: ["notes"] (or ["*"]) to reach it.
+Use search/getSession/getMessages to find and read notes back later.`,
+    {
+      text: z.string().min(1).describe('The note content to save'),
+      title: z.string().optional().describe('Optional short title. Derived from the note text when omitted.'),
+    },
+    async ({ text, title }) => {
+      const note = await saveNote({ text, title })
+      return { content: [{ type: 'text', text: formatSavedNote(note) }] }
     }
   )
 

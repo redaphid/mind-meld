@@ -41,6 +41,7 @@
     "strip:scaffolding": "tsx scripts/strip-scaffolding.ts",
     "icons": "node scripts/make-icons.mjs",
     "search": "tsx scripts/search.ts",
+    "search:tune": "tsx scripts/tune-search.ts",
     "stats": "tsx scripts/stats.ts",
     "db:migrate": "tsx scripts/migrate.ts",
     "db:reset": "docker compose down -v && docker compose up -d",
@@ -58,7 +59,8 @@
     "//quality:sw-shell": "Re-records quality/service-worker-shell.json. The CHECK runs in the normal test suite (src/quality/service-worker-freshness.test.ts); this is only the deliberate way to re-record after bumping VERSION in public/sw.js. Kept out of quality:update on purpose — see issue #113.",
     "quality:sw-shell": "tsx scripts/quality/sw-shell-digest.ts",
     "quality:update": "pnpm run test:coverage && tsx scripts/quality/knip-ratchet.ts --update && tsx scripts/quality/coverage-ratchet.ts --update",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "compute:quality": "tsx scripts/compute-quality-vectors.ts"
   },
   "dependencies": {
     "@chroma-core/ollama": "^0.1.8",
