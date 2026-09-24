@@ -59,3 +59,15 @@ export const mcpTool = async (name: string, args: Record<string, unknown>): Prom
   await client.close()
   return z.array(z.object({ text: z.string() })).parse(result.content).map((c) => c.text).join('\n')
 }
+
+// The MCP search tool's text, retried like search() above: a degraded search
+// drops its vector arms and would test the full-text fallback instead.
+export const mcpSearch = async (args: Record<string, unknown>, attempts = 6): Promise<string> => {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const text = await mcpTool('search', args)
+    if (!text.includes('full-text results only')) return text
+    console.log(`  MCP search degraded, attempt ${attempt}/${attempts}`)
+    await new Promise((resolve) => setTimeout(resolve, 10_000))
+  }
+  throw new Error(`MCP search stayed degraded after ${attempts} attempts: ${JSON.stringify(args)}`)
+}

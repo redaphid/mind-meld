@@ -788,6 +788,16 @@ const degradedNote = (degraded: SearchDegradation | null) =>
     ? `\n\nNOTE: full-text results only — semantic search was unavailable (${degraded.reason}). Meaning-based matches are missing, so absence here is not evidence a conversation does not exist. Retry shortly for a full search.`
     : ''
 
+// A report teaches the ranker what noise looks like, so a report on a real but
+// off-topic session demotes real work that resembles it. The note has to say
+// that as loudly as it asks for reports.
+const noiseNote = (results: SearchResult[]) => {
+  const suspects = results.filter((r) => r.noise_damping != null && r.noise_damping < config.noise.nudgeBelow)
+  if (suspects.length === 0) return ''
+  return `\n\nNOISE CHECK: sessions ${suspects.map((r) => r.session_id).join(', ')} resemble reported noise (damped below ×${config.noise.nudgeBelow}). If one IS noise (automated runs, monitoring/briefing output, boilerplate, notification stubs, tool-call spam), call reportUselessSession(sessionId, reason).
+NEVER report a session just because it is off-topic for this query: a report teaches search that sessions like it are noise and demotes real work that resembles it.`
+}
+
 export const formatSearchResults = (
   results: SearchResult[],
   projectIds: number[] = [],
@@ -811,14 +821,15 @@ export const formatSearchResults = (
       // Shown only when there are any, so an untagged corpus reads exactly as
       // it did before tags existed.
       const tags = r.tags?.length ? `\n   Tags: ${r.tags.join(', ')}` : ''
+      const noise = r.noise_damping != null && r.noise_damping < 1 ? `\n   Noise: ×${r.noise_damping.toFixed(3)}` : ''
       return `${i + 1}. **${heading}**${projectLabel}
    Session ID: ${r.session_id}
    Project: ${r.project_name} (${r.source}, ${r.data_class})
    Date: ${r.date.toISOString().split('T')[0]}
-   Score: ${r.score.toFixed(3)} | Matched: ${r.matched_tier}${cursor}${tags}
+   Score: ${r.score.toFixed(3)} | Matched: ${r.matched_tier}${cursor}${tags}${noise}
    ${r.snippet ?? '(no snippet)'}`
     })
     .join('\n\n')
 
-  return `Found ${results.length} relevant conversations:\n\n${output}${degradedNote(degraded)}`
+  return `Found ${results.length} relevant conversations:\n\n${output}${noiseNote(results)}${degradedNote(degraded)}`
 }

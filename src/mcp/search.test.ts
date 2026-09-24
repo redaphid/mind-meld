@@ -23,6 +23,7 @@ vi.mock('../embeddings/ollama.js', () => ({
 
 const { search, searchWithDiagnostics, resolveDataClasses, formatSearchResults, findProjectsByPath } =
   await import('./search.js')
+const { config } = await import('../config.js')
 
 type Row = Record<string, unknown>
 const rows = (...r: Row[]) => ({ rows: r })
@@ -501,6 +502,50 @@ describe('formatSearchResults', () => {
     expect(text).toContain('Cursor: chunk 3')
     expect(text).toContain('Cursor: message 900')
     expect(text).toContain('(no snippet)')
+  })
+
+  describe('noise', () => {
+    const below = config.noise.nudgeBelow - 0.05
+    const lightlyDamped = (config.noise.nudgeBelow + 1) / 2
+
+    it('shows the damping on each damped result', () => {
+      const text = formatSearchResults([result({ noise_damping: 0.8214 })])
+      expect(text).toContain('Noise: ×0.821')
+    })
+
+    it('shows no damping on clean or unscored results', () => {
+      const text = formatSearchResults([result({ noise_damping: 1 }), result({ session_id: 3, noise_damping: null })])
+      expect(text).not.toContain('Noise:')
+    })
+
+    it('asks for a noise check naming exactly the results below the threshold', () => {
+      const text = formatSearchResults([
+        result({ session_id: 11, noise_damping: below }),
+        result({ session_id: 12, noise_damping: lightlyDamped }),
+        result({ session_id: 13, noise_damping: below }),
+        result({ session_id: 14, noise_damping: null }),
+        result({ session_id: 15, noise_damping: config.noise.nudgeBelow }),
+      ])
+      const note = text.slice(text.indexOf('NOISE CHECK'))
+      expect(note).toMatch(/^NOISE CHECK: sessions 11, 13 resemble/)
+      expect(note).toContain('reportUselessSession(sessionId, reason)')
+      expect(note).toContain('NEVER report a session just because it is off-topic')
+    })
+
+    it('leaves the note out when nothing is damped below the threshold', () => {
+      const text = formatSearchResults([
+        result({ noise_damping: 1 }),
+        result({ session_id: 3, noise_damping: lightlyDamped }),
+        result({ session_id: 4, noise_damping: config.noise.nudgeBelow }),
+      ])
+      expect(text).toContain('Noise: ×')
+      expect(text).not.toContain('NOISE CHECK')
+    })
+
+    it('leaves the note out when no result could be scored', () => {
+      const text = formatSearchResults([result({ noise_damping: null }), result({ session_id: 3 })])
+      expect(text).not.toContain('NOISE CHECK')
+    })
   })
 })
 

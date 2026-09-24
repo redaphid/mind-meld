@@ -1,6 +1,6 @@
 import assert from 'node:assert'
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { startServer, stopServer, search, mcpTool, type Hit } from './harness.js'
+import { startServer, stopServer, search, mcpTool, mcpSearch, type Hit } from './harness.js'
 
 // What reporting a session is FOR, checked against the real index: flag a few
 // members of a recurring family and the unreported rest rank lower, while real
@@ -9,12 +9,16 @@ import { startServer, stopServer, search, mcpTool, type Hit } from './harness.js
 
 const { query, closePool } = await import('../src/db/postgres.js')
 const { resolveDataClasses } = await import('../src/mcp/search.js')
+const { config } = await import('../src/config.js')
 const dataClasses = resolveDataClasses({})
 assert(dataClasses, 'a default search is expected to filter by data class')
 
 // Agents report the junk they see in search, so the suite reports the family
 // members a baseline search surfaces and checks the rest of that neighbourhood.
 const REPORTED = 5
+// Five reports damp the family's look-alikes to about x0.92, short of the
+// search-text nudge; twenty put a dozen or more below it (measured).
+const REPORTED_FOR_NUDGE = 20
 const FIRST_WORDS = `array_to_string((regexp_split_to_array(m.content_text, '\\s+'))[1:5], ' ')`
 
 const eligible = `
@@ -54,8 +58,23 @@ const realQueries = async () => {
 
 const dampingById = (hits: Hit[]) => new Map(hits.map((h) => [h.sessionId, h.noiseDamping]))
 
+// What an agent reads: each result's session id and printed damping, and the
+// session ids the noise-check note asks it to judge.
+const readMcpText = (text: string) => {
+  const printed = new Map(
+    text.split(/\n\n(?=\d+\. \*\*)/).flatMap((block) => {
+      const id = block.match(/Session ID: (\d+)/)?.[1]
+      const damping = block.match(/Noise: ×([\d.]+)/)?.[1]
+      return id && damping ? [[Number(id), Number(damping)] as const] : []
+    })
+  )
+  const named = text.match(/NOISE CHECK: sessions ([\d, ]+) resemble/)?.[1].split(', ').map(Number) ?? []
+  return { printed, named }
+}
+
 let family: { prefix: string; ids: number[] }
 let reported: number[]
+let familyHits: number[]
 let baseline: Map<number, number | null>
 
 beforeAll(async () => {
@@ -63,7 +82,8 @@ beforeAll(async () => {
   family = await findFamily()
   const baselineHits = await search({ q: family.prefix, mode: 'semantic', limit: 50 })
   baseline = dampingById(baselineHits)
-  reported = baselineHits.map((h) => h.sessionId).filter((id) => family.ids.includes(id)).slice(0, REPORTED)
+  familyHits = baselineHits.map((h) => h.sessionId).filter((id) => family.ids.includes(id))
+  reported = familyHits.slice(0, REPORTED)
   console.log(`family "${family.prefix}": ${family.ids.length} sessions, reporting ${reported.join(', ')}`)
 })
 
@@ -105,6 +125,21 @@ describe('reporting part of a recurring family', () => {
     expect(damped.length).toBeGreaterThan(0)
   })
 
+  it('asks the agent reading MCP search to check the damped look-alikes', async () => {
+    for (const sessionId of familyHits.slice(REPORTED, REPORTED_FOR_NUDGE)) {
+      await mcpTool('reportUselessSession', { sessionId, reason: 'noise-steering e2e' })
+      reported.push(sessionId)
+    }
+
+    const { printed, named } = readMcpText(await mcpSearch({ query: family.prefix, mode: 'semantic', limit: 50 }))
+    const lookalikes = named.filter((id) => family.ids.includes(id) && !reported.includes(id))
+    console.log(`MCP note names ${named.length} sessions, ${lookalikes.length} of them unreported family members`)
+    expect(lookalikes.length).toBeGreaterThan(0)
+    expect(named.every((id) => (printed.get(id) ?? 1) < config.noise.nudgeBelow)).toBe(true)
+    const belowThreshold = [...printed].filter(([, damping]) => damping < config.noise.nudgeBelow).map(([id]) => id)
+    expect(named.toSorted()).toEqual(belowThreshold.toSorted())
+  })
+
   it('restores the family once the reports are undone', async () => {
     for (const sessionId of reported) await mcpTool('unreportUselessSession', { sessionId })
 
@@ -129,5 +164,12 @@ describe('real conversations', () => {
     // ones that look automated: templated agent iterations, bare command stubs.
     expect(untouched.length / hits.length).toBeGreaterThanOrEqual(0.7)
     expect(Math.min(...hits.map((h) => h.noiseDamping ?? 1))).toBeGreaterThanOrEqual(0.9)
+  })
+
+  it('draw no noise check in MCP search text', async () => {
+    const texts = await Promise.all((await realQueries()).map((q) => mcpSearch({ query: q, mode: 'semantic', limit: 10 })))
+    const flagged = texts.filter((t) => t.includes('NOISE CHECK'))
+    console.log(`${flagged.length}/${texts.length} real-topic MCP searches carried a noise check`)
+    expect(flagged).toEqual([])
   })
 })
