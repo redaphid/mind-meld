@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { classifyAutomated, isAutomated, classifyNoise, minContentChars } from './classify.js'
 
 // The parser strips scaffolding on the way in, but ~800 messages were stored
@@ -142,5 +142,48 @@ describe('classifyAutomated', () => {
     expect(isAutomated('You are a Slack monitoring assistant')).toBe(true)
     expect(isAutomated('Refactor the search arms')).toBe(false)
     expect(isAutomated(null)).toBe(false)
+  })
+})
+
+// Persona prompts that belong to one deployment are configured, not committed:
+// MINDMELD_AUTOMATED_PREFIXES, `|`-separated, each entry a literal prefix of
+// the first line.
+describe('classifyAutomated with configured prefixes', () => {
+  let configured: typeof classifyAutomated
+
+  beforeEach(async () => {
+    vi.stubEnv('MINDMELD_AUTOMATED_PREFIXES', 'You are a test persona, a | Nightly (report) for *.lair+ ')
+    vi.resetModules()
+    const { classifyAutomated: fresh } = await import('./classify.js')
+    configured = fresh
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.resetModules()
+  })
+
+  it('flags a first line that starts with a configured prefix', () => {
+    expect(configured('You are a test persona, a thunderwrench mascot on a desk badge.')).toBeTruthy()
+  })
+
+  it('keeps the comma inside a prefix, since entries are split on `|`', () => {
+    expect(configured('You are a test persona who answers questions')).toBeNull()
+  })
+
+  it('treats regex metacharacters in a prefix as literal text', () => {
+    expect(configured('Nightly (report) for *.lair+ at dawn')).toBeTruthy()
+  })
+
+  it('does not read a metacharacter as a pattern', () => {
+    expect(configured('Nightly report for the rusty conquistador')).toBeNull()
+  })
+
+  it('matches only at the start of the first line', () => {
+    expect(configured('Please reply as if: You are a test persona, a mascot')).toBeNull()
+  })
+
+  it('still flags the built-in patterns', () => {
+    expect(configured('You are a Slack monitoring assistant. Your job is to categorize.')).toBeTruthy()
   })
 })
