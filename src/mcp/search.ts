@@ -149,6 +149,11 @@ export type SearchResult = {
   // Session-level tags, attached after ranking so a caller can see what a
   // result has been judged as without a second call. Absent when untagged.
   tags?: string[]
+  // The factor the noise penalty multiplied this result's score by: 1 is
+  // untouched. Null when the result could not be scored at all -- the penalty
+  // was off, nothing has been reported, or the hit carried no vector -- which
+  // is a different answer from "scored and found clean".
+  noise_damping?: number | null
 }
 
 // A session can be hit by several arms; we keep the first (best-ranked) hit's
@@ -752,10 +757,9 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     // little like noise -- "in the project I am standing in" is evidence the
     // penalty has no business overruling -- while noise from elsewhere is
     // pushed down by the full factor.
-    const score =
-      fusedScore * noiseDamping(hit.vector, noiseClusters) +
-      (inProject.has(hit.result.session_id) ? PROJECT_BOOST : 0)
-    return { ...hit.result, score, snippet: buildSnippet(hit.rawSnippet, hit.headline) }
+    const damping = hit.vector && noiseClusters.length > 0 ? noiseDamping(hit.vector, noiseClusters) : null
+    const score = fusedScore * (damping ?? 1) + (inProject.has(hit.result.session_id) ? PROJECT_BOOST : 0)
+    return { ...hit.result, score, noise_damping: damping, snippet: buildSnippet(hit.rawSnippet, hit.headline) }
   })
   results.sort((a, b) => b.score - a.score)
 

@@ -22,6 +22,9 @@ export type SearchHitDto = {
   date: string | null
   score: number
   matchedTier: 'session' | 'chunk' | 'message'
+  // What the noise penalty multiplied the score by (1 = untouched), or null
+  // when the result could not be scored. See SearchResult.noise_damping.
+  noiseDamping: number | null
   snippet: string | null
   // Where in the session the match landed, so a client can open the thread at
   // the matched region instead of at the top. Null when the hit is the session
@@ -46,6 +49,7 @@ export const toSearchHit = (r: SearchResult): SearchHitDto => ({
   date: iso(r.date),
   score: r.score,
   matchedTier: r.matched_tier,
+  noiseDamping: r.noise_damping ?? null,
   snippet: r.snippet,
   cursor:
     r.cursor?.chunk_index != null

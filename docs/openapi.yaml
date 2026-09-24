@@ -1863,7 +1863,7 @@ components:
 
     SearchHit:
       type: object
-      required: [sessionId, title, titleSource, project, projectPath, source, dataClass, date, score, matchedTier, snippet, cursor]
+      required: [sessionId, title, titleSource, project, projectPath, source, dataClass, date, score, matchedTier, noiseDamping, snippet, cursor]
       properties:
         sessionId:
           type: integer
@@ -1913,6 +1913,17 @@ components:
           type: string
           enum: [session, chunk, message]
           description: Which index tier produced the hit.
+        noiseDamping:
+          description: |
+            The factor the noise penalty multiplied `score` by, where 1 means
+            untouched. Null when the hit could not be scored: the penalty was
+            off (`includeNoise=true`), nothing counts as noise yet, or the hit
+            carried no vector. Null is a different answer from 1.
+          oneOf:
+            - type: 'null'
+            - type: number
+              minimum: 0
+              maximum: 1
         snippet:
           description: |
             One line of the matched region, with matched terms wrapped in `**`.

@@ -47,9 +47,15 @@ describe('toSearchHit', () => {
       date: '2026-01-01T00:00:00.000Z',
       score: 0.5,
       matchedTier: 'session',
+      noiseDamping: null,
       snippet: 'we fixed **NaN** embeddings',
       cursor: null,
     })
+  })
+
+  it('carries the noise damping through, including a clean 1', () => {
+    expect(toSearchHit(hit({ noise_damping: 0.8 })).noiseDamping).toBe(0.8)
+    expect(toSearchHit(hit({ noise_damping: 1 })).noiseDamping).toBe(1)
   })
 
   it('carries a chunk cursor through', () => {

@@ -132,6 +132,26 @@ export async function getAllEmbeddings(
   return { ids, embeddings: vectors };
 }
 
+// Vectors for known ids, fetched in batches so a long id list does not become
+// one oversized request. Ids with no stored vector are absent from the map.
+export async function getEmbeddingsByIds(
+  collectionName: string,
+  ids: string[],
+  batchSize = 300
+): Promise<Map<string, number[]>> {
+  const collection = await getCollection(collectionName);
+  const vectors = new Map<string, number[]>();
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const result = await collection.get({ ids: ids.slice(i, i + batchSize), include: ['embeddings'] });
+    const embeddings = (result.embeddings ?? []) as unknown as (number[] | null)[];
+    result.ids.forEach((id, j) => {
+      const vec = embeddings[j];
+      if (vec && vec.length > 0) vectors.set(id, Array.from(vec));
+    });
+  }
+  return vectors;
+}
+
 // Drop ids from a collection. Used by unreportUselessSession to take a session
 // back out of the noise corpus, so that un-reporting genuinely undoes both
 // halves of a report rather than only the visible tag.
