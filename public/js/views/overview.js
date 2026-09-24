@@ -404,8 +404,10 @@ export const OverviewView = () => {
   const s = status.data
   const totals = s?.totals ?? {}
   const pending = s?.pendingEmbeddings ?? {}
-  const embedded = Number(totals.embeddings ?? 0)
-  const messages = Number(totals.messages ?? 0)
+  // ui and mcp are separate images; a server that predates the field must not
+  // read as 0% coverage.
+  const vectorised = s?.vectorisedMessages
+  const embeddable = Number(vectorised ?? 0) + Number(pending.messages ?? 0)
 
   return html`
     ${status.error &&
@@ -422,11 +424,15 @@ export const OverviewView = () => {
     </div>
 
     <${Card} title="Embedding coverage">
-      <div class="m" style="margin:0;font-size:13px">
-        <span>${pct(embedded, messages)}% of messages vectorised</span>
-        <span class="right faint">${fmtExact(embedded)} / ${fmtExact(messages)}</span>
-      </div>
-      <${Bar} value=${embedded} total=${messages} />
+      ${vectorised === undefined
+        ? html`<div class="m faint" style="margin:0;font-size:13px">
+            coverage unavailable: the API server is older than this page
+          </div>`
+        : html`<div class="m" style="margin:0;font-size:13px">
+              <span>${pct(vectorised, embeddable)}% of embeddable messages vectorised</span>
+              <span class="right faint">${fmtExact(vectorised)} / ${fmtExact(embeddable)}</span>
+            </div>
+            <${Bar} value=${vectorised} total=${embeddable} />`}
       <div class="m" style="margin-top:10px">
         <${Pill} kind=${pending.messages > 0 ? 'warn' : 'good'}>
           ${fmtNum(pending.messages ?? 0)} messages pending

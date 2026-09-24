@@ -19,6 +19,20 @@ import { notWarmup } from "../mcp/title.js";
 
 const healingParams = () => [config.healing.retryLimit, config.healing.cooldownDays];
 
+// Every message the embedder will ever consider, before asking whether it is
+// done. Pending and vectorised are two halves of this one population.
+const messageSource = `FROM messages m
+     JOIN sessions s ON m.session_id = s.id
+     JOIN projects p ON s.project_id = p.id
+     JOIN sources src ON p.source_id = src.id
+     LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'`;
+
+const messageEligibility = `m.content_text IS NOT NULL
+       AND LENGTH(m.content_text) > 10
+       AND m.role != 'tool'
+       AND s.deleted_at IS NULL
+       AND s.is_automated = false`;
+
 // The message-side FROM/WHERE, minus the SELECT list, so the same rows can be
 // selected for embedding or merely counted. `firstParam` is where this
 // fragment's own placeholders begin, letting a caller reserve $1 for a LIMIT.
@@ -41,11 +55,7 @@ export const embeddableMessages = (
       : `AND LENGTH(m.content_text) <= ${Number(maxChars)}`;
 
   return {
-    sql: `FROM messages m
-     JOIN sessions s ON m.session_id = s.id
-     JOIN projects p ON s.project_id = p.id
-     JOIN sources src ON p.source_id = src.id
-     LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'
+    sql: `${messageSource}
      LEFT JOIN embeddings skip ON skip.message_id = m.id
        AND skip.chroma_collection = 'UNEMBEDDABLE'
        AND NOT (
@@ -53,11 +63,7 @@ export const embeddableMessages = (
          AND skip.retry_count < ${retryLimit}
          AND skip.updated_at < NOW() - make_interval(days => ${cooldownDays})
        )
-     WHERE m.content_text IS NOT NULL
-       AND LENGTH(m.content_text) > 10
-       AND m.role != 'tool'
-       AND s.deleted_at IS NULL
-       AND s.is_automated = false
+     WHERE ${messageEligibility}
        AND e.id IS NULL
        AND skip.id IS NULL
        ${charFilter}`,
@@ -94,6 +100,17 @@ export const pendingMessagesCount = () => {
   const { sql, params } = embeddableMessages(1);
   return { sql: `SELECT COUNT(*) as count ${sql}`, params };
 };
+
+// The done half of the message population, so coverage can be
+// vectorised / (vectorised + pending). Dividing by every row in `messages`
+// instead counted tool output, fragments and deleted sessions as unfinished
+// work and read 51% with 67 messages actually waiting.
+export const vectorisedMessagesCount = () => ({
+  sql: `SELECT COUNT(*) as count ${messageSource}
+     WHERE ${messageEligibility}
+       AND e.id IS NOT NULL`,
+  params: [],
+});
 
 export const pendingSessionsCount = (collection: string) => ({
   sql: `SELECT COUNT(*) as count ${embeddableSessions("$1")}`,
