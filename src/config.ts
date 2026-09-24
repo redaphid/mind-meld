@@ -150,6 +150,12 @@ export const config = {
     // immediately, so the agent that just flagged something sees the effect on
     // its next search rather than up to a TTL later.
     clusterCacheMs: getEnvInt("MINDMELD_NOISE_CLUSTER_CACHE_MS", 300000),
+
+    // Search text asks the reading agent to judge results damped below this
+    // factor, and to report the ones that are noise. Agents almost never report
+    // unprompted. Measured: real-topic results that pay anything sit at
+    // x0.94-0.99, held-out noise averages x0.85, so 0.9 separates them.
+    nudgeBelow: getEnvFloat("MINDMELD_NOISE_NUDGE_BELOW", 0.9),
   },
 
   // PostgreSQL
