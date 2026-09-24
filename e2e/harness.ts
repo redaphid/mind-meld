@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { z } from 'zod'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { FULL_TEXT_ONLY } from '../src/mcp/search.js'
 
 // The server under test. E2E_BASE_URL points the suite at one already running
 // (the deployed image, say, to see how trunk behaves); otherwise it starts
@@ -65,7 +66,7 @@ export const mcpTool = async (name: string, args: Record<string, unknown>): Prom
 export const mcpSearch = async (args: Record<string, unknown>, attempts = 6): Promise<string> => {
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const text = await mcpTool('search', args)
-    if (!text.includes('full-text results only')) return text
+    if (!text.includes(FULL_TEXT_ONLY)) return text
     console.log(`  MCP search degraded, attempt ${attempt}/${attempts}`)
     await new Promise((resolve) => setTimeout(resolve, 10_000))
   }

@@ -8,7 +8,7 @@ import { startServer, stopServer, search, mcpTool, mcpSearch, type Hit } from '.
 // before the suite ends.
 
 const { query, closePool } = await import('../src/db/postgres.js')
-const { resolveDataClasses } = await import('../src/mcp/search.js')
+const { resolveDataClasses, NOISE_CHECK } = await import('../src/mcp/search.js')
 const { config } = await import('../src/config.js')
 const dataClasses = resolveDataClasses({})
 assert(dataClasses, 'a default search is expected to filter by data class')
@@ -68,7 +68,7 @@ const readMcpText = (text: string) => {
       return id && damping ? [[Number(id), Number(damping)] as const] : []
     })
   )
-  const named = text.match(/NOISE CHECK: sessions ([\d, ]+) resemble/)?.[1].split(', ').map(Number) ?? []
+  const named = text.match(new RegExp(`${NOISE_CHECK}: sessions ([\\d, ]+) resemble`))?.[1].split(', ').map(Number) ?? []
   return { printed, named }
 }
 
@@ -168,7 +168,7 @@ describe('real conversations', () => {
 
   it('draw no noise check in MCP search text', async () => {
     const texts = await Promise.all((await realQueries()).map((q) => mcpSearch({ query: q, mode: 'semantic', limit: 10 })))
-    const flagged = texts.filter((t) => t.includes('NOISE CHECK'))
+    const flagged = texts.filter((t) => t.includes(NOISE_CHECK))
     console.log(`${flagged.length}/${texts.length} real-topic MCP searches carried a noise check`)
     expect(flagged).toEqual([])
   })

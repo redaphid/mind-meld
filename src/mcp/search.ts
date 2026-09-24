@@ -783,18 +783,20 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> =>
 // An LLM reading this cannot see the log line, and "no results" reads as "this
 // conversation does not exist" — a conclusion it will then act on. So a
 // degraded search says so in the text, including when it found nothing.
+export const FULL_TEXT_ONLY = 'full-text results only'
 const degradedNote = (degraded: SearchDegradation | null) =>
   degraded
-    ? `\n\nNOTE: full-text results only — semantic search was unavailable (${degraded.reason}). Meaning-based matches are missing, so absence here is not evidence a conversation does not exist. Retry shortly for a full search.`
+    ? `\n\nNOTE: ${FULL_TEXT_ONLY} — semantic search was unavailable (${degraded.reason}). Meaning-based matches are missing, so absence here is not evidence a conversation does not exist. Retry shortly for a full search.`
     : ''
 
 // A report teaches the ranker what noise looks like, so a report on a real but
 // off-topic session demotes real work that resembles it. The note has to say
 // that as loudly as it asks for reports.
+export const NOISE_CHECK = 'NOISE CHECK'
 const noiseNote = (results: SearchResult[]) => {
   const suspects = results.filter((r) => r.noise_damping != null && r.noise_damping < config.noise.nudgeBelow)
   if (suspects.length === 0) return ''
-  return `\n\nNOISE CHECK: sessions ${suspects.map((r) => r.session_id).join(', ')} resemble reported noise (damped below ×${config.noise.nudgeBelow}). If one IS noise (automated runs, monitoring/briefing output, boilerplate, notification stubs, tool-call spam), call reportUselessSession(sessionId, reason).
+  return `\n\n${NOISE_CHECK}: sessions ${suspects.map((r) => r.session_id).join(', ')} resemble known noise (damped below ×${config.noise.nudgeBelow}). If one IS noise (automated runs, monitoring/briefing output, boilerplate, notification stubs, tool-call spam), call reportUselessSession(sessionId, reason).
 NEVER report a session just because it is off-topic for this query: a report teaches search that sessions like it are noise and demotes real work that resembles it.`
 }
 

@@ -21,7 +21,7 @@ vi.mock('../embeddings/ollama.js', () => ({
   getInteractiveOllamaClient: () => ({ embed: (...args: unknown[]) => embed(...(args as [])) }),
 }))
 
-const { search, searchWithDiagnostics, resolveDataClasses, formatSearchResults, findProjectsByPath } =
+const { search, searchWithDiagnostics, resolveDataClasses, formatSearchResults, findProjectsByPath, NOISE_CHECK, FULL_TEXT_ONLY } =
   await import('./search.js')
 const { config } = await import('../config.js')
 
@@ -526,8 +526,8 @@ describe('formatSearchResults', () => {
         result({ session_id: 14, noise_damping: null }),
         result({ session_id: 15, noise_damping: config.noise.nudgeBelow }),
       ])
-      const note = text.slice(text.indexOf('NOISE CHECK'))
-      expect(note).toMatch(/^NOISE CHECK: sessions 11, 13 resemble/)
+      const note = text.slice(text.indexOf(NOISE_CHECK))
+      expect(note).toMatch(new RegExp(`^${NOISE_CHECK}: sessions 11, 13 resemble`))
       expect(note).toContain('reportUselessSession(sessionId, reason)')
       expect(note).toContain('NEVER report a session just because it is off-topic')
     })
@@ -539,12 +539,12 @@ describe('formatSearchResults', () => {
         result({ session_id: 4, noise_damping: config.noise.nudgeBelow }),
       ])
       expect(text).toContain('Noise: ×')
-      expect(text).not.toContain('NOISE CHECK')
+      expect(text).not.toContain(NOISE_CHECK)
     })
 
     it('leaves the note out when no result could be scored', () => {
       const text = formatSearchResults([result({ noise_damping: null }), result({ session_id: 3 })])
-      expect(text).not.toContain('NOISE CHECK')
+      expect(text).not.toContain(NOISE_CHECK)
     })
   })
 })
@@ -712,7 +712,7 @@ describe('when the query vector cannot be had', () => {
   // an empty result as proof the conversation does not exist.
   it('warns in the rendered text, including when nothing matched', () => {
     const note = formatSearchResults([], [], { semantic: false, reason: 'gate shut' })
-    expect(note).toContain('full-text results only')
+    expect(note).toContain(FULL_TEXT_ONLY)
     expect(note).toContain('gate shut')
   })
 
