@@ -179,16 +179,22 @@ describe('search default data-class filter (semantic arm)', () => {
 describe('search default data-class filter (full-text arm)', () => {
   const ftsCall = () =>
     query.mock.calls.find(([sql]) => typeof sql === 'string' && sql.includes('ranked_messages'))
+  // Classes are resolved to project ids first; full text filters on the ids.
+  const classLookup = () =>
+    query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('COALESCE(p.data_class, src.data_class) = ANY($1')
+    )
 
-  it('adds the effective-class predicate with ["coding"] by default', async () => {
-    query.mockResolvedValue(rows())
+  it('filters to the projects in ["coding"] by default', async () => {
+    query.mockImplementation(async (sql: string) =>
+      sql.includes('COALESCE(p.data_class, src.data_class) = ANY($1') ? rows({ id: 4 }, { id: 9 }) : rows()
+    )
 
     await search({ query: 'deploy', mode: 'text' })
-    const call = ftsCall()
-    expect(call).toBeDefined()
-    const [sql, values] = call!
-    expect(sql).toContain(`COALESCE(p.data_class, src.data_class) = ANY(`)
-    expect(values).toContainEqual(['coding'])
+    expect(classLookup()![1]).toEqual([['coding']])
+    const [sql, values] = ftsCall()!
+    expect(sql).toContain('s.project_id = ANY(')
+    expect(values).toContainEqual([4, 9])
   })
 
   it('omits the predicate when dataClass is ["*"]', async () => {
@@ -196,7 +202,8 @@ describe('search default data-class filter (full-text arm)', () => {
 
     await search({ query: 'deploy', mode: 'text', dataClass: ['*'] })
     const [sql] = ftsCall()!
-    expect(sql).not.toContain('COALESCE(p.data_class, src.data_class) = ANY(')
+    expect(classLookup()).toBeUndefined()
+    expect(sql).not.toContain('s.project_id = ANY(')
   })
 
   it('omits the predicate when an explicit source is given', async () => {
@@ -204,7 +211,8 @@ describe('search default data-class filter (full-text arm)', () => {
 
     await search({ query: 'deploy', mode: 'text', source: 'android' })
     const [sql, values] = ftsCall()!
-    expect(sql).not.toContain('COALESCE(p.data_class, src.data_class) = ANY(')
+    expect(classLookup()).toBeUndefined()
+    expect(sql).not.toContain('s.project_id = ANY(')
     expect(values).toContain('android')
   })
 
@@ -213,9 +221,9 @@ describe('search default data-class filter (full-text arm)', () => {
 
     await search({ query: 'deploy', mode: 'text', source: 'android', dataClass: ['personal'] })
     const [sql, values] = ftsCall()!
-    expect(sql).toContain(`COALESCE(p.data_class, src.data_class) = ANY(`)
+    expect(sql).toContain('s.project_id = ANY(')
     expect(values).toContain('android')
-    expect(values).toContainEqual(['personal'])
+    expect(classLookup()![1]).toEqual([['personal']])
   })
 
   it('adds the excludeTerms condition after the class predicate', async () => {
@@ -225,7 +233,7 @@ describe('search default data-class filter (full-text arm)', () => {
     const [sql, values] = ftsCall()!
     expect(sql).toContain('NOT to_tsvector')
     expect(values).toContain('kubernetes')
-    expect(values).toContainEqual(['coding'])
+    expect(classLookup()![1]).toEqual([['coding']])
   })
 
   it('surfaces an FTS row as a message-tier hit with its headline', async () => {
@@ -381,10 +389,10 @@ describe('dataClass validation', () => {
   it('accepts a miscased class after normalization instead of returning nothing', async () => {
     withKnownClasses()
     await search({ query: 'x', mode: 'text', dataClass: [' Coding '] })
-    const ftsCall = query.mock.calls.find(
-      ([sql]) => typeof sql === 'string' && sql.includes('ranked_messages')
+    const classLookup = query.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('COALESCE(p.data_class, src.data_class) = ANY($1')
     )
-    expect(ftsCall![1]).toContainEqual(['coding'])
+    expect(classLookup![1]).toEqual([['coding']])
   })
 
   it('skips validation while the vocabulary is empty (pre-migration)', async () => {
