@@ -106,8 +106,8 @@ export const listKnownDataClasses = async (): Promise<string[]> => {
 // projects when ~900 match, and chose a per-session nested loop that re-ran
 // to_tsvector over ~920k messages without touching the GIN index -- 60-120s a
 // search, the broadest ones hitting the statement timeout. With the ids it has
-// real statistics and matches through the index: "database migration" went
-// 63.9s -> 1.8s and "error" from a timeout to 39s, identical rows.
+// real statistics and matches through the index: measured against the old
+// predicate, "database migration" went 71.5s -> 2.4s and "error" 107s -> 44s.
 const projectIdsInDataClasses = async (dataClasses: string[]): Promise<number[]> =>
   (
     await query<{ id: number }>(
@@ -703,7 +703,8 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       JOIN projects p ON s.project_id = p.id
       JOIN sources src ON p.source_id = src.id
       -- ts_rank ties are common (short messages saturate it), and without a
-      -- tie-break which tied session makes the cut depended on the plan.
+      -- tie-break which tied session makes the cut depended on the plan. The
+      -- most recently indexed session wins a tie.
       ORDER BY rm.rank DESC, rm.session_id DESC
       LIMIT ${limitParam}`,
       values
