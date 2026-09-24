@@ -176,7 +176,7 @@ describe('classifyAutomated with configured prefixes', () => {
   })
 
   it('does not read a metacharacter as a pattern', () => {
-    expect(configured('Nightly report for the rusty conquistador')).toBeNull()
+    expect(configured('Nightly report for Olair of the rusty conquistador')).toBeNull()
   })
 
   it('matches only at the start of the first line', () => {
