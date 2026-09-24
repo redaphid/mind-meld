@@ -507,6 +507,8 @@ Idempotent — re-tagging something changes nothing and is not an error.`,
       if (requested.length === 0)
         return { content: [{ type: 'text', text: 'No tag given. Pass tag: "something" or tags: ["a","b"].' }], isError: true }
       const applied = await applyTags(target, requested, { createdBy: 'mcp', note: params.note })
+      // A "useless" tag is a report by another name; it changes the corpus now.
+      if (applied.includes(USELESS_TAG)) invalidateNoiseClusters()
       const current = await getTags(target)
       return { content: [{ type: 'text', text: formatTagWrite('Tagged', target, applied, current) }] }
     }
@@ -533,6 +535,7 @@ reported, not an error.`,
       if (requested.length === 0)
         return { content: [{ type: 'text', text: 'No tag given. Pass tag: "something" or tags: ["a","b"].' }], isError: true }
       const removed = await removeTags(target, requested)
+      if (removed.includes(USELESS_TAG)) invalidateNoiseClusters()
       const current = await getTags(target)
       return { content: [{ type: 'text', text: formatTagWrite('Untagged', target, removed, current) }] }
     }

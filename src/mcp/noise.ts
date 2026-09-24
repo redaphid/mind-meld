@@ -203,19 +203,38 @@ export const loadNoiseCorpus = async (): Promise<NoiseVector[]> => {
 // live index: reporting 5 of a 1,718-session family moved 88% of the rest
 // closer to the noise (median similarity 0.692 -> 0.812), against 86% and 0.764
 // clustered jointly.
-export const clusterNoise = (corpus: readonly NoiseVector[]): number[][] =>
-  (['automated', 'reported'] as const).flatMap((source) => {
+// The clusters search scores against, and the floor calibrated against them.
+export type NoiseModel = { centroids: number[][]; floor: number }
+
+// Pure, so search and the eval (src/mcp/noise-eval.ts) build the model the same
+// way. `calibration` is a sample of real sessions' vectors.
+//
+// The floor is calibrated against the AUTOMATED clusters only. The real sample
+// is simply "everything not yet marked noise", so it contains the unreported
+// rest of whatever an agent just reported: calibrated against every cluster, a
+// report pulled the floor up to exactly where its own lookalikes sit and
+// cancelled itself -- measured on the live index, reporting 5 of a 1,718-session
+// family then damped 6 of 37 lookalikes harder, against 32 of 33 with the floor
+// held. A report is new information that sessions like these ARE noise; it must
+// not move the bar that decides whether they look like noise.
+export const buildNoiseModel = (corpus: readonly NoiseVector[], calibration: readonly number[][]): NoiseModel => {
+  const [automated, reported] = (['automated', 'reported'] as const).map((source) => {
     const vectors = corpus.filter((c) => c.source === source).map((c) => c.vector)
     return sphericalKMeans(vectors, chooseClusterCount(vectors.length))
   })
+  const centroids = [...automated, ...reported]
+  return { centroids, floor: calibrateFloor(automated.length > 0 ? automated : centroids, calibration) }
+}
 
-type ClusterCache = { centroids: number[][]; computedAt: number; size: number }
-let cache: ClusterCache | null = null
+const NO_NOISE: NoiseModel = { centroids: [], floor: 1 }
 
-// Clustering ~2k vectors takes most of a second. Concurrent searches that miss
-// the cache share one build instead of each running their own, and a report
-// that lands mid-build bumps the generation so that build is not cached over it.
-let building: Promise<number[][]> | null = null
+let cache: (NoiseModel & { computedAt: number }) | null = null
+
+// Building a model clusters ~2k vectors, which takes most of a second.
+// Concurrent searches that miss the cache share one build instead of each
+// running their own, and a report that lands mid-build bumps the generation so
+// that build is not cached over it.
+let building: Promise<NoiseModel> | null = null
 let generation = 0
 
 export const invalidateNoiseClusters = (): void => {
@@ -224,35 +243,35 @@ export const invalidateNoiseClusters = (): void => {
   generation++
 }
 
-const buildClusters = async (now: number, startedAt: number): Promise<number[][]> => {
-  let centroids: number[][] = []
-  let size = 0
+const buildModel = async (now: number, startedAt: number): Promise<NoiseModel> => {
+  let model = NO_NOISE
   try {
     const corpus = await loadNoiseCorpus()
-    size = corpus.length
-    centroids = clusterNoise(corpus)
+    if (corpus.length > 0) {
+      const real = await sessionVectors(await sampleRealSessionIds(config.noise.floorSample))
+      model = buildNoiseModel(corpus, [...real.values()])
+    }
   } catch (e) {
     // An unreadable corpus has to degrade to "no penalty", never to a failed
     // search. Ranking help is an enhancement; retrieval is the product.
-    console.error('Noise clusters unavailable, ranking penalty disabled for this search:', e)
+    console.error('Noise model unavailable, ranking penalty disabled for this search:', e)
   }
-  if (startedAt === generation) cache = { centroids, computedAt: now, size }
-  return centroids
+  if (startedAt === generation) cache = { ...model, computedAt: now }
+  return model
 }
 
-// The current noise cluster centroids, rebuilt at most once per cache window.
+// The current noise model, rebuilt at most once per cache window.
 //
-// Returns an empty array when nothing counts as noise, and every caller reads
-// that as "no penalty" rather than as an error -- on a fresh install the noise
-// corpus is empty, and search has to behave exactly as it did before any of
-// this existed.
-export const getNoiseClusters = async (now = Date.now()): Promise<number[][]> => {
-  if (cache && now - cache.computedAt < config.noise.clusterCacheMs) return cache.centroids
+// With nothing counted as noise the model is empty, and every caller reads that
+// as "no penalty" rather than as an error -- on a fresh install the corpus is
+// empty, and search has to behave exactly as it did before any of this existed.
+export const getNoiseModel = async (now = Date.now()): Promise<NoiseModel> => {
+  if (cache && now - cache.computedAt < config.noise.clusterCacheMs) return cache
   if (!building) {
     const startedAt = generation
     building = (async () => {
       try {
-        return await buildClusters(now, startedAt)
+        return await buildModel(now, startedAt)
       } finally {
         if (startedAt === generation) building = null
       }
@@ -271,6 +290,36 @@ export const nearestSimilarity = (vector: number[], clusters: readonly number[][
   return nearest
 }
 
+export const quantile = (values: readonly number[], q: number): number => {
+  if (values.length === 0) return NaN
+  const sorted = [...values].sort((a, b) => a - b)
+  return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]
+}
+
+// Real sessions to calibrate the floor against: summarized, and nothing marks
+// them as noise. A fixed pseudo-random order, so every rebuild of the same
+// index calibrates against the same sessions.
+export const sampleRealSessionIds = async (limit: number): Promise<number[]> =>
+  (
+    await query<{ id: number }>(
+      `SELECT s.id FROM sessions s
+       WHERE s.deleted_at IS NULL AND s.summary IS NOT NULL AND NOT s.is_automated
+         AND NOT EXISTS (SELECT 1 FROM tags t WHERE t.session_id = s.id AND t.tag = $1)
+       ORDER BY md5(s.id::text)
+       LIMIT $2`,
+      [USELESS_TAG, limit]
+    )
+  ).rows.map((r) => r.id)
+
+// The floor at which at most (1 - quantile) of real sessions pay anything. With
+// no clusters or no real sessions to measure there is nothing to calibrate, and
+// a floor of 1 charges nothing: an uncalibrated penalty must not guess.
+export const calibrateFloor = (
+  clusters: readonly number[][],
+  real: readonly number[][],
+  q = config.noise.floorQuantile
+): number => (clusters.length === 0 || real.length === 0 ? 1 : quantile(real.map((v) => nearestSimilarity(v, clusters)), q))
+
 // How much of a result's score survives its resemblance to noise.
 //
 // Returns a multiplier in [0, 1]; 1 means untouched. Multiplicative because the
@@ -278,16 +327,14 @@ export const nearestSimilarity = (vector: number[], clusters: readonly number[][
 // any subtractive penalty tuned to matter against one is meaningless against
 // the other.
 //
-// The floor is what makes this discriminative. bge-m3 scores unrelated text at
-// around 0.4-0.5 cosine, so an unfloored penalty taxes EVERY result by roughly
-// the same amount, changing no relative order while costing the computation.
-// Only similarity above the floor is charged for, rescaled so a result sitting
-// exactly on a noise cluster pays the full weight.
+// The floor is what makes this discriminative: only similarity above it is
+// charged for, rescaled so a result sitting exactly on a noise cluster pays the
+// full weight. It comes with the clusters it was calibrated against, so the two
+// can never be mixed up.
 export const noiseDamping = (
   vector: number[] | null | undefined,
-  clusters: readonly number[][],
-  weight = config.noise.penaltyWeight,
-  floor = config.noise.similarityFloor
+  { centroids: clusters, floor }: NoiseModel,
+  weight = config.noise.penaltyWeight
 ): number => {
   if (!vector || vector.length === 0 || clusters.length === 0 || weight <= 0) return 1
 

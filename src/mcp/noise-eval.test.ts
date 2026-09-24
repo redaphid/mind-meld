@@ -5,7 +5,8 @@ vi.mock('../db/postgres.js', () => ({ query: vi.fn() }))
 vi.mock('../db/chroma.js', () => ({ getEmbeddingsByIds: vi.fn(), hasId: vi.fn() }))
 vi.mock('../embeddings/ollama.js', () => ({}))
 
-const { auc, quantile, evaluateNoise } = await import('./noise-eval.js')
+const { auc, evaluateNoise } = await import('./noise-eval.js')
+const { quantile } = await import('./noise.js')
 const { normalizeVector } = await import('../utils/vector-math.js')
 
 const DIMS = 16
@@ -73,8 +74,12 @@ describe('quantile', () => {
   })
 })
 
+// A real session at cosine 0.55 to the noise along axis 0: calibrating against
+// it puts the floor at ~0.55, the geometry these cases were written around.
+const TILT = normalizeVector([0.55, Math.sqrt(1 - 0.55 * 0.55), ...new Array(DIMS - 2).fill(0)])
+
 describe('evaluateNoise', () => {
-  const base = { hard: [], weight: 0.35, floorFor: () => 0.55 }
+  const base = { hard: [], weight: 0.35, calibration: [TILT] }
 
   it('separates noise from real sessions that live in a different region', () => {
     const corpus = corpusOf(blob(axis(0), 40, 0))
@@ -133,21 +138,12 @@ describe('evaluateNoise', () => {
     expect(far.damping).toBe(1)
   })
 
-  it('passes each fold its own clusters when choosing the floor', () => {
+  // An uncalibrated penalty must not guess, in the eval as in search.
+  it('charges nothing when there are no real sessions to calibrate against', () => {
     const corpus = corpusOf(blob(axis(0), 25, 0))
-    const seen: number[] = []
-    evaluateNoise({
-      ...base,
-      corpus,
-      subjects: selfSubjects(corpus),
-      real: [axis(1)],
-      floorFor: (clusters) => {
-        seen.push(clusters.length)
-        return 0.55
-      },
-    })
-
-    expect(seen).toHaveLength(6)
+    const report = evaluateNoise({ ...base, calibration: [], corpus, subjects: selfSubjects(corpus), real: [axis(1)] })
+    expect(report.floor).toBe(1)
+    expect(report.noise.dampedShare).toBe(0)
   })
 
   it('computes the AUC from exactly the similarities it dumps', () => {

@@ -11,7 +11,7 @@ import { buildSnippet, ts_headline_options } from './snippet.js'
 import { resolveTitle, type TitleSource } from './title.js'
 import { parseSinceDate } from './since.js'
 import { resolveTagFilter, passesTagFilter, getSessionTags, type TagFilter } from './tags.js'
-import { getNoiseClusters, noiseDamping, sessionVectors, USELESS_TAG } from './noise.js'
+import { getNoiseModel, noiseDamping, sessionVectors, USELESS_TAG, type NoiseModel } from './noise.js'
 import { LAST_ACTIVITY_SQL, lastActivity } from './last-activity.js'
 
 const PROJECT_BOOST = 0.5
@@ -726,8 +726,8 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
   // An empty array (nothing reported yet, or Chroma unreachable) makes
   // noiseDamping return 1 for everything, so this whole block is a no-op on a
   // corpus nobody has judged.
-  const noiseClusters = wantsNoisePenalty ? await getNoiseClusters() : []
-  const hitVectors = noiseClusters.length > 0 ? await scoringVectors([...hitBySession.keys()]) : new Map()
+  const noise: NoiseModel = wantsNoisePenalty ? await getNoiseModel() : { centroids: [], floor: 1 }
+  const hitVectors = noise.centroids.length > 0 ? await scoringVectors([...hitBySession.keys()]) : new Map()
 
   const results = Array.from(hitBySession.values()).map((hit) => {
     const fusedScore = fused.get(hit.result.session_id) ?? 0
@@ -737,7 +737,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     // penalty has no business overruling -- while noise from elsewhere is
     // pushed down by the full factor.
     const vector = hitVectors.get(hit.result.session_id)
-    const damping = vector ? noiseDamping(vector, noiseClusters) : null
+    const damping = vector ? noiseDamping(vector, noise) : null
     const score = fusedScore * (damping ?? 1) + (inProject.has(hit.result.session_id) ? PROJECT_BOOST : 0)
     return { ...hit.result, score, noise_damping: damping, snippet: buildSnippet(hit.rawSnippet, hit.headline) }
   })

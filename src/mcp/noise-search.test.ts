@@ -43,7 +43,9 @@ const blend = (cosToAxis0: number): number[] => {
   return v
 }
 
-// weight 0.35, floor 0.55 -- the shipped defaults.
+// weight 0.35. The floor is calibrated the way production calibrates it: the
+// 95th percentile of the real sessions' similarity to the noise -- here the two
+// real sessions 4 (cos 0.50) and 5 (cos 0.00), which puts the floor at 0.50.
 const REPORTED_STUB = unit(0) //          cos 1.00 to the noise cluster
 const UNREPORTED_STUB = blend(0.98) //    cos 0.98 -- heavily damped
 const ADJACENT_DM = blend(0.62) //        cos 0.62 -- just above the floor, lightly damped
@@ -130,6 +132,8 @@ beforeEach(() => {
           headline: 'a **match**',
         })),
       }
+    // The real sessions the floor is calibrated against.
+    if (sql.includes('ORDER BY md5(s.id::text)')) return { rows: [{ id: 4 }, { id: 5 }] }
     // The noise corpus: every session flagged automated or tagged useless.
     if (sql.includes('s.is_automated OR EXISTS')) return { rows: taggedUseless.map((id) => ({ id })) }
     // resolveTagFilter's exclude arm.
