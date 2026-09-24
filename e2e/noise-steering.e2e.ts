@@ -7,6 +7,7 @@ import { startServer, stopServer, search, mcpTool, type Hit } from './harness.js
 // before the suite ends.
 
 const { query, closePool } = await import('../src/db/postgres.js')
+const { resolveDataClasses } = await import('../src/mcp/search.js')
 
 const REPORTED = 5
 const FIRST_WORDS = `array_to_string((regexp_split_to_array(m.content_text, '\\s+'))[1:5], ' ')`
@@ -21,7 +22,7 @@ const eligible = `
     ORDER BY sequence_num NULLS FIRST, timestamp, id LIMIT 1
   ) m ON true
   WHERE s.deleted_at IS NULL AND s.summary IS NOT NULL AND NOT s.is_automated
-    AND COALESCE(p.data_class, src.data_class) = 'coding'
+    AND COALESCE(p.data_class, src.data_class) = ANY('{${resolveDataClasses({}).join(',')}}'::text[])
     AND NOT EXISTS (SELECT 1 FROM tags t WHERE t.session_id = s.id)`
 
 // The largest set of sessions opened by the same five words: a templated agent

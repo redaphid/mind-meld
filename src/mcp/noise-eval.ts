@@ -74,10 +74,12 @@ export const auc = (positives: readonly number[], negatives: readonly number[]):
   return u / (positives.length * negatives.length)
 }
 
+// An empty set reports NaN (null in JSON), never 0: a mean damping of 0 would
+// read as "damped to nothing".
 const summarize = (similarities: number[], dampings: number[]): SetReport => ({
   n: similarities.length,
-  dampedShare: dampings.filter((d) => d < 1).length / Math.max(1, dampings.length),
-  meanDamping: dampings.reduce((a, b) => a + b, 0) / Math.max(1, dampings.length),
+  dampedShare: dampings.filter((d) => d < 1).length / dampings.length,
+  meanDamping: dampings.reduce((a, b) => a + b, 0) / dampings.length,
   similarity: {
     p10: quantile(similarities, 0.1),
     p50: quantile(similarities, 0.5),

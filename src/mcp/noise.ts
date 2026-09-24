@@ -33,7 +33,8 @@ import { cosineSimilarity, normalizeVector } from '../utils/vector-math.js'
 //    neighbourhood. Ranking down what came back leaves retrieval honest.
 //    Measured rather than assumed -- see the sweep recorded in the PR.
 
-const noiseId = (sessionId: number) => `noise-session-${sessionId}`
+const NOISE_ID_PREFIX = 'noise-session-'
+const noiseId = (sessionId: number) => `${NOISE_ID_PREFIX}${sessionId}`
 
 // The text that represents a session for noise purposes.
 //
@@ -226,7 +227,7 @@ export type NoiseVector = { sessionId: number; vector: number[] }
 export const loadNoiseCorpus = async (): Promise<NoiseVector[]> => {
   const { ids, embeddings } = await getAllEmbeddings(config.chroma.collections.noise)
   return ids.map((id, i) => ({
-    sessionId: Number(id.replace('noise-session-', '')),
+    sessionId: Number(id.replace(NOISE_ID_PREFIX, '')),
     vector: normalizeVector(embeddings[i]),
   }))
 }

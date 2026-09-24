@@ -156,5 +156,7 @@ describe('evaluateNoise', () => {
     expect(report.corpus.k).toBe(0)
     expect(report.noise.n).toBe(0)
     expect(report.real.meanDamping).toBe(1)
+    // No noise was scored, so there is no mean to report -- not a mean of 0.
+    expect(report.noise.meanDamping).toBeNaN()
   })
 })
