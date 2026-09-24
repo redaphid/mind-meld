@@ -16,17 +16,14 @@ const query = vi.fn()
 vi.mock('../db/postgres.js', () => ({ query: (...args: unknown[]) => query(...args) }))
 
 const querySimilar = vi.fn()
-const getAllEmbeddings = vi.fn()
+const getEmbeddingsByIds = vi.fn()
 vi.mock('../db/chroma.js', () => ({
   querySimilar: (...args: unknown[]) => querySimilar(...args),
-  getAllEmbeddings: (...args: unknown[]) => getAllEmbeddings(...args),
-  upsertEmbeddings: vi.fn(),
-  deleteEmbeddings: vi.fn(),
+  getEmbeddingsByIds: (...args: unknown[]) => getEmbeddingsByIds(...args),
 }))
 
 vi.mock('../embeddings/ollama.js', () => ({
   getInteractiveOllamaClient: () => ({ embed: async () => ({ embeddings: [unit(0)] }) }),
-  generateEmbedding: async () => unit(0),
 }))
 
 const DIMS = 1024
@@ -88,8 +85,8 @@ const VECTORS: Record<number, number[]> = {
   5: CODING,
 }
 
-// Session 1 has been reported: it carries the "useless" tag and its vector is
-// in the noise corpus.
+// Session 1 has been reported: it carries the "useless" tag, which is what puts
+// its summary vector in the noise corpus.
 let taggedUseless = [1]
 
 beforeEach(() => {
@@ -100,9 +97,11 @@ beforeEach(() => {
   invalidateNoiseClusters()
   query.mockReset()
   querySimilar.mockReset()
-  getAllEmbeddings.mockReset()
+  getEmbeddingsByIds.mockReset()
 
-  getAllEmbeddings.mockResolvedValue({ ids: ['noise-session-1'], embeddings: [REPORTED_STUB] })
+  getEmbeddingsByIds.mockImplementation(async (_collection: string, ids: string[]) =>
+    new Map(ids.map((id) => [id, VECTORS[Number(id.replace('session-', ''))]]))
+  )
 
   querySimilar.mockImplementation(async (collection: string) => {
     if (collection !== 'convo-sessions') return { ids: [[]], distances: [[]], embeddings: [[]] }
@@ -118,6 +117,21 @@ beforeEach(() => {
       const row = SESSIONS[params?.[0] as number]
       return { rows: row ? [row] : [] }
     }
+    // The full-text arm, for the text-mode cases: sessions 2 and 4 match.
+    if (sql.includes('ranked_messages'))
+      return {
+        rows: [2, 4].map((id, i) => ({
+          ...SESSIONS[id],
+          session_id: id,
+          message_id: 100 + id,
+          source_name: SESSIONS[id].source_name,
+          ended_at: null,
+          rank: 0.9 - i * 0.1,
+          headline: 'a **match**',
+        })),
+      }
+    // The noise corpus: every session flagged automated or tagged useless.
+    if (sql.includes('s.is_automated OR EXISTS')) return { rows: taggedUseless.map((id) => ({ id })) }
     // resolveTagFilter's exclude arm.
     if (sql.includes('FROM tags WHERE tag = ANY'))
       return { rows: taggedUseless.map((id) => ({ session_id: id, message_id: null })) }
@@ -212,6 +226,34 @@ describe('reported noise, end to end through search', () => {
     expect(damping.get(5)).toBe(1)
   })
 
+  // Full text finds sessions no vector arm returned, and they used to carry no
+  // vector to score. They are judged by their session vector like any other.
+  it('scores a hit that only full-text search found', async () => {
+    const { results } = await searchWithDiagnostics({ query: 'match', mode: 'text', dataClass: ['*'], limit: 10 })
+    const damping = new Map(results.map((r) => [r.session_id, r.noise_damping]))
+    expect(damping.get(2)).toBeLessThan(1)
+    expect(damping.get(4)).toBe(1)
+  })
+
+  it('leaves a hit unscored when its session has no summary vector yet', async () => {
+    getEmbeddingsByIds.mockImplementation(async (_collection: string, ids: string[]) =>
+      new Map(ids.filter((id) => id !== 'session-4').map((id) => [id, VECTORS[Number(id.replace('session-', ''))]]))
+    )
+    const { results } = await searchWithDiagnostics({ query: 'anything', mode: 'semantic', dataClass: ['*'], limit: 10 })
+    expect(results.find((r) => r.session_id === 4)?.noise_damping).toBeNull()
+    expect(results.find((r) => r.session_id === 2)?.noise_damping).toBeLessThan(1)
+  })
+
+  it('costs the penalty, not the search, when session vectors cannot be read', async () => {
+    getEmbeddingsByIds.mockImplementation(async (_collection: string, ids: string[]) => {
+      if (ids.length === 1 && ids[0] === 'session-1') return new Map([['session-1', REPORTED_STUB]])
+      throw new Error('chroma is down')
+    })
+    const { results } = await searchWithDiagnostics({ query: 'anything', mode: 'semantic', dataClass: ['*'], limit: 10 })
+    expect(results.map((r) => r.session_id)).toEqual([2, 3, 4, 5])
+    expect(results.every((r) => r.noise_damping === null)).toBe(true)
+  })
+
   it('reports no damping at all when the penalty is off', async () => {
     const { results } = await searchWithDiagnostics({
       query: 'anything',
@@ -225,7 +267,6 @@ describe('reported noise, end to end through search', () => {
 
   it('behaves exactly as before when nothing has been reported', async () => {
     taggedUseless = []
-    getAllEmbeddings.mockResolvedValue({ ids: [], embeddings: [] })
     expect(await idsOf({})).toEqual([1, 2, 3, 4, 5])
   })
 })

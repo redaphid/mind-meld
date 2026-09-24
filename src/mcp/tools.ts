@@ -17,7 +17,7 @@ import {
 import { getHealth, formatHealth } from './health.js'
 import { resolveTitle } from './title.js'
 import { applyTags, removeTags, getTags, formatTagWrite, defaultExcludedTags, type TagTarget } from './tags.js'
-import { recordNoiseVector, forgetNoiseVector } from './noise.js'
+import { USELESS_TAG, hasNoiseVector, invalidateNoiseClusters } from './noise.js'
 import { writeNote, formatWrittenNote, NOTE_TAG } from './notes.js'
 
 // addTag/removeTag both take an optional sessionId and an optional messageId
@@ -355,10 +355,11 @@ boilerplate, or anything that isn't a real conversation.
 
 WHAT IT DOES, and the second half is the point:
 1. Tags the session "useless", which hides it from search by default.
-2. Adds the session's vector to a separate noise collection that search never
-   searches. Those vectors are clustered, and every later search ranks results
-   DOWN by how much they resemble the nearest noise cluster. So reporting one
-   notification stub quietly demotes the other nine hundred nobody has reported.
+2. Counts the session as noise for ranking. Every session reported here or
+   flagged automated at sync is clustered by its summary vector, and every later
+   search ranks results DOWN by how much they resemble the nearest noise
+   cluster. So reporting one notification stub quietly demotes the other nine
+   hundred nobody has reported.
 
 Call this proactively whenever you get useless results back from search. Over-
 reporting is cheap: unreportUselessSession(sessionId) undoes both halves.
@@ -396,17 +397,17 @@ it by id, whether it is flagged or not.`,
       if (exists.rowCount === 0)
         return { content: [{ type: 'text', text: `Session ${sessionId} not found.` }] }
 
-      await applyTags({ sessionId }, ['useless'], { createdBy: 'reportUselessSession', note: reason })
+      await applyTags({ sessionId }, [USELESS_TAG], { createdBy: 'reportUselessSession', note: reason })
+      invalidateNoiseClusters()
 
-      // The vector half is best-effort. If Chroma or the embedder is
-      // unavailable the session is still flagged and still hidden -- degrading
-      // to "hidden but does not generalise" is right, whereas failing the whole
-      // call would leave an agent believing its judgement was not recorded.
+      // Only reported, not acted on: the tag is what counts, and a session with
+      // no summary vector yet joins the corpus by itself once it is summarized.
+      // A Chroma outage must not fail a report whose tag is already written.
       let learned = false
       try {
-        learned = await recordNoiseVector(sessionId)
+        learned = await hasNoiseVector(sessionId)
       } catch (e) {
-        console.error(`Could not add session ${sessionId} to the noise corpus:`, e)
+        console.error(`Could not check session ${sessionId} for a summary vector:`, e)
       }
 
       if (reason) console.error(`Session ${sessionId} reported as useless: ${reason}`)
@@ -417,8 +418,8 @@ it by id, whether it is flagged or not.`,
             text: [
               `Session ${sessionId} flagged "useless" and hidden from search. Not deleted.`,
               learned
-                ? 'Its vector was added to the noise corpus, so similar sessions will rank lower too.'
-                : 'Note: no vector could be built for it, so it is hidden but will not affect the ranking of similar sessions.',
+                ? 'It now counts as noise for ranking, so similar sessions will rank lower too.'
+                : 'It has no summary vector yet, so it will start demoting similar sessions once it is summarized.',
               `Undo with unreportUselessSession({ sessionId: ${sessionId} }). See it anyway with search({ includeNoise: true }).`,
             ].join('\n'),
           },
@@ -429,8 +430,9 @@ it by id, whether it is flagged or not.`,
 
   server.tool(
     'unreportUselessSession',
-    `Undo reportUselessSession. Removes the "useless" tag AND takes the session
-back out of the noise corpus, so it stops dragging similar sessions down.
+    `Undo reportUselessSession. Removes the "useless" tag, which also takes the
+session back out of the noise corpus, so it stops dragging similar sessions
+down. A session sync flagged as automated stays noise either way.
 
 Agents over-flag — that is expected, and it is why this exists. If a session was
 reported as noise and it turns out to be real, undo it here; there is no cost to
@@ -446,16 +448,8 @@ tool has no business overruling that.`,
       sessionId: z.number().describe('Session ID to un-flag'),
     },
     async ({ sessionId }) => {
-      const removed = await removeTags({ sessionId }, ['useless'])
-
-      // Drop the vector even when no tag was found. The two stores can drift if
-      // a previous report half-failed, and the fix for drift is to make the
-      // undo path converge on "not noise" rather than to assume they agree.
-      try {
-        await forgetNoiseVector(sessionId)
-      } catch (e) {
-        console.error(`Could not remove session ${sessionId} from the noise corpus:`, e)
-      }
+      const removed = await removeTags({ sessionId }, [USELESS_TAG])
+      invalidateNoiseClusters()
 
       if (removed.length === 0)
         return {

@@ -86,7 +86,7 @@ describe('reporting part of a recurring family', () => {
     expect(lowered.length / lookalikes.length).toBeGreaterThanOrEqual(0.8)
   })
 
-  it.fails('scores results that only full-text search found', async () => {
+  it('scores results that only full-text search found', async () => {
     const hits = await search({ q: family.prefix, mode: 'text', limit: 30 })
     expect(hits.length).toBeGreaterThan(0)
     const unscored = hits.filter((h) => h.noiseDamping === null)
