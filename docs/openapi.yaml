@@ -407,11 +407,22 @@ paths:
                       evidence the conversation does not exist — retry shortly.
                       In `semantic` mode there is no fallback arm, so results
                       will be empty.
-                    required: [semantic, reason]
+
+                      Also non-null, with `cause: switched-off`, while the
+                      semantic switch is off (`/api/semantic`). That is a
+                      deliberate choice rather than an outage, so retrying will
+                      not help until someone switches it back on.
+                    required: [semantic, cause, reason]
                     properties:
                       semantic:
                         type: boolean
                         const: false
+                      cause:
+                        type: string
+                        enum: [unavailable, switched-off]
+                        description: |
+                          `unavailable` is transient and worth retrying;
+                          `switched-off` lasts until the switch is turned on.
                       reason:
                         type: string
                         description: The underlying failure, passed through whole.
@@ -1271,6 +1282,79 @@ paths:
                   run:
                     $ref: '#/components/schemas/SyncRun'
 
+  /api/semantic:
+    get:
+      tags: [Monitoring]
+      operationId: getSemantic
+      summary: Whether the AI pipeline is switched on
+      description: |
+        Off means no Ollama work of any kind: no embedding, no summarization,
+        no session or chunk vectors, no centroid computation, and no query
+        vector for search, which answers from full text with `degraded` set.
+        Transcripts, memories and the ingest spool keep landing in Postgres,
+        and every new row still joins the embedding queue, so nothing is lost
+        while it is off.
+
+        Unlike stand-down this is a switch, not a deadline: it stays off until
+        someone switches it on. Starting the `mcp` service with
+        `MINDMELD_SEMANTIC=off` switches it off at startup.
+      responses:
+        '200':
+          description: Current state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SemanticResponse'
+    post:
+      tags: [Monitoring]
+      operationId: setSemantic
+      summary: Switch the AI pipeline on or off
+      description: |
+        Switching off stops each worker at its next checkpoint: between
+        embedding batches, and between sessions in the summarization drain.
+
+        Switching on also starts an ingestion run (the same single-flight run
+        as `POST /api/sync`), so the queue that built up while it was off
+        starts draining now rather than at the next sync interval. `drain`
+        carries that run, or the one already in flight; it is null when
+        switching off.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled:
+                  type: boolean
+                reason:
+                  type: string
+                  description: Free text shown with the state, e.g. who switched it and why.
+      responses:
+        '200':
+          description: The stored state, and the drain a switch-on started.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SemanticResponse'
+                  - type: object
+                    required: [drain]
+                    properties:
+                      drain:
+                        type: object
+                        nullable: true
+                        required: [started, state]
+                        properties:
+                          started:
+                            type: boolean
+                            description: False when a run was already in flight.
+                          state:
+                            $ref: '#/components/schemas/SyncRun'
+        '400':
+          description: '`enabled` was missing or not a boolean.'
+
   /mcp:
     post:
       tags: [MCP]
@@ -1766,6 +1850,24 @@ components:
           description: |
             Why the last run stopped, verbatim. A GPU gate in front of Ollama
             refusing the work reads as its own 503 explanation here.
+
+    SemanticResponse:
+      type: object
+      required: [status, enabled, changedAt, reason]
+      properties:
+        status:
+          type: string
+          const: ok
+        enabled:
+          type: boolean
+        changedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null when it has never been switched.
+        reason:
+          type: string
+          nullable: true
 
     SyncRunResponse:
       type: object

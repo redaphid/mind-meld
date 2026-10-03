@@ -16,7 +16,7 @@ import { IngestPayloadSchema, ingestConversation, MissingDataClassError } from '
 import { getSessionDigest, getMessages, getMessageById } from './session.js'
 import { createMcpServer } from './tools.js'
 import { getSyncStatus } from '../sync/orchestrator.js'
-import { startSyncRun, getSyncRunState } from './sync-run.js'
+import { startSyncRun, getSyncRunState, switchSemantic } from './sync-run.js'
 import {
   pendingMessagesCount,
   pendingSessionsCount,
@@ -26,7 +26,7 @@ import { getThroughput, clampWindow } from './throughput.js'
 import { readSystemStatus } from './system-status.js'
 import { getSummaryStatus } from './summary-status.js'
 import { getEmbeddingSeries, clampSeriesWindow } from './embedding-series.js'
-import { readStandDown, standDown, resumeSync } from '../sync/stand-down.js'
+import { readStandDown, standDown, resumeSync, readSemantic, setSemantic, aiHold } from '../sync/sync-control.js'
 import { getCollectionStats } from '../db/chroma.js'
 import { config } from '../config.js'
 import { ensureEmbeddingModel } from '../embeddings/ollama.js'
@@ -736,6 +736,23 @@ app.post('/api/stand-down/resume', apiRoute('Resume sync', async (_req, res) => 
   res.json({ status: 'ok', ...(await resumeSync()) })
 }))
 
+// The semantic switch: run without the AI pipeline until someone turns it
+// back on. Unlike stand-down it has no deadline, on purpose.
+app.get('/api/semantic', apiRoute('Semantic state', async (_req, res) => {
+  res.json({ status: 'ok', ...(await readSemantic()) })
+}))
+
+// {enabled, reason}. Switching on also starts a drain of the queue that built
+// up while it was off; `drain` carries that run (or the one already running).
+app.post('/api/semantic', apiRoute('Switch semantic', async (req, res) => {
+  const { enabled, reason } = req.body ?? {}
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({ status: 'error', error: '`enabled` must be true or false' })
+    return
+  }
+  res.json({ status: 'ok', ...(await switchSemantic(enabled, typeof reason === 'string' ? reason : null)) })
+}))
+
 app.post('/api/ingest', async (req: any, res: any) => {
   try {
     const payload = IngestPayloadSchema.parse(req.body)
@@ -762,10 +779,20 @@ app.post('/api/ingest', async (req: any, res: any) => {
 const start = async () => {
   await runMigrations()
 
+  // Only `mcp` writes the startup value, and only "off". The sync image runs
+  // its binary afresh every cycle, so a worker writing it would undo a UI
+  // switch-on once an hour; and writing "on" here would undo a UI switch-off
+  // on every restart. Unset or "on" leaves the stored switch alone.
+  if (!config.semantic.enabledAtStartup) {
+    await setSemantic(false, 'MINDMELD_SEMANTIC=off at startup')
+    console.log('[MCP HTTP] Semantic switched off (MINDMELD_SEMANTIC=off): no AI work until it is switched on')
+  }
+
   // Pull models to disk if not present (does NOT load into VRAM)
-  Promise.all([ensureEmbeddingModel(), ensureSummarizeModel()])
-    .then(() => console.log('[MCP HTTP] Models verified'))
-    .catch(e => console.warn('[MCP HTTP] Model pull check failed (non-fatal):', e.message))
+  if (!(await aiHold()))
+    Promise.all([ensureEmbeddingModel(), ensureSummarizeModel()])
+      .then(() => console.log('[MCP HTTP] Models verified'))
+      .catch(e => console.warn('[MCP HTTP] Model pull check failed (non-fatal):', e.message))
 
   app.listen(MCP_PORT, () => {
     console.log(`[MCP HTTP] Mindmeld server listening on http://localhost:${MCP_PORT}`)
