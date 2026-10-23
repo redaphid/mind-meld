@@ -4,6 +4,7 @@ import { querySimilar } from '../db/chroma.js'
 import { sessionIdFromVectorId } from '../db/vector-ids.js'
 import { config } from '../config.js'
 import { getInteractiveOllamaClient } from '../embeddings/ollama.js'
+import { semanticEnabled } from '../sync/sync-control.js'
 import { subtractVectors, normalizeVector, addVectors, scaleVector } from '../utils/vector-math.js'
 import { projectPathVariants, isWindowsBackedPath } from '../utils/project-path.js'
 import { fuseRanks, type RankedList } from './rrf.js'
@@ -434,7 +435,16 @@ export type SearchDegradation = {
   // The semantic arms were skipped. In hybrid mode the results are full-text
   // only; in `semantic` mode there are no results at all.
   semantic: false
+  // `unavailable` is transient (the gate said no, Ollama timed out) and worth
+  // retrying; `switched-off` is someone's deliberate choice and is not.
+  cause: 'unavailable' | 'switched-off'
   reason: string
+}
+
+const SWITCHED_OFF: SearchDegradation = {
+  semantic: false,
+  cause: 'switched-off',
+  reason: 'semantic search is switched off in mindmeld; it stays off until someone switches it back on',
 }
 
 export type SearchOutcome = {
@@ -488,7 +498,12 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
   // resemblance to "useless" would be fighting itself. includeAutomated is the
   // same request: automated sessions are part of the noise corpus, so the
   // penalty would demote exactly what was asked for.
+  // With the semantic switch off nothing here touches a vector: no query
+  // embedding, no Chroma, and no noise penalty, which scores hits by their
+  // session vectors. Asked once, so every arm agrees.
+  const vectorsOn = await semanticEnabled()
   const wantsNoisePenalty =
+    vectorsOn &&
     params.includeNoise !== true && !tagFilter.includeTags.includes(USELESS_TAG) && !includeAutomated
   // Chroma knows nothing about data classes, so an active class filter can
   // starve the semantic arms (~70% of sessions may be filtered out after the
@@ -521,7 +536,8 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       hitBySession.set(result.session_id, { result, projectId, rawSnippet, headline })
   }
 
-  if (mode === 'semantic' || mode === 'hybrid') {
+  if ((mode === 'semantic' || mode === 'hybrid') && !vectorsOn) degraded = SWITCHED_OFF
+  else if (mode === 'semantic' || mode === 'hybrid') {
     try {
       const embedding = await composeQueryVector(
         params.query,
@@ -612,7 +628,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       // out. The reason travels with the results instead of only to the log.
       const reason = e instanceof Error ? e.message : String(e)
       console.error('Semantic search failed, returning full-text results only:', reason)
-      degraded = { semantic: false, reason }
+      degraded = { semantic: false, cause: 'unavailable', reason }
     }
   }
 
@@ -784,10 +800,14 @@ export const search = async (params: SearchParams): Promise<SearchResult[]> =>
 // conversation does not exist" — a conclusion it will then act on. So a
 // degraded search says so in the text, including when it found nothing.
 export const FULL_TEXT_ONLY = 'full-text results only'
-const degradedNote = (degraded: SearchDegradation | null) =>
-  degraded
-    ? `\n\nNOTE: ${FULL_TEXT_ONLY} — semantic search was unavailable (${degraded.reason}). Meaning-based matches are missing, so absence here is not evidence a conversation does not exist. Retry shortly for a full search.`
-    : ''
+const degradedNote = (degraded: SearchDegradation | null) => {
+  if (!degraded) return ''
+  const missing =
+    'Meaning-based matches are missing, so absence here is not evidence a conversation does not exist.'
+  return degraded.cause === 'switched-off'
+    ? `\n\nNOTE: ${FULL_TEXT_ONLY} — ${degraded.reason}. ${missing} Retrying will not help until it is switched back on.`
+    : `\n\nNOTE: ${FULL_TEXT_ONLY} — semantic search was unavailable (${degraded.reason}). ${missing} Retry shortly for a full search.`
+}
 
 // A report teaches the ranker what noise looks like, so a report on a real but
 // off-topic session demotes real work that resembles it. The note has to say

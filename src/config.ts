@@ -39,6 +39,16 @@ function getEnvBool(key: string, defaultValue: boolean): boolean {
   return value.toLowerCase() === "true" || value === "1";
 }
 
+// MINDMELD_SEMANTIC is the one switch someone types by hand to start without
+// the AI pipeline, so it is parsed strictly: a typo such as "of" must stop the
+// process at startup rather than quietly leave the GPU work running.
+function parseSemanticFlag(value: string | undefined): boolean {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (["", "on", "true", "1"].includes(normalized)) return true;
+  if (["off", "false", "0"].includes(normalized)) return false;
+  throw new Error(`MINDMELD_SEMANTIC must be "on" or "off", got "${value}"`);
+}
+
 function getEnvFloat(key: string, defaultValue: number): number {
   const value = process.env[key];
   if (!value) return defaultValue;
@@ -258,6 +268,13 @@ export const config = {
   sync: {
     intervalMinutes: getEnvInt("SYNC_INTERVAL_MINUTES", 60),
     incremental: getEnvBool("SYNC_INCREMENTAL", true),
+  },
+
+  // The semantic switch (src/sync/sync-control.ts). The live value is a row in
+  // Postgres that the UI can flip; this is what `mcp` writes there at startup
+  // when it says off, and what every process assumes if the row is unreadable.
+  semantic: {
+    enabledAtStartup: parseSemanticFlag(process.env.MINDMELD_SEMANTIC),
   },
 
   // Embedding healing

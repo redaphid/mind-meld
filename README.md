@@ -157,6 +157,7 @@ serves its own copy at `http://localhost:3847/openapi.yaml`.
 | `GET /status` | Sync state, index totals, embedding backlog, Chroma counts |
 | `GET /openapi.yaml` | This deployment's API spec |
 | `POST /api/ingest` | Push a conversation from a source Mindmeld doesn't sync itself |
+| `GET\|POST /api/semantic` | Read or flip the semantic switch. Off runs full-text only, with no AI work; on drains what queued up meanwhile |
 | `POST\|GET\|DELETE /mcp` | MCP Streamable HTTP transport |
 
 > **There is no authentication.** A Host-header allowlist (`localhost`,
@@ -178,6 +179,7 @@ the containers.
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `mindmeld` / `mindmeld` / `conversations` | Must match across every machine feeding one index |
 | `CHROMA_HOST` / `CHROMA_PORT` | `localhost` / `8001` | |
 | `MCP_HTTP_PORT` | `3847` | Host port published for the `mcp` container |
+| `MINDMELD_SEMANTIC` | `on` | `off` starts in full-text-only mode: no Ollama/GPU work and no vectors, while ingestion into Postgres continues. A startup state; the dashboard switch (`/api/semantic`) can turn it back on |
 | `OLLAMA_URL` | `http://localhost:11434` | Serves both vectorization (`bge-m3`) and generation (`qwen3`). Flash attention must be off |
 | `OLLAMA_MAX_CONCURRENCY` | `1` | Over an SSH tunnel, concurrent requests each balloon to ~30s. Raise only when Ollama is local |
 | `OLLAMA_TIMEOUT_MS` / `OLLAMA_MAX_RETRIES` | `120000` / `3` | Per-request timeout and retry count |
