@@ -303,7 +303,7 @@ const replayRow = async (row: QuarantineRow): Promise<ReplayOutcome> => {
           const line = JSON.stringify({ type: 'response_item', timestamp: raw.timestamp, payload: raw.contentJson })
           const result = parseCodexLine(line, raw.sequenceNum)
           if (result.kind !== 'message') throw new Error(`still unusable: ${result.reason}`)
-          return result.message
+          return { ...result.message, uuid: raw.uuid }
         })()
 
   await queries.insertMessage({

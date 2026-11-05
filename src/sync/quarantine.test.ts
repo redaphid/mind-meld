@@ -212,6 +212,26 @@ describe('replayQuarantine', () => {
     )
   })
 
+  it('keeps the stored external id when a codex payload carries no id of its own', async () => {
+    const stale = JSON.stringify({
+      uuid: 'ordinal:3',
+      parentUuid: null,
+      role: 'tool',
+      contentText: 'The Lair',
+      contentJson: { type: 'custom_tool_call_output', output: 'The Lair' },
+      timestamp: '2026-01-01T00:00:00Z',
+      sequenceNum: 9,
+      isSidechain: false,
+    })
+    query
+      .mockResolvedValueOnce({ rows: [row({ source: 'codex', payload_base64: encodePayload(stale) })] })
+      .mockResolvedValue({ rows: [] })
+
+    await replayQuarantine({ limit: 10 })
+
+    expect(insertMessage).toHaveBeenCalledWith(expect.objectContaining({ externalId: 'ordinal:3' }))
+  })
+
   it('keeps the row and bumps the attempt when the replay fails again', async () => {
     query.mockResolvedValueOnce({ rows: [row()] }).mockResolvedValue({ rows: [] })
     insertMessage.mockRejectedValueOnce(new Error('still broken'))
