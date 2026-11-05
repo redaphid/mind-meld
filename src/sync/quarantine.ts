@@ -296,7 +296,14 @@ const replayRow = async (row: QuarantineRow): Promise<ReplayOutcome> => {
         })()
       : (() => {
           const raw = JSON.parse(row.payload!) as ParsedMessage
-          return { ...raw, timestamp: new Date(raw.timestamp) }
+          if (row.source !== 'codex') return { ...raw, timestamp: new Date(raw.timestamp) }
+          // A Codex message's contentJson is the raw response payload, so the
+          // record can be re-parsed: a parser fix then reaches rows whose
+          // source file Codex has since pruned.
+          const line = JSON.stringify({ type: 'response_item', timestamp: raw.timestamp, payload: raw.contentJson })
+          const result = parseCodexLine(line, raw.sequenceNum)
+          if (result.kind !== 'message') throw new Error(`still unusable: ${result.reason}`)
+          return result.message
         })()
 
   await queries.insertMessage({
