@@ -30,3 +30,12 @@ tooling: no script has to be installed for them to apply.
 
 Merging to `main` does **not** deploy. CI only builds images when
 `package.json`'s `version` changes. Bump it deliberately; see CLAUDE.md.
+
+## Running sync from the host
+
+`.env` points `POSTGRES_HOST` at the compose hostname `postgres`, so a host-side
+`pnpm run sync*` fails with `getaddrinfo ENOTFOUND postgres`. Prefix it:
+`POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=5433 pnpm exec tsx src/index.ts sync --source codex --full`.
+Call the CLI directly: through `pnpm run sync:codex -- --full` the flag arrives
+after a literal `--` and is silently ignored, so the sync stays incremental.
+Add `--skip-embeddings` when you only need the parse/insert pass.
