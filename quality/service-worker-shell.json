@@ -1,5 +1,5 @@
 {
-  "version": "v22",
+  "version": "v23",
   "shell": {
     "/": "a6bdf8d63998e9fcdcde5849bf523088d24b2fab9e4f6632643aab70ed8df8ad",
     "/index.html": "a6bdf8d63998e9fcdcde5849bf523088d24b2fab9e4f6632643aab70ed8df8ad",
@@ -7,7 +7,7 @@
     "/manifest.webmanifest": "cca35e4a69fc7f34a53a8cc5391a75f8b06943a89b0166250c862809bd1bc422",
     "/vendor/preact.js": "72284e8e9079c87817145df1110f74e8a2aa040b2fc384922e18dfcb46fc1fd7",
     "/js/app.js": "cadb05a1238ef646391cfd5b503a5fb71b8344ad675659647a0c8c8ce238a836",
-    "/js/api.js": "e854b1a19fc3eb3e5aaad6f47ab4b6ebace09cc1291fc52dcc4222d2bf38d453",
+    "/js/api.js": "4a4576bddce912337a75044030c38188f1018e564b7e9526cd2846346aebf3c3",
     "/js/router.js": "9fe1eeee722352f50c4aac37a1843858594da60501c0aee23add46c9401d030a",
     "/js/ui.js": "9293df960e0ff9f559f53b341bd97c37d1ad5c8bc1c81bcd1f556b0e18f59215",
     "/js/util.js": "1b6bc18023ff13e2841cc22d7a5d86be2c8dc874bfbb984bc40064302a1f28f3",

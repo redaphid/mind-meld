@@ -13,6 +13,7 @@ import { parseSinceDate } from './since.js'
 import { resolveTagFilter, passesTagFilter, getSessionTags, type TagFilter } from './tags.js'
 import { getNoiseModel, noiseDamping, sessionVectors, NO_NOISE, USELESS_TAG, type NoiseModel } from './noise.js'
 import { LAST_ACTIVITY_SQL, lastActivity } from './last-activity.js'
+import { CURRENT_SNAPSHOT } from './snapshot-visibility.js'
 
 const PROJECT_BOOST = 0.5
 
@@ -288,8 +289,6 @@ export const findProjectsByPath = async (cwd: string) => {
   )
   return result.rows
 }
-
-const CURRENT_SNAPSHOT = 'EXISTS (SELECT 1 FROM ingest_heads ih WHERE ih.current_session_id = s.id)'
 
 type SessionRow = {
   is_current_snapshot?: boolean

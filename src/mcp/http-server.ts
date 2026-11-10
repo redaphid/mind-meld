@@ -1,3 +1,4 @@
+import { cacheStatusSnapshot } from './status-snapshot.js'
 import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
@@ -186,8 +187,7 @@ app.get('/openapi.yaml', async (req: any, res: any) => {
   }
 })
 
-app.get(['/api/status', '/status'], async (req: any, res: any) => {
-  try {
+const readStatus = cacheStatusSnapshot(async () => {
     const syncStatus = await getSyncStatus()
 
     const recentlyProcessed = await query<{
@@ -253,7 +253,7 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
 
     const latest = latestSession.rows[0]
 
-    res.json({
+    return {
       status: 'ok',
       version,
       sync: {
@@ -283,7 +283,12 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
             project: latest.project,
           }
         : null,
-    })
+    }
+})
+
+app.get(['/api/status', '/status'], async (_req: any, res: any) => {
+  try {
+    res.json(await readStatus())
   } catch (error) {
     console.error('[API] Status error:', error)
     res.status(500).json({
