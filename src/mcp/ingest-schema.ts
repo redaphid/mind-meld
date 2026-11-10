@@ -5,6 +5,7 @@
 // sides — the same rule that put the pending-count predicate in
 // src/embeddings/pending.ts.
 import { z } from 'zod'
+import { normalizeText } from '../utils/text-encoding.js'
 
 const IngestMessageSchema = z.object({
   externalId: z.string(),
@@ -16,6 +17,8 @@ const IngestMessageSchema = z.object({
 })
 
 export const IngestPayloadSchema = z.object({
+  mode: z.enum(['append', 'snapshot']).optional(),
+  snapshot: z.object({ revision: z.number().int().positive().safe(), complete: z.literal(true) }).optional(),
   source: z.string(),
   sourceDisplayName: z.string().optional(),
   // Classification for the source ('coding' | 'personal' | 'meetings' | ...,
@@ -50,6 +53,33 @@ export const IngestPayloadSchema = z.object({
     endedAt: z.string().transform(s => new Date(s)).optional(),
   }),
   messages: z.array(IngestMessageSchema),
+}).superRefine((payload, context) => {
+  const reject = (message: string) => context.addIssue({ code: 'custom', message })
+  if (payload.mode !== 'snapshot') {
+    if (payload.snapshot) reject('snapshot requires mode: snapshot')
+    return
+  }
+  if (!payload.snapshot) reject('snapshot requires a positive revision and complete: true')
+  if (!payload.dataClass) reject('snapshot requires dataClass')
+  const ids = new Set<string>()
+  const sequences = new Set<number>()
+  let previousTime = -Infinity
+  let previousSequence = -Infinity
+  for (const message of payload.messages) {
+    const id = normalizeText(message.externalId)
+    if (!id || ids.has(id)) reject('snapshot messages require unique nonempty externalIds')
+    ids.add(id)
+    if (!Number.isInteger(message.sequenceNum) || message.sequenceNum < 0 || message.sequenceNum > 2147483647 || sequences.has(message.sequenceNum))
+      reject('snapshot messages require unique nonnegative integer sequenceNums')
+    sequences.add(message.sequenceNum)
+    const time = message.timestamp.getTime()
+    if (!Number.isFinite(time) || time < previousTime || message.sequenceNum <= previousSequence)
+      reject('snapshot messages must be chronological and in sequence order')
+    previousTime = time
+    previousSequence = message.sequenceNum
+  }
+  if (!Number.isFinite(payload.session.startedAt.getTime()) || (payload.session.endedAt && !Number.isFinite(payload.session.endedAt.getTime())))
+    reject('snapshot session dates must be valid')
 })
 
 export type IngestPayload = z.infer<typeof IngestPayloadSchema>
