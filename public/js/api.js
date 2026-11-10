@@ -12,7 +12,7 @@ const buildUrl = (path, params = {}) => {
 
 export const apiGet = async (path, params, signal) => {
   const res = await fetch(buildUrl(path, params), {
-    signal,
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000),
     headers: { accept: 'application/json' },
   })
   const text = await res.text()
@@ -35,6 +35,7 @@ export const apiGet = async (path, params, signal) => {
 export const useApi = (path, params, key) => {
   const [state, setState] = useState({ data: null, error: null, loading: !!path })
   const [nonce, setNonce] = useState(0)
+  const pendingRef = useRef(null)
   const paramsRef = useRef(params)
   paramsRef.current = params
 
@@ -42,10 +43,12 @@ export const useApi = (path, params, key) => {
 
   useEffect(() => {
     if (!path) {
+      pendingRef.current = null
       setState({ data: null, error: null, loading: false })
       return
     }
     const controller = new AbortController()
+    pendingRef.current = controller
     setState(s => ({ ...s, loading: true, error: null }))
 
     apiGet(path, paramsRef.current, controller.signal)
@@ -59,10 +62,11 @@ export const useApi = (path, params, key) => {
         // error, because there is nothing else it could show.
         setState(s => ({ data: s.data, error: err.message, loading: false }))
       })
+      .finally(() => { if (pendingRef.current === controller) pendingRef.current = null })
 
     return () => controller.abort()
   }, [serialised, nonce])
 
-  const reload = useCallback(() => setNonce(n => n + 1), [])
+  const reload = useCallback(() => { if (!pendingRef.current) setNonce(n => n + 1) }, [])
   return { ...state, reload }
 }
