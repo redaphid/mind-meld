@@ -1,3 +1,4 @@
+import { ingestSnapshot, SnapshotConflictError } from './ingest-snapshot.js'
 import { queries } from '../db/postgres.js'
 import { listKnownDataClasses } from './search.js'
 import { IngestPayloadSchema, type IngestPayload } from './ingest-schema.js'
@@ -38,6 +39,12 @@ export const ingestConversation = async (payload: IngestPayload) => {
     payload.sourceDisplayName,
     payload.dataClass
   )
+
+  if (payload.mode === 'snapshot' && source.data_class !== payload.dataClass)
+    throw new SnapshotConflictError('Snapshot dataClass must match the stored source class')
+
+  if (payload.mode === 'snapshot')
+    return { sourceId: source.id, dataClass: source.data_class, ...await ingestSnapshot(source.id, payload) }
 
   const projectId = await queries.upsertProject(
     source.id,
