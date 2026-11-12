@@ -13,6 +13,7 @@ import { persistSessionChunks, SessionMessage } from "./chunks.js";
 import { embeddableMessages, embeddableSessions } from "./pending.js";
 import { classifyNoise } from "./classify.js";
 import { shouldStandDown, STAND_DOWN_NOTICE } from "../sync/stand-down.js";
+import { readGate, type GateStatus } from "../mcp/system-status.js";
 
 export interface BatchEmbeddingStats {
   processed: number;
@@ -131,6 +132,24 @@ async function getMessagesToEmbed(limit: number, maxChars?: number): Promise<Get
 // the unsafe one — it burns the GPU budget, floods the logs, and wedges the UI.
 export const MAX_STALLED_BATCHES = 3;
 
+// A closed GPU gate is the proxy saying "yes, later", not a failure, so a run
+// waits it out instead of spending its stall budget. Bounded, because the run
+// holds the single-flight lock while it waits. Matches the scheduled sync's
+// 50-minute allowance in sync-run.ts.
+export const GATE_HOLD_BUDGET_MS = 50 * 60 * 1000;
+const GATE_POLL_MAX_MS = 60_000;
+const GATE_POLL_DEFAULT_MS = 30_000;
+
+// Wake when the gate says its quiet period ends, never sooner than the retry
+// delay and never later than a minute, since the gate re-reads the GPU each time.
+const gateWaitMs = (gate: GateStatus) => {
+  const remainingMs =
+    gate.requiredQuietSeconds === null || gate.quietSeconds === null
+      ? GATE_POLL_DEFAULT_MS
+      : Math.max(0, gate.requiredQuietSeconds - gate.quietSeconds) * 1000;
+  return Math.min(GATE_POLL_MAX_MS, Math.max(config.ollama.retryDelayMs, remainingMs));
+};
+
 // Generate embeddings for pending messages
 // Checks Chroma directly to determine what needs embedding (missing or outdated char count)
 export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> {
@@ -165,6 +184,7 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
   // Consecutive batches that changed nothing, and why the last one failed.
   let stalledBatches = 0;
   let lastStallReason = "";
+  let stalledSince: number | null = null;
 
   for (;;) {
     // The stand-down checkpoint for the fast phase. Between batches rather than
@@ -360,6 +380,16 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
     }
 
     if (stats.processed + stats.skipped === drainedBefore) {
+      const gate = await readGate(config.ollama.url);
+      stalledSince ??= Date.now();
+      if (gate.open === false && Date.now() - stalledSince < GATE_HOLD_BUDGET_MS) {
+        const waitMs = gateWaitMs(gate);
+        console.warn(
+          `GPU gate closed (${gate.holdReason ?? "no reason given"}), waiting ${Math.round(waitMs / 1000)}s for it to open...`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        continue;
+      }
       stalledBatches++;
       if (stalledBatches >= MAX_STALLED_BATCHES) {
         stats.stalled =
@@ -381,6 +411,7 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
     // be reported against a later, unrelated stall.
     stalledBatches = 0;
     lastStallReason = "";
+    stalledSince = null;
 
     // Small delay to avoid overwhelming Ollama
     await new Promise((resolve) => setTimeout(resolve, 100));

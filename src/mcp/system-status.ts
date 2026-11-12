@@ -96,7 +96,7 @@ export const parseGate = (g: any): GateStatus => ({
   status: g?.status ?? null,
 })
 
-const readGate = async (baseUrl: string): Promise<GateStatus> => {
+export const readGate = async (baseUrl: string): Promise<GateStatus> => {
   try {
     const res = await withTimeout(`${baseUrl}/_gate`)
     // A plain Ollama 404s this path. Not an error — just no gate.
