@@ -12,6 +12,7 @@ import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
 import { searchWithDiagnostics, findProjectsByPath, UnknownDataClassError } from './search.js'
+import { SnapshotConflictError } from './ingest-snapshot.js'
 import { IngestPayloadSchema, ingestConversation, MissingDataClassError } from './ingest.js'
 import { getSessionDigest, getMessages, getMessageById } from './session.js'
 import { createMcpServer } from './tools.js'
@@ -747,7 +748,7 @@ app.post('/api/ingest', async (req: any, res: any) => {
       return
     }
     // The caller's mistake, not ours: creating a source demands a dataClass.
-    if (error instanceof MissingDataClassError) {
+    if (error instanceof MissingDataClassError || error instanceof SnapshotConflictError) {
       res.status(400).json({ success: false, error: error.message })
       return
     }

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, onTestFinished, vi } from 'vitest'
 
-// The embedding queue is global, ordered by message id, and nothing claims a
+// The embedding queue is global, ordered newest first, and nothing claims a
 // row. That makes "a batch that embedded nothing" indistinguishable from "the
 // batch before it" — the next select returns the same rows. These tests are
 // about the loop's stopping conditions only, so Postgres, Chroma, the GPU and
@@ -367,5 +367,17 @@ describe('updateAggregateEmbeddings', () => {
 
       expect(storedSummaries()).toEqual([])
     })
+  })
+})
+
+describe('when a backfill competes with recent messages', () => {
+  let selection: string
+  beforeEach(async () => {
+    servePending([])
+    await generatePendingEmbeddings()
+    selection = queryMock.mock.calls.find(([sql]) => sql.includes('SELECT m.id, m.session_id'))?.[0]
+  })
+  it('selects by newest message time before insertion id', () => {
+    expect(selection).toMatch(/ORDER BY m\.timestamp DESC NULLS LAST, m\.id DESC/)
   })
 })

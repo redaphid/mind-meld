@@ -290,7 +290,10 @@ export const findProjectsByPath = async (cwd: string) => {
   return result.rows
 }
 
+const CURRENT_SNAPSHOT = 'EXISTS (SELECT 1 FROM ingest_heads ih WHERE ih.current_session_id = s.id)'
+
 type SessionRow = {
+  is_current_snapshot?: boolean
   id: number
   title: string | null
   summary: string | null
@@ -308,7 +311,7 @@ type SessionRow = {
 const AUTOMATED_FILTER = `($2::boolean OR s.is_automated = false)`
 
 const SESSION_QUERY = `
-  SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
+  SELECT s.id, s.title, s.summary, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
          src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
          s.started_at, s.ended_at, s.message_count, p.id as project_id
   FROM sessions s
@@ -328,7 +331,7 @@ type MessageAnchoredRow = SessionRow & { message_id: number; content_text: strin
 
 const getSessionByMessageId = async (messageId: number, includeAutomated: boolean) => {
   const result = await query<MessageAnchoredRow>(
-    `SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
+    `SELECT s.id, s.title, s.summary, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
             src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
             s.started_at, s.ended_at, s.message_count, p.id as project_id,
             m.id as message_id, m.content_text
@@ -346,7 +349,7 @@ type ChunkAnchoredRow = SessionRow & { chunk_index: number; chunk_summary: strin
 
 const getSessionByChunkId = async (chunkId: number, includeAutomated: boolean) => {
   const result = await query<ChunkAnchoredRow>(
-    `SELECT s.id, s.title, s.summary, p.name as project_name, p.path as project_path,
+    `SELECT s.id, s.title, s.summary, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
             src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
             s.started_at, s.ended_at, s.message_count, p.id as project_id,
             c.chunk_index, c.summary as chunk_summary
@@ -369,7 +372,7 @@ const resolveCentroids = async (table: 'sessions' | 'projects', weightedIds: Wei
     if (isNaN(numId)) continue
 
     const result = await query<{ centroid_vector: string | null }>(
-      `SELECT centroid_vector FROM ${table} WHERE id = $1 AND centroid_vector IS NOT NULL`,
+      `SELECT centroid_vector FROM ${table} WHERE id = $1 AND centroid_vector IS NOT NULL ${table === 'sessions' ? 'AND deleted_at IS NULL' : ''}`,
       [numId]
     )
 
@@ -413,7 +416,7 @@ const passesFilters = (
   tagFilter: TagFilter,
   messageId?: number
 ) => {
-  if (!params.includeUnsummarized && session.summary === null &&
+  if (!params.includeUnsummarized && session.summary === null && !session.is_current_snapshot &&
       !(params.includeUnsummarized === undefined && session.data_class === 'slack')) return false
   if (dataClasses && !dataClasses.includes(session.data_class)) return false
   if (params.source && session.source_name !== params.source) return false
@@ -633,8 +636,8 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     // Same rule as the semantic arms, applied in SQL: a session with no summary
     // is not surfaced unless the caller asks for one.
     if (!params.includeUnsummarized) conditions.push(params.includeUnsummarized === false
-      ? `s.summary IS NOT NULL`
-      : `(s.summary IS NOT NULL OR COALESCE(p.data_class, src.data_class) = 'slack')`)
+      ? `(s.summary IS NOT NULL OR ${CURRENT_SNAPSHOT})`
+      : `(s.summary IS NOT NULL OR ${CURRENT_SNAPSHOT} OR COALESCE(p.data_class, src.data_class) = 'slack')`)
     const values: unknown[] = [queryUrl?.href ?? params.query, params.source ?? null, sinceDate, includeAutomated]
     let nextParam = 5
 

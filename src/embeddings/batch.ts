@@ -79,7 +79,7 @@ async function getMessagesToEmbed(limit: number, maxChars?: number): Promise<Get
             p.path as project_path, src.name as source_name, m.model,
             COALESCE(p.data_class, src.data_class) as data_class
      ${embeddable.sql}
-     ORDER BY m.timestamp DESC, m.id DESC
+     ORDER BY m.timestamp DESC NULLS LAST, m.id DESC
      LIMIT $1`,
     [overfetch, ...embeddable.params],
   );
