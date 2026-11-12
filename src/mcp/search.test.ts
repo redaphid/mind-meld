@@ -77,6 +77,9 @@ beforeEach(() => {
 })
 
 describe('resolveDataClasses', () => {
+  it('searches all classes for a pasted permalink', () => {
+    expect(resolveDataClasses({ query: 'https://example.slack.com/archives/C123/p1234567890123456' })).toBeNull()
+  })
   it('defaults to coding only', () => {
     expect(resolveDataClasses({})).toEqual(['coding'])
   })
@@ -118,6 +121,20 @@ describe('resolveDataClasses', () => {
 })
 
 describe('search default data-class filter (semantic arm)', () => {
+  it('finds an unsummarized Slack thread without a backlog flag', async () => {
+    query.mockImplementation(async (sql: string) => sql.includes('s.id = $1')
+      ? rows(sessionRow({ summary: null, source_name: 'slack:workspace', data_class: 'slack' })) : rows())
+    querySimilar.mockResolvedValue({ ids: [['session-1']], distances: [[0.1]] })
+    const results = await search({ query: 'prototype', mode: 'semantic', source: 'slack:workspace' })
+    expect(results.map(result => result.session_id)).toEqual([1])
+  })
+
+  it('searches stored permalinks without an embedding or summary', async () => {
+    query.mockResolvedValue(rows())
+    await search({ query: 'https://example.slack.com/archives/C123/p1234567890123456', mode: 'text' })
+    const statement = query.mock.calls.find(([sql]) => sql.includes('WITH ranked_messages'))?.[0]
+    expect(statement).toContain("m.content_json->>'permalink'")
+  })
   it('excludes non-coding sessions by default', async () => {
     mockDbForSemantic()
     mockChromaSessionsOnly()
