@@ -66,13 +66,14 @@ export type SearchParams = {
 // Values are trimmed and lowercased — the vocabulary is lowercase, and a
 // miscased value should match rather than silently return nothing.
 export const resolveDataClasses = (
-  params: Pick<SearchParams, 'dataClass' | 'source'>
+  params: Pick<SearchParams, 'dataClass' | 'source' | 'query'>
 ): string[] | null => {
   const cleaned = (params.dataClass ?? [])
     .map((c) => c.trim().toLowerCase())
     .filter((c) => c.length > 0)
   if (cleaned.length > 0) return cleaned.includes('*') ? null : cleaned
   if (params.source) return null
+  if (params.query && /^https?:\/\//i.test(params.query.trim()) && URL.canParse(params.query.trim())) return null
   return ['coding']
 }
 
@@ -460,6 +461,8 @@ const scoringVectors = async (sessionIds: number[]): Promise<Map<number, number[
 export const searchWithDiagnostics = async (params: SearchParams): Promise<SearchOutcome> => {
   const limit = params.limit ?? 8
   const mode = params.mode ?? 'hybrid'
+  const queryUrl = params.query && /^https?:\/\//i.test(params.query.trim()) && URL.canParse(params.query.trim())
+    ? new URL(params.query.trim()) : null
   const includeAutomated = params.includeAutomated ?? false
 
   if (
@@ -524,7 +527,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       hitBySession.set(result.session_id, { result, projectId, rawSnippet, headline })
   }
 
-  if (mode === 'semantic' || mode === 'hybrid') {
+  if (!queryUrl && (mode === 'semantic' || mode === 'hybrid')) {
     try {
       const embedding = await composeQueryVector(
         params.query,
@@ -619,16 +622,18 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     }
   }
 
-  if ((mode === 'text' || mode === 'hybrid') && params.query) {
+  if ((mode === 'text' || mode === 'hybrid' || queryUrl) && params.query) {
     const conditions = [
-      `to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $1)`,
+      queryUrl
+        ? `(split_part(m.content_json->>'permalink', '?', 1) = split_part($1, '?', 1) OR (to_tsvector('english', m.content_text) @@ plainto_tsquery('english', $1) AND strpos(m.content_text, $1) > 0))`
+        : `to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $1)`,
       `s.deleted_at IS NULL`,
       `($2::text IS NULL OR src.name = $2)`,
       `($3::timestamptz IS NULL OR ${LAST_ACTIVITY_SQL} >= $3)`,
       `($4::boolean OR s.is_automated = false)`,
     ]
     if (!params.includeUnsummarized) conditions.push(`(s.summary IS NOT NULL OR ${CURRENT_SNAPSHOT})`)
-    const values: unknown[] = [params.query, params.source ?? null, sinceDate, includeAutomated]
+    const values: unknown[] = [queryUrl?.href ?? params.query, params.source ?? null, sinceDate, includeAutomated]
     let nextParam = 5
 
     if (params.projectOnly && projectIds.length > 0) {

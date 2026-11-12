@@ -77,6 +77,13 @@ beforeEach(() => {
 })
 
 describe('resolveDataClasses', () => {
+  it('searches all classes for a pasted permalink', () => {
+    expect(resolveDataClasses({ query: 'https://example.slack.com/archives/C123/p1234567890123456' })).toBeNull()
+  })
+
+  it('preserves explicit class filters for a pasted permalink', () => {
+    expect(resolveDataClasses({ query: 'https://example.slack.com/archives/C123/p1234567890123456', dataClass: ['coding'] })).toEqual(['coding'])
+  })
   it('defaults to coding only', () => {
     expect(resolveDataClasses({})).toEqual(['coding'])
   })
@@ -118,6 +125,14 @@ describe('resolveDataClasses', () => {
 })
 
 describe('search default data-class filter (semantic arm)', () => {
+  it('retrieves a permalink hit without requesting an embedding', async () => {
+    query.mockImplementation(async (sql: string) => sql.includes('WITH ranked_messages')
+      ? rows({ ...sessionRow({ source_name: 'slack:workspace', data_class: 'slack', summary: null }), session_id: 1, message_id: 42, rank: 1, headline: 'The clockwork squid has landed' })
+      : rows())
+    const results = await search({ query: 'https://example.slack.com/archives/C123/p1234567890123456' })
+    expect(results.map(result => result.session_id)).toEqual([1])
+    expect(embed).not.toHaveBeenCalled()
+  })
   it('excludes non-coding sessions by default', async () => {
     mockDbForSemantic()
     mockChromaSessionsOnly()
