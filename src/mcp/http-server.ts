@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
 import { listProjects, listSessions, getActivity } from './browse.js'
-import { toSearchHit, toDigest, toMessages, toMessage } from './rest.js'
+import { toSearchResponse, toDigest, toMessages, toMessage } from './rest.js'
 import { listQuarantine, replayQuarantine, countPending } from '../sync/quarantine.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { hostHeaderValidation } from '@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js'
@@ -11,7 +11,16 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
-import { searchWithDiagnostics, findProjectsByPath, UnknownDataClassError } from './search.js'
+import { searchWithDiagnostics, findProjectsByPath, UnknownDataClassError, DEFAULT_SEARCH_MODE } from './search.js'
+import {
+  searchLog,
+  restCaller,
+  mintListHandle,
+  parseListHandle,
+  expireRawRequests,
+  type FollowUpTool,
+  type FollowUpTarget,
+} from './search-log.js'
 import { SnapshotConflictError } from './ingest-snapshot.js'
 import { IngestPayloadSchema, ingestConversation, MissingDataClassError } from './ingest.js'
 import { getSessionDigest, getMessages, getMessageById } from './session.js'
@@ -45,7 +54,7 @@ const { version } = require('../../package.json')
 // The MCP tool surface is shared verbatim with the stdio transport
 // (src/mcp/server.ts) - see src/mcp/tools.ts. Declaring the tools here as
 // well is what let the two drift, so this transport declares none of its own.
-const getServer = createMcpServer
+const getServer = () => createMcpServer('mcp-http')
 
 const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3000
 
@@ -274,6 +283,8 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
       },
       vectorisedMessages: parseInt(vectorisedMessages.rows[0]?.count ?? '0', 10),
       quarantined,
+      // Counters only. Non-zero failed or dropped means usage stats undercount.
+      searchLog: searchLog.stats(),
       chroma: { collections: chromaCollections },
       latestSession: latest
         ? {
@@ -496,6 +507,19 @@ const listParam = (raw: unknown): string[] | undefined => {
 
 // Search over the same index the MCP tool uses — same fusion, same filters —
 // returning the structured results rather than the MCP text rendering.
+// Opens from REST name their list with ?list=, and their caller with the
+// X-Mindmeld-Caller header (src/mcp/search-log.ts).
+const logRestFollowUp = (req: any, tool: FollowUpTool, target: FollowUpTarget) =>
+  searchLog.record({
+    kind: 'follow-up',
+    at: new Date(),
+    caller: restCaller((name) => req.get(name)),
+    tool,
+    request: { ...req.query, ...req.params },
+    target,
+    list: parseListHandle(req.query.list),
+  })
+
 app.get('/api/search', apiRoute('Search', async (req, res) => {
   const q = typeof req.query.q === 'string' ? req.query.q : undefined
   const mode = req.query.mode as 'semantic' | 'text' | 'hybrid' | undefined
@@ -504,6 +528,19 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
     res.status(400).json({ status: 'error', error: 'q is required' })
     return
   }
+
+  const list = mintListHandle()
+  const resolvedMode = mode && ['semantic', 'text', 'hybrid'].includes(mode) ? mode : DEFAULT_SEARCH_MODE
+  const logged = {
+    kind: 'search' as const,
+    at: new Date(),
+    caller: restCaller((name) => req.get(name)),
+    tool: 'rest:search' as const,
+    list,
+    request: { ...req.query },
+    mode: resolvedMode,
+  }
+  const started = performance.now()
 
   const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : undefined
 
@@ -516,7 +553,7 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
     outcome = await searchWithDiagnostics({
       query: q,
       negativeQuery: typeof req.query.not === 'string' ? req.query.not : undefined,
-      mode: mode && ['semantic', 'text', 'hybrid'].includes(mode) ? mode : 'hybrid',
+      mode: resolvedMode,
       limit: Math.min(intParam(req.query.limit, 20), 100),
       source: typeof req.query.source === 'string' ? req.query.source : undefined,
       since: typeof req.query.since === 'string' ? req.query.since : undefined,
@@ -541,6 +578,7 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
       includeNoise: boolParam(req.query.includeNoise),
     })
   } catch (error) {
+    searchLog.record({ ...logged, totalMs: performance.now() - started, error: (error as Error).name })
     // A typo'd class is a caller mistake, not a server fault — 400, with the
     // valid vocabulary in the message.
     if (error instanceof UnknownDataClassError) {
@@ -551,20 +589,9 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
   }
 
   const projectIds = cwd ? (await findProjectsByPath(cwd)).map(p => p.id) : []
+  searchLog.record({ ...logged, totalMs: performance.now() - started, results: outcome.results, degraded: outcome.degraded })
 
-  res.json({
-    status: 'ok',
-    query: q,
-    mode: mode ?? 'hybrid',
-    count: outcome.results.length,
-    projectIds,
-    // Additive and null on a healthy search, so nothing that ignores it breaks.
-    // Non-null means the vector arms were skipped and these results came from
-    // full text alone — the difference between "no such conversation" and "the
-    // GPU gate was shut", which are indistinguishable from the results list.
-    degraded: outcome.degraded,
-    results: outcome.results.map(toSearchHit),
-  })
+  res.json(toSearchResponse({ query: q, list, mode: resolvedMode, projectIds, outcome }))
 }))
 
 app.get('/api/projects', apiRoute('Projects', async (_req, res) => {
@@ -587,6 +614,7 @@ app.get('/api/sessions', apiRoute('Sessions', async (req, res) => {
 }))
 
 app.get('/api/sessions/:id', apiRoute('Session digest', async (req, res) => {
+  logRestFollowUp(req, 'rest:session', { sessionId: intParam(req.params.id, 0) })
   const digest = await getSessionDigest({
     sessionId: intParam(req.params.id, 0),
     chunkOffset: intParam(req.query.chunkOffset, 0),
@@ -600,6 +628,10 @@ app.get('/api/sessions/:id', apiRoute('Session digest', async (req, res) => {
 }))
 
 app.get('/api/sessions/:id/messages', apiRoute('Session messages', async (req, res) => {
+  logRestFollowUp(req, 'rest:messages', {
+    sessionId: intParam(req.params.id, 0),
+    ...(req.query.startMessageId ? { messageId: intParam(req.query.startMessageId, 0) } : {}),
+  })
   const result = await getMessages({
     sessionId: intParam(req.params.id, 0),
     offset: req.query.startMessageId ? undefined : Math.max(intParam(req.query.offset, 0), 0),
@@ -617,6 +649,7 @@ app.get('/api/sessions/:id/messages', apiRoute('Session messages', async (req, r
 
 // The escape hatch for a message that came back TRUNCATED: one message, whole.
 app.get('/api/messages/:id', apiRoute('Message', async (req, res) => {
+  logRestFollowUp(req, 'rest:message', { messageId: intParam(req.params.id, 0) })
   const message = await getMessageById(intParam(req.params.id, 0))
   if (!message) {
     res.status(404).json({ status: 'error', error: 'Message not found' })
@@ -777,8 +810,16 @@ app.post('/api/ingest', async (req: any, res: any) => {
   }
 })
 
+// The query text in the search log expires; the rest of the row stays.
+const expireSearchLog = () =>
+  expireRawRequests()
+    .then((n) => n > 0 && console.log(`[search-log] nulled query text on ${n} rows past retention`))
+    .catch((e) => console.error('[search-log] retention pass failed:', (e as { code?: string }).code ?? 'unknown'))
+
 const start = async () => {
   await runMigrations(config.postgres)
+  void expireSearchLog()
+  setInterval(expireSearchLog, 24 * 60 * 60 * 1000).unref()
 
   // Only `mcp` writes the startup value, and only "off". The sync image runs
   // its binary afresh every cycle, so a worker writing it would undo a UI

@@ -489,6 +489,13 @@ describe('formatSearchResults', () => {
     expect(formatSearchResults([])).toBe('No matching conversations found.')
   })
 
+  it('names the list handle on the first line, and only when there are results', () => {
+    expect(formatSearchResults([result()], [], null, 'Lk3x9qa').split('\n')[0]).toBe(
+      'Found 1 relevant conversations (list Lk3x9qa):'
+    )
+    expect(formatSearchResults([], [], null, 'Lk3x9qa')).not.toContain('Lk3x9qa')
+  })
+
   it('renders source and data class together', () => {
     const text = formatSearchResults([result()])
     expect(text).toContain('(claude_code, coding)')

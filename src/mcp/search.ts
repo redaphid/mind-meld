@@ -130,6 +130,8 @@ const assertKnownDataClasses = async (dataClasses: string[]) => {
 
 export type MatchedTier = 'session' | 'chunk' | 'message'
 
+export const DEFAULT_SEARCH_MODE = 'hybrid' satisfies SearchParams['mode']
+
 export type SearchCursor = { chunk_index?: number; message_id?: number }
 
 export type SearchResult = {
@@ -469,7 +471,7 @@ const scoringVectors = async (sessionIds: number[]): Promise<Map<number, number[
 
 export const searchWithDiagnostics = async (params: SearchParams): Promise<SearchOutcome> => {
   const limit = params.limit ?? 8
-  const mode = params.mode ?? 'hybrid'
+  const mode = params.mode ?? DEFAULT_SEARCH_MODE
   const includeAutomated = params.includeAutomated ?? false
 
   if (
@@ -824,7 +826,8 @@ NEVER report a session just because it is off-topic for this query: a report tea
 export const formatSearchResults = (
   results: SearchResult[],
   projectIds: number[] = [],
-  degraded: SearchDegradation | null = null
+  degraded: SearchDegradation | null = null,
+  list: string | null = null
 ) => {
   if (results.length === 0) return `No matching conversations found.${degradedNote(degraded)}`
 
@@ -854,5 +857,6 @@ export const formatSearchResults = (
     })
     .join('\n\n')
 
-  return `Found ${results.length} relevant conversations:\n\n${output}${noiseNote(results)}${degradedNote(degraded)}`
+  const handle = list ? ` (list ${list})` : ''
+  return `Found ${results.length} relevant conversations${handle}:\n\n${output}${noiseNote(results)}${degradedNote(degraded)}`
 }

@@ -4,7 +4,7 @@
 // tools; these mappers are the single seam between the two, so the HTTP
 // contract can stay stable while the query layer evolves.
 
-import type { SearchResult } from './search.js'
+import type { SearchResult, SearchOutcome } from './search.js'
 import type { TitleSource } from './title.js'
 import type { SessionDigest, MessagesResult, RenderedMessage, SessionMessage } from './session.js'
 
@@ -57,6 +57,35 @@ export const toSearchHit = (r: SearchResult): SearchHitDto => ({
       : r.cursor?.message_id != null
         ? { messageId: r.cursor.message_id }
         : null,
+})
+
+// GET /api/search. `list` is the handle a follow-up passes back as ?list= so
+// the search log can tie what was opened to what was shown.
+export const toSearchResponse = ({
+  query,
+  list,
+  mode,
+  projectIds,
+  outcome,
+}: {
+  query: string
+  list: string
+  mode: string
+  projectIds: number[]
+  outcome: SearchOutcome
+}) => ({
+  status: 'ok' as const,
+  query,
+  list,
+  mode,
+  count: outcome.results.length,
+  projectIds,
+  // Additive and null on a healthy search, so nothing that ignores it breaks.
+  // Non-null means the vector arms were skipped and these results came from
+  // full text alone — the difference between "no such conversation" and "the
+  // GPU gate was shut", which are indistinguishable from the results list.
+  degraded: outcome.degraded,
+  results: outcome.results.map(toSearchHit),
 })
 
 export type ChunkDto = {
