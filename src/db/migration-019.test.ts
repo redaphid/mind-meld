@@ -11,10 +11,11 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { exec } from 'node:child_process'
 import { promisify } from 'node:util'
 import { readdir } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import pg from 'pg'
+import { applyMigration } from './migrations.js'
 
 const execAsync = promisify(exec)
 const INIT_DB = resolve(dirname(fileURLToPath(import.meta.url)), '../../init-db')
@@ -56,17 +57,9 @@ const hasPsqlBinary = async (): Promise<boolean> => {
 
 const dbAvailable = (await canReachPostgres()) && (await hasPsqlBinary())
 
-// No ON_ERROR_STOP flag here — src/db/migrations.ts does not pass one either,
-// and the historical chain only applies under that leniency (001's
-// search_messages has a syntax error that 003 repairs). 019 protects itself:
-// the file starts with `\set ON_ERROR_STOP on`, so ITS failures abort psql
-// with a nonzero exit wherever it runs.
-const psqlFile = async (database: string, file: string) => {
-  await execAsync(
-    `psql -h ${PG.host} -p ${PG.port} -U ${PG.user} -d ${database} -f "${file}"`,
-    { env: { ...process.env, PGPASSWORD: PG.password } }
-  )
-}
+// Applied through the runner's own psql invocation, so these tests exercise
+// exactly what mcp runs at startup: ON_ERROR_STOP, one transaction per file.
+const psqlFile = (database: string, file: string) => applyMigration({ ...PG, database }, INIT_DB, basename(file))
 
 let admin: pg.Client
 let db: pg.Client
