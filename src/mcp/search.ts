@@ -1,4 +1,5 @@
 import assert from 'node:assert'
+import type pg from 'pg'
 import { query } from '../db/postgres.js'
 import { querySimilar } from '../db/chroma.js'
 import { sessionIdFromVectorId } from '../db/vector-ids.js'
@@ -318,18 +319,32 @@ const SESSION_QUERY = `
   JOIN sources src ON p.source_id = src.id
   WHERE s.deleted_at IS NULL`
 
-const getSessionById = async (sessionId: number, includeAutomated: boolean) => {
-  const result = await query<SessionRow>(
-    `${SESSION_QUERY} AND ${AUTOMATED_FILTER} AND s.id = $1`,
-    [sessionId, includeAutomated]
-  )
-  return result.rows[0] ?? null
+// One query per tier for every hit Chroma returned, keyed by the hit's id so
+// the caller can walk the hits in distance order. Keys are strings because pg
+// returns BIGINT ids as strings; the rows themselves are passed through as-is.
+const hydrate = async <R extends pg.QueryResultRow>(
+  sql: string,
+  ids: number[],
+  includeAutomated: boolean,
+  idOf: (row: R) => number | string
+): Promise<Map<string, R>> => {
+  if (ids.length === 0) return new Map()
+  const result = await query<R>(sql, [ids, includeAutomated])
+  return new Map(result.rows.map((row) => [String(idOf(row)), row]))
 }
+
+const getSessionsByIds = (sessionIds: number[], includeAutomated: boolean) =>
+  hydrate<SessionRow>(
+    `${SESSION_QUERY} AND ${AUTOMATED_FILTER} AND s.id = ANY($1::int[])`,
+    sessionIds,
+    includeAutomated,
+    (row) => row.id
+  )
 
 type MessageAnchoredRow = SessionRow & { message_id: number; content_text: string | null }
 
-const getSessionByMessageId = async (messageId: number, includeAutomated: boolean) => {
-  const result = await query<MessageAnchoredRow>(
+const getSessionsByMessageIds = (messageIds: number[], includeAutomated: boolean) =>
+  hydrate<MessageAnchoredRow>(
     `SELECT s.id, s.title, s.summary, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
             src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
             s.started_at, s.ended_at, s.message_count, p.id as project_id,
@@ -338,29 +353,29 @@ const getSessionByMessageId = async (messageId: number, includeAutomated: boolea
      JOIN sessions s ON m.session_id = s.id
      JOIN projects p ON s.project_id = p.id
      JOIN sources src ON p.source_id = src.id
-     WHERE m.id = $1 AND s.deleted_at IS NULL AND ${AUTOMATED_FILTER}`,
-    [messageId, includeAutomated]
+     WHERE m.id = ANY($1::bigint[]) AND s.deleted_at IS NULL AND ${AUTOMATED_FILTER}`,
+    messageIds,
+    includeAutomated,
+    (row) => row.message_id
   )
-  return result.rows[0] ?? null
-}
 
-type ChunkAnchoredRow = SessionRow & { chunk_index: number; chunk_summary: string }
+type ChunkAnchoredRow = SessionRow & { chunk_id: number; chunk_index: number; chunk_summary: string }
 
-const getSessionByChunkId = async (chunkId: number, includeAutomated: boolean) => {
-  const result = await query<ChunkAnchoredRow>(
+const getSessionsByChunkIds = (chunkIds: number[], includeAutomated: boolean) =>
+  hydrate<ChunkAnchoredRow>(
     `SELECT s.id, s.title, s.summary, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
             src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
             s.started_at, s.ended_at, s.message_count, p.id as project_id,
-            c.chunk_index, c.summary as chunk_summary
+            c.id as chunk_id, c.chunk_index, c.summary as chunk_summary
      FROM session_chunks c
      JOIN sessions s ON c.session_id = s.id
      JOIN projects p ON s.project_id = p.id
      JOIN sources src ON p.source_id = src.id
-     WHERE c.id = $1 AND s.deleted_at IS NULL AND ${AUTOMATED_FILTER}`,
-    [chunkId, includeAutomated]
+     WHERE c.id = ANY($1::bigint[]) AND s.deleted_at IS NULL AND ${AUTOMATED_FILTER}`,
+    chunkIds,
+    includeAutomated,
+    (row) => row.chunk_id
   )
-  return result.rows[0] ?? null
-}
 
 const resolveCentroids = async (table: 'sessions' | 'projects', weightedIds: WeightedId[]) => {
   if (weightedIds.length === 0) return []
@@ -542,10 +557,11 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       )
       if (sessionHits.ids[0]) {
         const sessionRanked: RankedList = []
-        for (let i = 0; i < sessionHits.ids[0].length; i++) {
-          const sessionId = sessionIdFromVectorId(sessionHits.ids[0][i])
+        const sessionIds = sessionHits.ids[0].map(sessionIdFromVectorId)
+        const sessions = await getSessionsByIds(sessionIds, includeAutomated)
+        for (let i = 0; i < sessionIds.length; i++) {
           const score = 1 - (sessionHits.distances?.[0]?.[i] ?? 1)
-          const session = await getSessionById(sessionId, includeAutomated)
+          const session = sessions.get(String(sessionIds[i]))
           if (!session) continue
           if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
           record(
@@ -567,10 +583,11 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       if (chunkHits.ids[0]) {
         const chunkRanked: RankedList = []
         const seen = new Set<number>()
-        for (let i = 0; i < chunkHits.ids[0].length; i++) {
-          const chunkId = parseInt(chunkHits.ids[0][i].replace('chunk-', ''))
+        const chunkIds = chunkHits.ids[0].map((id) => parseInt(id.replace('chunk-', '')))
+        const chunks = await getSessionsByChunkIds(chunkIds, includeAutomated)
+        for (let i = 0; i < chunkIds.length; i++) {
           const score = 1 - (chunkHits.distances?.[0]?.[i] ?? 1)
-          const session = await getSessionByChunkId(chunkId, includeAutomated)
+          const session = chunks.get(String(chunkIds[i]))
           if (!session) continue
           if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
           if (seen.has(session.id)) continue
@@ -593,10 +610,11 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
         // session is its best-ranked message, so dedup preserves rank order.
         const messageRanked: RankedList = []
         const seen = new Set<number>()
-        for (let i = 0; i < messageHits.ids[0].length; i++) {
-          const messageId = parseInt(messageHits.ids[0][i].replace('msg-', ''))
+        const messageIds = messageHits.ids[0].map((id) => parseInt(id.replace('msg-', '')))
+        const messages = await getSessionsByMessageIds(messageIds, includeAutomated)
+        for (let i = 0; i < messageIds.length; i++) {
           const score = 1 - (messageHits.distances?.[0]?.[i] ?? 1)
-          const session = await getSessionByMessageId(messageId, includeAutomated)
+          const session = messages.get(String(messageIds[i]))
           if (!session) continue
           if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter, session.message_id))
             continue
