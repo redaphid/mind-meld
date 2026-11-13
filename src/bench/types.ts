@@ -107,5 +107,7 @@ export type Manifest = {
   counts: Partial<Record<Stratum, number>>
   corpus: Record<string, number>
   harnessSha: string | null
+  // sha256 of queries.jsonl at freeze; scoring refuses a set that has moved.
+  queriesSha256: string | null
   notes: string[]
 }
