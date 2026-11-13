@@ -10,6 +10,7 @@ import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import pg from 'pg'
 import { runMigrations, MigrationError, MIGRATIONS_DIR } from './migrations.js'
+import { withMigrationLock } from '../__tests__/pg-migration-lock.js'
 
 const PG = {
   host: process.env.POSTGRES_HOST ?? '127.0.0.1',
@@ -96,7 +97,7 @@ describe.skipIf(!dbAvailable)('the real init-db chain under the strict runner', 
 
   it('applies every file to an empty database and records each one', async () => {
     const files = (await readdir(MIGRATIONS_DIR)).filter(f => f.endsWith('.sql')).sort()
-    expect(await runMigrations(target)).toEqual(files)
+    expect(await withMigrationLock(PG, () => runMigrations(target))).toEqual(files)
     const recorded = await sql('SELECT filename FROM schema_migrations ORDER BY filename')
     expect(recorded.map(r => r.filename)).toEqual(files)
     const fns = await sql(`SELECT proname FROM pg_proc WHERE proname IN ('search_messages', 'get_session_with_messages') ORDER BY 1`)
