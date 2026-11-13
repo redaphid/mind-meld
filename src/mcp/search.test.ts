@@ -328,6 +328,17 @@ describe('search parameter arms', () => {
     for (const r of results) expect(r.score).toBeGreaterThan(0.5)
   })
 
+  it('hands back the projects the cwd resolved to', async () => {
+    query.mockImplementation(async (sql: string) =>
+      typeof sql === 'string' && sql.includes('FROM projects p') && sql.includes('LIKE')
+        ? rows({ id: 7, path: '/p/proj', name: 'proj', source_name: 'claude_code' })
+        : rows()
+    )
+    querySimilar.mockResolvedValue({ ids: [[]], distances: [[]] })
+    const outcome = await searchWithDiagnostics({ query: 'x', mode: 'semantic', cwd: '/p/proj/sub' })
+    expect(outcome.projectIds).toEqual([7])
+  })
+
   // Both fixtures ended when they started, so there is no recent activity to
   // keep them — see the last-activity suite below for the case where there is.
   it('drops sessions older than since', async () => {

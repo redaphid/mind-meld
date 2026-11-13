@@ -471,6 +471,9 @@ const SWITCHED_OFF: SearchDegradation = {
 export type SearchOutcome = {
   results: SearchResult[]
   degraded: SearchDegradation | null
+  // The projects the cwd resolved to (empty without one), so a caller labelling
+  // results by project does not resolve the cwd a second time.
+  projectIds: number[]
 }
 
 // Every hit is scored by its session's summary vector, whichever arm found it,
@@ -823,7 +826,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     if (tags && tags.length > 0) result.tags = tags
   }
 
-  return { results: page, degraded }
+  return { results: page, degraded, projectIds }
 }
 
 // The plain form, for callers that have nothing useful to do with the
