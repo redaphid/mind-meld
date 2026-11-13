@@ -39,14 +39,15 @@ function getEnvBool(key: string, defaultValue: boolean): boolean {
   return value.toLowerCase() === "true" || value === "1";
 }
 
-// MINDMELD_SEMANTIC is the one switch someone types by hand to start without
-// the AI pipeline, so it is parsed strictly: a typo such as "of" must stop the
-// process at startup rather than quietly leave the GPU work running.
-function parseSemanticFlag(value: string | undefined): boolean {
+// An on/off switch someone types by hand (MINDMELD_SEMANTIC, MINDMELD_SEARCH_LOG),
+// parsed strictly: a typo such as "of" must stop the process at startup rather
+// than quietly leave the switch in a state nobody chose. Unset means on.
+function getEnvSwitch(key: string): boolean {
+  const value = process.env[key];
   const normalized = (value ?? "").trim().toLowerCase();
   if (["", "on", "true", "1"].includes(normalized)) return true;
   if (["off", "false", "0"].includes(normalized)) return false;
-  throw new Error(`MINDMELD_SEMANTIC must be "on" or "off", got "${value}"`);
+  throw new Error(`${key} must be "on" or "off", got "${value}"`);
 }
 
 function getEnvFloat(key: string, defaultValue: number): number {
@@ -117,7 +118,7 @@ export const config = {
   // The search event log (src/mcp/search-log.ts). Off stops new rows only; the
   // list handle is still returned so output stays the same shape.
   searchLog: {
-    enabled: getEnvBool("MINDMELD_SEARCH_LOG", true),
+    enabled: getEnvSwitch("MINDMELD_SEARCH_LOG"),
     // Rows waiting to be written. Past it new rows are dropped and counted, so
     // a stalled database costs log rows, never memory or search latency.
     queueCapacity: getEnvInt("MINDMELD_SEARCH_LOG_QUEUE", 1000),
@@ -285,7 +286,7 @@ export const config = {
   // Postgres that the UI can flip; this is what `mcp` writes there at startup
   // when it says off, and what every process assumes if the row is unreadable.
   semantic: {
-    enabledAtStartup: parseSemanticFlag(process.env.MINDMELD_SEMANTIC),
+    enabledAtStartup: getEnvSwitch("MINDMELD_SEMANTIC"),
   },
 
   // Embedding healing
