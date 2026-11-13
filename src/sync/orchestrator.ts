@@ -6,7 +6,7 @@ import { generatePendingEmbeddings, updateAggregateEmbeddings, AGGREGATE_BATCH_S
 import { ensureEmbeddingModel } from '../embeddings/ollama.js';
 import { ensureSummarizeModel } from '../embeddings/summarize.js';
 import { query } from '../db/postgres.js';
-import { shouldStandDown, STAND_DOWN_NOTICE } from './stand-down.js';
+import { aiHold, AI_HOLD_NOTICE, type AiHold } from './sync-control.js';
 
 const MAX_AGGREGATE_DRAIN_MS = 50 * 60 * 1000;
 
@@ -49,9 +49,9 @@ export interface FullSyncResult {
     messagesEmbedded: number;
     sessionsUpdated: number;
   };
-  // True when the embedding phase was skipped because something asked
-  // ingestion to stand down. Not an error — see where it is set.
-  standDown: boolean;
+  // Why the embedding phase was skipped (semantic switched off, or a
+  // stand-down), or null when it ran. Not an error — see where it is set.
+  held: AiHold | null;
   errors: string[];
 }
 
@@ -67,12 +67,15 @@ export async function runFullSync(options?: {
   console.log(`Starting full sync at ${startTime.toISOString()}`);
   console.log('='.repeat(60));
 
-  // Pull models to disk if not present (does NOT load into VRAM)
-  try {
-    await Promise.all([ensureEmbeddingModel(), ensureSummarizeModel()]);
-    console.log('Models verified');
-  } catch (e) {
-    console.warn('Model pull check failed (non-fatal):', e);
+  // Pull models to disk if not present (does NOT load into VRAM). These are
+  // Ollama requests, so they wait behind the same gate as the embedding phase.
+  if (!options?.skipEmbeddings && !(await aiHold())) {
+    try {
+      await Promise.all([ensureEmbeddingModel(), ensureSummarizeModel()]);
+      console.log('Models verified');
+    } catch (e) {
+      console.warn('Model pull check failed (non-fatal):', e);
+    }
   }
 
   const result: FullSyncResult = {
@@ -85,7 +88,7 @@ export async function runFullSync(options?: {
     memories: emptyMemoryStats(),
     spool: { configured: false, drained: 0, quarantined: 0 },
     embeddings: { messagesEmbedded: 0, sessionsUpdated: 0 },
-    standDown: false,
+    held: null,
     errors: [],
   };
 
@@ -190,18 +193,18 @@ export async function runFullSync(options?: {
 
   // Generate embeddings.
   //
-  // Stand-down gates this phase and not the file sync above it, because the
-  // point is to yield the GPU, and reading transcripts into Postgres never
-  // touches it. Conversations keep being indexed while standing down; only
-  // their vectors wait, and the next cycle picks them up from the same queue.
+  // The AI gate holds this phase and not the file sync above it, because the
+  // point is to keep off the GPU, and reading transcripts into Postgres never
+  // touches it. Conversations keep being indexed while held; only their
+  // vectors wait, and a later cycle picks them up from the same queue.
   // Deliberately NOT pushed onto `errors`: a run that records an error exits
-  // nonzero, and container monitoring would read an intentional yield as a
+  // nonzero, and container monitoring would read an intentional hold as a
   // failed sync. It is reported as its own fact instead.
-  const standingDown = !options?.skipEmbeddings && (await shouldStandDown());
-  if (standingDown) console.log(STAND_DOWN_NOTICE);
-  result.standDown = standingDown;
+  const held = options?.skipEmbeddings ? null : await aiHold();
+  if (held) console.log(AI_HOLD_NOTICE[held]);
+  result.held = held;
 
-  if (!options?.skipEmbeddings && !standingDown) {
+  if (!options?.skipEmbeddings && !held) {
     try {
       console.log('\n--- Generating Embeddings ---');
       const embeddingStats = await generatePendingEmbeddings();
@@ -216,10 +219,11 @@ export async function runFullSync(options?: {
         result.embeddings.sessionsUpdated += aggregateStats.sessionsUpdated;
         if (aggregateStats.sessionsFetched < AGGREGATE_BATCH_SIZE) break;
         // The drain would otherwise keep requesting batches for the next 50
-        // minutes; updateAggregateEmbeddings returns early when standing down,
-        // so without this the loop spins asking for work it will not do.
-        if (await shouldStandDown()) {
-          console.log(STAND_DOWN_NOTICE);
+        // minutes; updateAggregateEmbeddings returns early when held, so
+        // without this the loop spins asking for work it will not do.
+        const heldNow = await aiHold();
+        if (heldNow) {
+          console.log(AI_HOLD_NOTICE[heldNow]);
           break;
         }
         if (Date.now() >= deadline) {

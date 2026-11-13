@@ -12,7 +12,7 @@ import { summarizeConversation, ensureSummarizeModel, combineSummaries } from ".
 import { persistSessionChunks, SessionMessage } from "./chunks.js";
 import { embeddableMessages, embeddableSessions } from "./pending.js";
 import { classifyNoise } from "./classify.js";
-import { shouldStandDown, STAND_DOWN_NOTICE } from "../sync/stand-down.js";
+import { aiHold, AI_HOLD_NOTICE } from "../sync/sync-control.js";
 
 export interface BatchEmbeddingStats {
   processed: number;
@@ -154,7 +154,14 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
     );
   }
 
-  // Ensure models are available
+  // Before the model checks, which are Ollama requests themselves: with
+  // semantic off this pass must not reach Ollama at all.
+  const heldAtStart = await aiHold();
+  if (heldAtStart) {
+    console.log(AI_HOLD_NOTICE[heldAtStart]);
+    return stats;
+  }
+
   await ensureEmbeddingModel();
   await ensureSummarizeModel();
 
@@ -167,11 +174,12 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
   let lastStallReason = "";
 
   for (;;) {
-    // The stand-down checkpoint for the fast phase. Between batches rather than
-    // inside one: a batch is seconds, and abandoning it mid-flight would waste
+    // The checkpoint for the fast phase. Between batches rather than inside
+    // one: a batch is seconds, and abandoning it mid-flight would waste
     // embeddings already paid for.
-    if (await shouldStandDown()) {
-      console.log(STAND_DOWN_NOTICE);
+    const held = await aiHold();
+    if (held) {
+      console.log(AI_HOLD_NOTICE[held]);
       break;
     }
 
@@ -437,7 +445,12 @@ export async function updateAggregateEmbeddings(deadline: number): Promise<{
   sessionsReembedded: number;
   sessionsFetched: number;
 }> {
-  // Ensure summarization model is available
+  const heldAtStart = await aiHold();
+  if (heldAtStart) {
+    console.log(AI_HOLD_NOTICE[heldAtStart]);
+    return { sessionsUpdated: 0, sessionsReembedded: 0, sessionsFetched: 0 };
+  }
+
   await ensureSummarizeModel();
 
   // Get sessions that need embedding:
@@ -478,8 +491,9 @@ export async function updateAggregateEmbeddings(deadline: number): Promise<{
     // The checkpoint that actually matters. Summarizing one session is 5-10
     // minutes of GPU, so checking once per session is the difference between
     // yielding promptly and holding the card for the rest of the batch.
-    if (await shouldStandDown()) {
-      console.log(STAND_DOWN_NOTICE);
+    const held = await aiHold();
+    if (held) {
+      console.log(AI_HOLD_NOTICE[held]);
       break;
     }
     if (Date.now() >= deadline) break;

@@ -283,18 +283,64 @@ should not be "simplified" away:
 - **It gates the embedding phase, not the file sync.** Reading transcripts into
   Postgres never touches the GPU, so conversations keep being indexed while
   standing down; only their vectors wait.
-- **Standing down is not an error.** `FullSyncResult.standDown` is its own
+- **Standing down is not an error.** `FullSyncResult.held` is its own
   field and is deliberately kept out of `errors`, because a run that records an
   error exits nonzero and monitoring would read an intentional yield as a failed
   sync.
 
-`shouldStandDown()` fails **open**: the table arrives in a migration applied by
-`mcp` on startup, so a worker can legitimately meet a database that has not got
-it yet, and a switch that cannot be read is not a switch that says stop.
+Stand-down fails **open**: the table arrives in a migration applied by `mcp` on
+startup, so a worker can legitimately meet a database that has not got it yet,
+and a switch that cannot be read is not a switch that says stop.
 
-Checkpoints are at batch boundaries in `generatePendingEmbeddings` and
-per-session in `updateAggregateEmbeddings` — the latter is the one that matters,
-since a session is 5-10 minutes of GPU.
+Workers never ask about stand-down by name. They ask `aiHold()` in
+`src/sync/sync-control.ts`, the one gate for both switches on this row (see the
+next section). Checkpoints are at batch boundaries in
+`generatePendingEmbeddings` and per-session in `updateAggregateEmbeddings` — the
+latter is the one that matters, since a session is 5-10 minutes of GPU.
+
+## The semantic switch (full-text-only mode)
+
+Off runs mindmeld without the AI pipeline: no embedding, no message, chunk or
+session summarization, no aggregate vectors, no centroid computation, no query
+vector for search, and no model checks against Ollama. Transcripts, memories
+and the ingest spool keep landing in Postgres, so full-text search stays
+current, and every new row still joins the queue (`src/embeddings/pending.ts`).
+Switching back on drains what accumulated; nothing is re-synced.
+
+```
+GET  /api/semantic              # {enabled, changedAt, reason}
+POST /api/semantic              # {enabled, reason} — on also kicks a drain now
+MINDMELD_SEMANTIC=off           # start in this mode (read by mcp at startup)
+```
+
+It is a column on the stand-down row (`init-db/025-semantic-switch.sql`), for
+the same reason stand-down is: the workers and the UI share only Postgres. What
+is deliberate:
+
+- **A switch, not a deadline.** Stand-down lapses on its own so a forgotten
+  press costs one cycle. This one stays off until someone turns it on, because
+  "run full-text only" is a decision, not a yield. Keep the two concepts apart.
+- **One gate.** Every background checkpoint calls `aiHold()`, which returns
+  `'semantic-off'`, `'standing-down'` or null. Search and centroid computation
+  call `semanticEnabled()` instead, because a stand-down governs ingestion, not
+  a query someone is waiting on. Do not add a third check at a new call site;
+  gate the new site on one of these two.
+- **The gate sits before the model checks.** `ensureEmbeddingModel` /
+  `ensureSummarizeModel` are Ollama requests too. `generatePendingEmbeddings`
+  and `updateAggregateEmbeddings` ask at entry, so every caller (the scheduled
+  sync, `mcp`'s "Run ingestion now", the CLI) is gated without restating it.
+- **Only `mcp` writes the startup value, and only "off".** The sync image runs
+  its binary afresh every cycle, so a worker writing it would undo a UI
+  switch-on once an hour. Writing "on" at startup would undo a UI switch-off on
+  every restart. Every process falls back to `MINDMELD_SEMANTIC` only when the
+  row cannot be read.
+- **Search says why it degraded.** With the switch off, `degraded.cause` is
+  `switched-off` and the MCP note says retrying will not help, instead of the
+  "retry shortly" an outage gets.
+- **Chroma stays up.** The UI cannot start containers, so switching on from the
+  dashboard needs Chroma already running. It sits idle while off. The
+  centroids container keeps its loop and skips each pass while off, so after a
+  switch-on its next pass is up to `CENTROID_INTERVAL_SECONDS` away.
 
 ## Why nothing is moving: `/api/system`
 
