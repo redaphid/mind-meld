@@ -6,11 +6,11 @@ import { describe, it, expect, beforeEach, onTestFinished, vi } from 'vitest'
 // about the loop's stopping conditions only, so Postgres, Chroma, the GPU and
 // the clock are all stubbed; what is real is the control flow.
 
-const { queryMock, generateEmbeddingsMock, summarizeMock, shouldStandDownMock } = vi.hoisted(() => ({
+const { queryMock, generateEmbeddingsMock, summarizeMock, aiHoldMock } = vi.hoisted(() => ({
   queryMock: vi.fn(),
   generateEmbeddingsMock: vi.fn(),
   summarizeMock: vi.fn(),
-  shouldStandDownMock: vi.fn(),
+  aiHoldMock: vi.fn(),
 }))
 
 vi.mock('../db/postgres.js', () => ({ query: queryMock, queries: {} }))
@@ -35,9 +35,9 @@ vi.mock('./pending.js', () => ({
   embeddableMessages: () => ({ sql: 'FROM messages m', params: [] }),
   embeddableSessions: () => 'FROM sessions s',
 }))
-vi.mock('../sync/stand-down.js', () => ({
-  shouldStandDown: shouldStandDownMock,
-  STAND_DOWN_NOTICE: 'standing down',
+vi.mock('../sync/sync-control.js', () => ({
+  aiHold: aiHoldMock,
+  AI_HOLD_NOTICE: { 'semantic-off': 'semantic off', 'standing-down': 'standing down' },
 }))
 // retryDelayMs is what the stall backoff multiplies, so zero keeps these tests
 // at wall-clock zero without faking timers.
@@ -58,7 +58,8 @@ import {
 } from './batch.js'
 import { getEmbeddingMetadata, upsertEmbeddings } from '../db/chroma.js'
 import { persistSessionChunks } from './chunks.js'
-import { combineSummaries } from './summarize.js'
+import { combineSummaries, ensureSummarizeModel } from './summarize.js'
+import { ensureEmbeddingModel } from './ollama.js'
 
 const message = (id: number) => ({
   id,
@@ -89,7 +90,7 @@ const servePending = (batches: ReturnType<typeof message>[][], repeatLast = fals
 
 beforeEach(() => {
   vi.clearAllMocks()
-  shouldStandDownMock.mockResolvedValue(false)
+  aiHoldMock.mockResolvedValue(null)
   summarizeMock.mockResolvedValue('a summary long enough to pass the length check')
 })
 
@@ -185,10 +186,25 @@ describe('generatePendingEmbeddings', () => {
   describe('when the stand-down switch is thrown', () => {
     it('stops without calling it a stall — yielding is not a failure', async () => {
       servePending([[message(1)]], true)
-      shouldStandDownMock.mockResolvedValue(true)
+      aiHoldMock.mockResolvedValue('standing-down')
       const stats = await generatePendingEmbeddings()
 
       expect(stats.stalled).toBeNull()
+      expect(generateEmbeddingsMock).not.toHaveBeenCalled()
+    })
+  })
+
+  // Off means no Ollama request of any kind, and the model checks are Ollama
+  // requests too: they must not run ahead of the gate.
+  describe('when semantic is switched off', () => {
+    it('reaches nothing in Ollama, not even a model check', async () => {
+      servePending([[message(1)]], true)
+      aiHoldMock.mockResolvedValue('semantic-off')
+      const stats = await generatePendingEmbeddings()
+
+      expect(stats).toMatchObject({ processed: 0, stalled: null })
+      expect(ensureEmbeddingModel).not.toHaveBeenCalled()
+      expect(ensureSummarizeModel).not.toHaveBeenCalled()
       expect(generateEmbeddingsMock).not.toHaveBeenCalled()
     })
   })
@@ -281,10 +297,35 @@ describe('updateAggregateEmbeddings', () => {
 
   describe('when the stand-down switch is thrown', () => {
     it('summarizes nothing', async () => {
-      shouldStandDownMock.mockResolvedValue(true)
+      aiHoldMock.mockResolvedValue('standing-down')
       await updateAggregateEmbeddings(Infinity)
 
       expect(summarizeMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('when semantic is switched off', () => {
+    it('reaches nothing in Ollama, not even a model check', async () => {
+      queued = [session(1), session(2)]
+      aiHoldMock.mockResolvedValue('semantic-off')
+      const stats = await updateAggregateEmbeddings(Infinity)
+
+      expect(stats.sessionsFetched).toBe(0)
+      expect(ensureSummarizeModel).not.toHaveBeenCalled()
+      expect(summarizeMock).not.toHaveBeenCalled()
+    })
+
+    // A session is 5-10 minutes of GPU, so switching off mid-drain has to stop
+    // at the next session rather than finish the batch.
+    it('stops a drain already under way at the next session', async () => {
+      queued = [session(1), session(2), session(3)]
+      aiHoldMock
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValue('semantic-off')
+      await updateAggregateEmbeddings(Infinity)
+
+      expect(summarizeMock).toHaveBeenCalledTimes(1)
     })
   })
 

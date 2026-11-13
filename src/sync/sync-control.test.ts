@@ -6,21 +6,24 @@ import { query } from '../db/postgres.js'
 import {
   summarizeStandDown,
   clampMinutes,
-  shouldStandDown,
-  invalidateStandDownCache,
+  aiHold,
+  semanticEnabled,
+  readSemantic,
+  setSemantic,
+  invalidateControlCache,
   readStandDown,
   standDown,
   resumeSync,
   DEFAULT_STAND_DOWN_MINUTES,
   MAX_STAND_DOWN_MINUTES,
-} from './stand-down.js'
+} from './sync-control.js'
 
 const NOW = new Date('2026-08-02T12:00:00.000Z')
 const rows = (row: unknown) => ({ rows: row ? [row] : [] }) as never
 
 beforeEach(() => {
   vi.mocked(query).mockReset()
-  invalidateStandDownCache()
+  invalidateControlCache()
 })
 
 // The switch is a deadline, not a flag, and every property worth having comes
@@ -85,45 +88,103 @@ describe('clampMinutes', () => {
   })
 })
 
-describe('shouldStandDown', () => {
-  it('reports the stored deadline', async () => {
+// What every worker checkpoint reads. A row with a live deadline or the switch
+// off says stop; anything else says go.
+const control = (over: Record<string, unknown> = {}) =>
+  rows({
+    stand_down_until: null,
+    stand_down_at: null,
+    stand_down_reason: null,
+    semantic_enabled: true,
+    ...over,
+  })
+
+describe('aiHold', () => {
+  it('lets work run when neither switch holds it', async () => {
+    vi.mocked(query).mockResolvedValue(control())
+    expect(await aiHold()).toBeNull()
+  })
+
+  it('holds for a stand-down deadline still ahead', async () => {
+    vi.mocked(query).mockResolvedValue(control({ stand_down_until: new Date(Date.now() + 60_000) }))
+    expect(await aiHold()).toBe('standing-down')
+  })
+
+  it('holds while semantic is switched off', async () => {
+    vi.mocked(query).mockResolvedValue(control({ semantic_enabled: false }))
+    expect(await aiHold()).toBe('semantic-off')
+  })
+
+  // Semantic-off wins because it is the one that will still be true after the
+  // deadline lapses; reporting "standing down" would promise a resume that is
+  // not coming.
+  it('names semantic-off when both hold', async () => {
     vi.mocked(query).mockResolvedValue(
-      rows({
-        stand_down_until: new Date(Date.now() + 60_000),
-        stand_down_at: new Date(),
-        stand_down_reason: null,
-      })
+      control({ semantic_enabled: false, stand_down_until: new Date(Date.now() + 60_000) })
     )
-    expect(await shouldStandDown()).toBe(true)
+    expect(await aiHold()).toBe('semantic-off')
   })
 
   // Workers ask this between every batch and every session. Without the cache
   // that is a query per summarized session, forever, for a row that changes
   // when somebody presses a button.
   it('caches so a checkpoint is not a query', async () => {
-    vi.mocked(query).mockResolvedValue(
-      rows({ stand_down_until: null, stand_down_at: null, stand_down_reason: null })
-    )
-    await shouldStandDown()
-    await shouldStandDown()
-    await shouldStandDown()
+    vi.mocked(query).mockResolvedValue(control())
+    await aiHold()
+    await aiHold()
+    await semanticEnabled()
     expect(vi.mocked(query)).toHaveBeenCalledTimes(1)
   })
 
-  // Fails OPEN, and this is the important one. The table arrives in a migration
-  // applied by the `mcp` service, so a sync worker can legitimately meet a
-  // database without it. Refusing to index because the pause button is
-  // unreadable would be a far worse failure than ignoring a press.
-  it('keeps working when the switch cannot be read', async () => {
+  // Stand-down fails OPEN. The columns arrive in migrations applied by the
+  // `mcp` service, so a sync worker can legitimately meet a database without
+  // them, and refusing to index because a button is unreadable would be far
+  // worse than ignoring a press. Semantic falls back to MINDMELD_SEMANTIC,
+  // which is unset (on) here.
+  it('keeps working when the row cannot be read', async () => {
     vi.mocked(query).mockRejectedValue(new Error('relation "sync_control" does not exist'))
-    expect(await shouldStandDown()).toBe(false)
+    expect(await aiHold()).toBeNull()
+    expect(await semanticEnabled()).toBe(true)
   })
 
   it('does not retry a failing read on every checkpoint', async () => {
     vi.mocked(query).mockRejectedValue(new Error('nope'))
-    await shouldStandDown()
-    await shouldStandDown()
+    await aiHold()
+    await aiHold()
     expect(vi.mocked(query)).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('the semantic switch', () => {
+  it('reads the stored state', async () => {
+    vi.mocked(query).mockResolvedValue(
+      rows({ semantic_enabled: false, semantic_changed_at: NOW, semantic_reason: 'full-text only for now' })
+    )
+    expect(await readSemantic()).toEqual({
+      enabled: false,
+      changedAt: NOW.toISOString(),
+      reason: 'full-text only for now',
+    })
+  })
+
+  // A switch-on that kicks a drain straight away (src/mcp/sync-run.ts) must
+  // not have that drain read the cached "off" and do nothing.
+  it('invalidates the cache so the next checkpoint sees the change', async () => {
+    vi.mocked(query).mockResolvedValue(control({ semantic_enabled: false }))
+    expect(await aiHold()).toBe('semantic-off')
+
+    vi.mocked(query).mockResolvedValue(
+      rows({
+        stand_down_until: null,
+        stand_down_at: null,
+        stand_down_reason: null,
+        semantic_enabled: true,
+        semantic_changed_at: NOW,
+        semantic_reason: null,
+      })
+    )
+    expect((await setSemantic(true)).enabled).toBe(true)
+    expect(await aiHold()).toBeNull()
   })
 })
 
@@ -163,18 +224,16 @@ describe('pressing the button', () => {
   })
 
   // Both writes have to drop the cache, or the worker that just got told to
-  // stop keeps working for another beat — and, worse, a resume takes effect
+  // stop keeps working for another beat -- and, worse, a resume takes effect
   // late enough to look broken.
   it('invalidates the cache so the next checkpoint sees the change', async () => {
-    vi.mocked(query).mockResolvedValue(
-      rows({ stand_down_until: new Date(Date.now() + 60_000), stand_down_at: new Date(), stand_down_reason: null })
-    )
-    await shouldStandDown()
-    expect(await shouldStandDown()).toBe(true)
+    vi.mocked(query).mockResolvedValue(control({ stand_down_until: new Date(Date.now() + 60_000) }))
+    await aiHold()
+    expect(await aiHold()).toBe('standing-down')
 
-    vi.mocked(query).mockResolvedValue(rows(null))
+    vi.mocked(query).mockResolvedValue(control())
     await resumeSync()
-    expect(await shouldStandDown()).toBe(false)
+    expect(await aiHold()).toBeNull()
   })
 })
 

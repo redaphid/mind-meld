@@ -14,7 +14,7 @@ import { navigate } from '../router.js'
 import { Card, Stat, Spinner, ErrorBox, Pill, Bar } from '../ui.js'
 import { fmtNum, fmtExact, timeAgo, sourceLabel, pct } from '../util.js'
 import { EmbeddingChart, ChartWindowPicker } from '../chart.js'
-import { OllamaCard, ChromaCard, LoadCard, SummaryCard, StandDownControl } from '../health.js'
+import { OllamaCard, ChromaCard, LoadCard, SummaryCard, StandDownControl, SemanticControl } from '../health.js'
 
 // POST /api/sync answers 202 when it starts a run and 409 when one was already
 // in flight — neither is a failure, and both carry the run's state, so this
@@ -380,6 +380,14 @@ export const OverviewView = () => {
   const machines = useApi('/api/machines')
   const system = useApi('/api/system')
   const summaries = useApi('/api/summaries')
+  // Bumped when the semantic switch flips. Remounting the runner makes it
+  // re-read /api/sync, so the drain a switch-on starts shows its progress.
+  const [runnerKey, setRunnerKey] = useState(0)
+  const semanticSwitched = () => {
+    setRunnerKey(k => k + 1)
+    status.reload()
+    system.reload()
+  }
 
   // Totals, embedding coverage, pending counts and the quarantine badge all
   // come from /status, so refreshing it refreshes the whole screen. Activity is
@@ -442,10 +450,12 @@ export const OverviewView = () => {
         <//>
       </div>
       <${QueueThroughput} />
-      <${IngestionRunner} onFinished=${status.reload} />
+      <${IngestionRunner} key=${runnerKey} onFinished=${status.reload} />
     <//>
 
     <${EmbeddingActivity} />
+
+    <${SemanticControl} onChange=${semanticSwitched} />
 
     <${StandDownControl} onChange=${system.reload} />
 
