@@ -170,6 +170,9 @@ type Hit = {
   headline: string | null
 }
 
+// One semantic tier's hits in its own rank order, before any are claimed.
+type ArmHits = { ranked: RankedList; claims: Omit<Hit, 'headline'>[] }
+
 const parseWeightedIds = (params: string[]): WeightedId[] =>
   params
     .map((item) => {
@@ -541,8 +544,10 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
   const rankedLists: RankedList[] = []
   let degraded: SearchDegradation | null = null
 
-  // First arm to claim a session wins its tier/cursor/snippet source. Arms run
-  // session → chunk → message → fts; later, fusion across all arms decides rank.
+  // First arm to claim a session wins its tier/cursor/snippet source, and arms
+  // claim in a fixed order -- session → chunk → message → fts -- whichever
+  // finished first, so the answer never depends on timing. Fusion across all
+  // arms decides rank afterwards.
   const record = (
     result: SearchResult,
     projectId: number,
@@ -554,8 +559,75 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       hitBySession.set(result.session_id, { result, projectId, rawSnippet, headline })
   }
 
-  if ((mode === 'semantic' || mode === 'hybrid') && !vectorsOn) degraded = SWITCHED_OFF
-  else if (mode === 'semantic' || mode === 'hybrid') {
+  // Each tier reads only its own hits and returns what it would claim, so the
+  // three run at once and are claimed afterwards.
+  const sessionTier = async (embedding: number[]): Promise<ArmHits | null> => {
+    const hits = await querySimilar(config.chroma.collections.sessions, embedding, limit * (overFetch ?? 2))
+    if (!hits.ids[0]) return null
+    const arm: ArmHits = { ranked: [], claims: [] }
+    const sessionIds = hits.ids[0].map(sessionIdFromVectorId)
+    const sessions = await getSessionsByIds(sessionIds, includeAutomated)
+    for (let i = 0; i < sessionIds.length; i++) {
+      const score = 1 - (hits.distances?.[0]?.[i] ?? 1)
+      const session = sessions.get(String(sessionIds[i]))
+      if (!session) continue
+      if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
+      arm.claims.push({ result: baseResult(session, score, 'session'), projectId: session.project_id, rawSnippet: session.summary })
+      arm.ranked.push(session.id)
+    }
+    return arm
+  }
+
+  const chunkTier = async (embedding: number[]): Promise<ArmHits | null> => {
+    const hits = await querySimilar(config.chroma.collections.chunks, embedding, limit * (overFetch ?? 3))
+    if (!hits.ids[0]) return null
+    const arm: ArmHits = { ranked: [], claims: [] }
+    const seen = new Set<number>()
+    const chunkIds = hits.ids[0].map((id) => parseInt(id.replace('chunk-', '')))
+    const chunks = await getSessionsByChunkIds(chunkIds, includeAutomated)
+    for (let i = 0; i < chunkIds.length; i++) {
+      const score = 1 - (hits.distances?.[0]?.[i] ?? 1)
+      const session = chunks.get(String(chunkIds[i]))
+      if (!session) continue
+      if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
+      if (seen.has(session.id)) continue
+      seen.add(session.id)
+      const result = baseResult(session, score, 'chunk')
+      result.cursor = { chunk_index: session.chunk_index }
+      arm.claims.push({ result, projectId: session.project_id, rawSnippet: session.chunk_summary })
+      arm.ranked.push(session.id)
+    }
+    return arm
+  }
+
+  const messageTier = async (embedding: number[]): Promise<ArmHits | null> => {
+    const hits = await querySimilar(config.chroma.collections.messages, embedding, limit * (overFetch ?? 3))
+    if (!hits.ids[0]) return null
+    // Chroma returns messages in distance order; first appearance of a
+    // session is its best-ranked message, so dedup preserves rank order.
+    const arm: ArmHits = { ranked: [], claims: [] }
+    const seen = new Set<number>()
+    const messageIds = hits.ids[0].map((id) => parseInt(id.replace('msg-', '')))
+    const messages = await getSessionsByMessageIds(messageIds, includeAutomated)
+    for (let i = 0; i < messageIds.length; i++) {
+      const score = 1 - (hits.distances?.[0]?.[i] ?? 1)
+      const session = messages.get(String(messageIds[i]))
+      if (!session) continue
+      if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter, session.message_id))
+        continue
+      if (seen.has(session.id)) continue
+      seen.add(session.id)
+      const result = baseResult(session, score, 'message')
+      result.cursor = { message_id: session.message_id }
+      arm.claims.push({ result, projectId: session.project_id, rawSnippet: session.content_text })
+      arm.ranked.push(session.id)
+    }
+    return arm
+  }
+
+  // Settled in claim order. A failed embedding is the one entry, since no tier
+  // can run without the vector; this never rejects.
+  const semanticArms = async (): Promise<PromiseSettledResult<ArmHits | null>[]> => {
     try {
       const embedding = await composeQueryVector(
         params.query,
@@ -565,95 +637,13 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
         likeProjectCentroids,
         unlikeProjectCentroids
       )
-
-      const sessionHits = await querySimilar(
-        config.chroma.collections.sessions,
-        embedding,
-        limit * (overFetch ?? 2)
-      )
-      if (sessionHits.ids[0]) {
-        const sessionRanked: RankedList = []
-        const sessionIds = sessionHits.ids[0].map(sessionIdFromVectorId)
-        const sessions = await getSessionsByIds(sessionIds, includeAutomated)
-        for (let i = 0; i < sessionIds.length; i++) {
-          const score = 1 - (sessionHits.distances?.[0]?.[i] ?? 1)
-          const session = sessions.get(String(sessionIds[i]))
-          if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
-          record(
-            baseResult(session, score, 'session'),
-            session.project_id,
-            session.summary,
-            null
-          )
-          sessionRanked.push(session.id)
-        }
-        rankedLists.push(sessionRanked)
-      }
-
-      const chunkHits = await querySimilar(
-        config.chroma.collections.chunks,
-        embedding,
-        limit * (overFetch ?? 3)
-      )
-      if (chunkHits.ids[0]) {
-        const chunkRanked: RankedList = []
-        const seen = new Set<number>()
-        const chunkIds = chunkHits.ids[0].map((id) => parseInt(id.replace('chunk-', '')))
-        const chunks = await getSessionsByChunkIds(chunkIds, includeAutomated)
-        for (let i = 0; i < chunkIds.length; i++) {
-          const score = 1 - (chunkHits.distances?.[0]?.[i] ?? 1)
-          const session = chunks.get(String(chunkIds[i]))
-          if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
-          if (seen.has(session.id)) continue
-          seen.add(session.id)
-          const result = baseResult(session, score, 'chunk')
-          result.cursor = { chunk_index: session.chunk_index }
-          record(result, session.project_id, session.chunk_summary, null)
-          chunkRanked.push(session.id)
-        }
-        rankedLists.push(chunkRanked)
-      }
-
-      const messageHits = await querySimilar(
-        config.chroma.collections.messages,
-        embedding,
-        limit * (overFetch ?? 3)
-      )
-      if (messageHits.ids[0]) {
-        // Chroma returns messages in distance order; first appearance of a
-        // session is its best-ranked message, so dedup preserves rank order.
-        const messageRanked: RankedList = []
-        const seen = new Set<number>()
-        const messageIds = messageHits.ids[0].map((id) => parseInt(id.replace('msg-', '')))
-        const messages = await getSessionsByMessageIds(messageIds, includeAutomated)
-        for (let i = 0; i < messageIds.length; i++) {
-          const score = 1 - (messageHits.distances?.[0]?.[i] ?? 1)
-          const session = messages.get(String(messageIds[i]))
-          if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter, session.message_id))
-            continue
-          if (seen.has(session.id)) continue
-          seen.add(session.id)
-          const result = baseResult(session, score, 'message')
-          result.cursor = { message_id: session.message_id }
-          record(result, session.project_id, session.content_text, null)
-          messageRanked.push(session.id)
-        }
-        rankedLists.push(messageRanked)
-      }
-    } catch (e) {
-      // Reached in seconds now rather than after ~120s of retrying a shut gate:
-      // getQueryEmbedding uses the interactive client, which does not wait one
-      // out. The reason travels with the results instead of only to the log.
-      const reason = e instanceof Error ? e.message : String(e)
-      console.error('Semantic search failed, returning full-text results only:', reason)
-      degraded = { semantic: false, cause: 'unavailable', reason }
+      return await Promise.allSettled([sessionTier(embedding), chunkTier(embedding), messageTier(embedding)])
+    } catch (reason) {
+      return [{ status: 'rejected', reason }]
     }
   }
 
-  if ((mode === 'text' || mode === 'hybrid') && params.query) {
+  const fullTextRows = async () => {
     const conditions = [
       `to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $1)`,
       `s.deleted_at IS NULL`,
@@ -702,7 +692,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     values.push(limit * 2)
     const limitParam = `$${nextParam}`
 
-    const ftsResult = await query<{
+    const result = await query<{
       session_id: number
       message_id: number
       title: string | null
@@ -747,10 +737,37 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       LIMIT ${limitParam}`,
       values
     )
+    return result.rows
+  }
 
+  const wantsSemantic = mode === 'semantic' || mode === 'hybrid'
+  if (wantsSemantic && !vectorsOn) degraded = SWITCHED_OFF
+  const [semantic, ftsRows] = await Promise.all([
+    wantsSemantic && vectorsOn ? semanticArms() : [],
+    (mode === 'text' || mode === 'hybrid') && params.query ? fullTextRows() : null,
+  ])
+
+  // A failed tier ends the semantic block there and keeps the tiers before
+  // it, as when they ran one after another.
+  for (const arm of semantic) {
+    if (arm.status === 'rejected') {
+      // Reached in seconds now rather than after ~120s of retrying a shut gate:
+      // getQueryEmbedding uses the interactive client, which does not wait one
+      // out. The reason travels with the results instead of only to the log.
+      const reason = arm.reason instanceof Error ? arm.reason.message : String(arm.reason)
+      console.error('Semantic search failed, returning full-text results only:', reason)
+      degraded = { semantic: false, cause: 'unavailable', reason }
+      break
+    }
+    if (!arm.value) continue
+    for (const claim of arm.value.claims) record(claim.result, claim.projectId, claim.rawSnippet, null)
+    rankedLists.push(arm.value.ranked)
+  }
+
+  if (ftsRows) {
     // Rows already ordered by rank DESC — their order is the FTS ranking.
     const ftsRanked: RankedList = []
-    for (const row of ftsResult.rows) {
+    for (const row of ftsRows) {
       const result: SearchResult = {
         session_id: row.session_id,
         project_name: row.project_name,

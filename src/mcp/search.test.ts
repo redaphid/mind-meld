@@ -416,6 +416,96 @@ describe('hydrating the semantic hits', () => {
   })
 })
 
+describe('when the arms finish out of order', () => {
+  const ftsRow = {
+    ...fixtures[2],
+    session_id: 2,
+    message_id: 900,
+    rank: 0.9,
+    headline: 'headline-text-**gilded**-otter',
+  }
+  let releaseChroma: () => void
+  let chromaPending: boolean
+
+  // Chroma answers only once released; the full-text arm answers at once.
+  beforeEach(() => {
+    chromaPending = true
+    const chromaGate = new Promise<void>((resolve) => {
+      releaseChroma = () => {
+        chromaPending = false
+        resolve()
+      }
+    })
+    querySimilar.mockImplementation(async (collection: string) => {
+      await chromaGate
+      return collection === 'convo-sessions'
+        ? { ids: [['session-2']], distances: [[0.1]] }
+        : { ids: [[]], distances: [[]] }
+    })
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (typeof sql === 'string' && sql.includes('ranked_messages')) return rows(ftsRow)
+      if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID)) return rowsForIds(params, (id) => fixtures[id])
+      return rows()
+    })
+  })
+
+  describe('when full text resolves first', () => {
+    let results: Awaited<ReturnType<typeof search>>
+
+    beforeEach(async () => {
+      const searching = search({ query: 'query-text-gilded-otter', mode: 'hybrid' })
+      setTimeout(() => releaseChroma(), 20)
+      results = await searching
+    })
+
+    it('still lets the session tier claim the session', () => {
+      expect(results.map((r) => [r.session_id, r.matched_tier])).toEqual([[2, 'session']])
+    })
+
+    it('still upgrades the claimed snippet to the full-text headline', () => {
+      expect(results[0].snippet).toContain('**gilded**')
+    })
+  })
+
+  describe('when the chunk tier fails', () => {
+    let outcome: Awaited<ReturnType<typeof searchWithDiagnostics>>
+
+    beforeEach(async () => {
+      querySimilar.mockImplementation(async (collection: string) => {
+        if (collection === 'convo-chunks') throw new Error('error-chroma-sulking-badger')
+        if (collection === 'convo-sessions') return { ids: [['session-2']], distances: [[0.1]] }
+        return { ids: [['msg-900']], distances: [[0.1]] }
+      })
+      query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        if (typeof sql === 'string' && sql.includes('WHERE m.id = ANY($1'))
+          return rows({ ...fixtures[2], id: 9, message_id: 900, content_text: 'message-text-sulking-badger' })
+        if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID)) return rowsForIds(params, (id) => fixtures[id])
+        return rows()
+      })
+      outcome = await searchWithDiagnostics({ query: 'query-text-gilded-otter', mode: 'semantic' })
+    })
+
+    it('keeps the tiers before it and drops the ones after it', () => {
+      expect(outcome.results.map((r) => [r.session_id, r.matched_tier])).toEqual([[2, 'session']])
+    })
+
+    it('reports the failed tier as the reason', () => {
+      expect(outcome.degraded?.reason).toBe('error-chroma-sulking-badger')
+    })
+  })
+
+  it('starts the full-text query without waiting for the semantic arms', async () => {
+    const searching = search({ query: 'query-text-gilded-otter', mode: 'hybrid' })
+    await vi.waitFor(() => {
+      if (!query.mock.calls.some(([sql]) => String(sql).includes('ranked_messages'))) throw new Error('no full-text query yet')
+    })
+    const startedWhileChromaPending = chromaPending
+    releaseChroma()
+    await searching
+    expect(startedWhileChromaPending).toBe(true)
+  })
+})
+
 describe('dataClass validation', () => {
   const withKnownClasses = () => {
     query.mockImplementation(async (sql: string, params?: unknown[]) => {
