@@ -21,6 +21,11 @@ vi.mock('../embeddings/ollama.js', () => ({
   getInteractiveOllamaClient: () => ({ embed: (...args: unknown[]) => embed(...(args as [])) }),
 }))
 
+// The semantic switch (src/sync/sync-control.ts) is a row in Postgres; on
+// unless a test switches it off.
+const semanticOn = vi.fn(async () => true)
+vi.mock('../sync/sync-control.js', () => ({ semanticEnabled: () => semanticOn() }))
+
 const { search, searchWithDiagnostics, resolveDataClasses, formatSearchResults, findProjectsByPath, NOISE_CHECK, FULL_TEXT_ONLY } =
   await import('./search.js')
 const { config } = await import('../config.js')
@@ -74,6 +79,7 @@ beforeEach(() => {
   querySimilar.mockReset()
   embed.mockReset()
   embed.mockResolvedValue({ embeddings: [new Array(1024).fill(0.1)] })
+  semanticOn.mockResolvedValue(true)
 })
 
 describe('resolveDataClasses', () => {
@@ -656,10 +662,10 @@ describe('unsummarized sessions are withheld (#95)', () => {
 // retries inside the shared client and then full-text results handed back with
 // no indication anything had been skipped — the caller could not tell "no such
 // conversation" from "the semantic half never ran".
-describe('when the query vector cannot be had', () => {
-  const gateShut = () => {
-    embed.mockRejectedValue(new Error('503 GPU is in use by other applications'))
-    query.mockImplementation(async (sql: string) => {
+// One full-text hit (session 2) and nothing else, which is all a search can
+// find when the vector arms are skipped.
+const mockFullTextHitOnly = () =>
+  query.mockImplementation(async (sql: string) => {
       if (typeof sql === 'string' && sql.includes('ranked_messages'))
         return rows({
           session_id: 2,
@@ -678,6 +684,11 @@ describe('when the query vector cannot be had', () => {
         })
       return rows()
     })
+
+describe('when the query vector cannot be had', () => {
+  const gateShut = () => {
+    embed.mockRejectedValue(new Error('503 GPU is in use by other applications'))
+    mockFullTextHitOnly()
     mockChromaSessionsOnly()
   }
 
@@ -711,13 +722,45 @@ describe('when the query vector cannot be had', () => {
   // An LLM reading the rendered text cannot see the server log, and will treat
   // an empty result as proof the conversation does not exist.
   it('warns in the rendered text, including when nothing matched', () => {
-    const note = formatSearchResults([], [], { semantic: false, reason: 'gate shut' })
+    const note = formatSearchResults([], [], { semantic: false, cause: 'unavailable', reason: 'gate shut' })
     expect(note).toContain(FULL_TEXT_ONLY)
     expect(note).toContain('gate shut')
+    expect(note).toContain('Retry shortly')
   })
 
   it('leaves the rendered text alone on a healthy search', () => {
     expect(formatSearchResults([])).toBe('No matching conversations found.')
+  })
+})
+
+// Switched off is a choice, not an outage: no vector work at all, and the
+// caller is told it was switched off rather than invited to retry a search
+// that will degrade the same way until someone switches it back on.
+describe('with the semantic switch off', () => {
+  beforeEach(() => {
+    semanticOn.mockResolvedValue(false)
+    mockFullTextHitOnly()
+    mockChromaSessionsOnly()
+  })
+
+  it('answers from full text without asking Ollama or Chroma anything', async () => {
+    const { results } = await searchWithDiagnostics({ query: 'build', mode: 'hybrid' })
+    expect(results.map(r => r.session_id)).toEqual([2])
+    expect(embed).not.toHaveBeenCalled()
+    expect(querySimilar).not.toHaveBeenCalled()
+  })
+
+  it('says it was switched off, not that it failed', async () => {
+    const { degraded } = await searchWithDiagnostics({ query: 'build', mode: 'semantic' })
+    expect(degraded?.cause).toBe('switched-off')
+    const note = formatSearchResults([], [], degraded)
+    expect(note).toContain('switched off')
+    expect(note).not.toContain('Retry shortly')
+  })
+
+  it('reports nothing degraded for a full-text search, which lost nothing', async () => {
+    const { degraded } = await searchWithDiagnostics({ query: 'build', mode: 'text' })
+    expect(degraded).toBeNull()
   })
 })
 
