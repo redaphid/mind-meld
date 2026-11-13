@@ -11,7 +11,7 @@ export const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '../
 type PgTarget = { host: string; port: number; user: string; password: string; database: string }
 
 // The filename is written into SQL below, so only names of this shape are migrations.
-const MIGRATION_NAME = /^\d{3}-[a-z0-9-]+\.sql$/
+export const MIGRATION_NAME = /^\d{3}-[a-z0-9-]+\.sql$/
 
 const TRACKING_TABLE = `CREATE TABLE IF NOT EXISTS schema_migrations (
   filename VARCHAR(255) PRIMARY KEY,
