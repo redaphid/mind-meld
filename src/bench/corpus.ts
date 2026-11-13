@@ -3,6 +3,7 @@ import * as chrono from 'chrono-node'
 import { query } from '../db/postgres.js'
 import { parseSinceDate } from '../mcp/since.js'
 import { USELESS_TAG } from '../mcp/noise.js'
+import { classifyAutomated } from '../embeddings/classify.js'
 import type { QueryReplay, SummaryKind } from './types.js'
 
 // Sessions under ~8,000 characters are never summarized: their "summary" is
@@ -21,8 +22,8 @@ export const candidateSessions = async (
   seed: string,
   snapshot: number,
   limit: number
-): Promise<number[]> =>
-  (
+): Promise<number[]> => {
+  const ids = (
     await query<{ id: number }>(
       `WITH c AS (
          SELECT s.id, s.project_id,
@@ -37,6 +38,29 @@ export const candidateSessions = async (
       [dataClasses, seed, snapshot, limit, USELESS_TAG]
     )
   ).rows.map((r) => r.id)
+  const automated = await automatedLike(ids)
+  return ids.filter((id) => !automated.has(id))
+}
+
+// Sessions that open like an automated run by the deployment's configured
+// prefixes, whatever their stored flag says: the flag was only set at first
+// ingest, so a prefix added later left such sessions searchable (issue #177).
+// The same reading the re-classification uses: transcripts by the first line of
+// their first user message, everything else by title.
+export const automatedLike = async (ids: number[]): Promise<Set<number>> => {
+  if (ids.length === 0) return new Set()
+  const rows = await query<{ id: number; is_automated: boolean; opening: string | null }>(
+    `SELECT s.id, s.is_automated,
+            CASE WHEN src.name = ANY($2::text[]) THEN
+              (SELECT m.content_text FROM messages m WHERE m.session_id = s.id AND m.role = 'user'
+                 AND m.content_text IS NOT NULL ORDER BY m.sequence_num NULLS FIRST, m.timestamp, m.id LIMIT 1)
+            ELSE s.title END AS opening
+     FROM sessions s JOIN projects p ON p.id = s.project_id JOIN sources src ON src.id = p.source_id
+     WHERE s.id = ANY($1::int[])`,
+    [ids, ['claude_code', 'codex']]
+  )
+  return new Set(rows.rows.filter((r) => r.is_automated || classifyAutomated(r.opening)).map((r) => r.id))
+}
 
 export type SessionCard = {
   sessionId: number

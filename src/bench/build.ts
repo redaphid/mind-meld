@@ -1,6 +1,7 @@
 import { callClaude, extractJson, pool, withRetries } from './claude.js'
 import {
   appearsVerbatim,
+  automatedLike,
   candidateSessions,
   corpusStats,
   realSearches,
@@ -187,8 +188,10 @@ const buildNoAnswer = async (
 
 const buildReal = async (snapshot: number): Promise<BenchQuery[]> => {
   const out: BenchQuery[] = []
-  for (const s of await realSearches()) {
-    if (s.opened.some((id) => id > snapshot)) continue
+  const searches = await realSearches()
+  const automated = await automatedLike([...new Set(searches.flatMap((s) => s.opened))])
+  for (const s of searches) {
+    if (s.opened.some((id) => id > snapshot || automated.has(id))) continue
     const card = await sessionCard(s.opened[0], { messages: 0 })
     if (!card) continue
     const rank = s.listed.indexOf(s.opened[0]) + 1
@@ -229,7 +232,10 @@ export const buildBench = async ({ dir, seed, excludePathPatterns, search, strat
   const corpus = previous?.corpus ?? (await corpusStats())
   const snapshot = previous?.snapshotMaxSessionId ?? corpus.max_session_id
   const log = (row: unknown) => appendJsonl(`${files.build}/writer-log.jsonl`, [row])
-  const want = (s: Stratum) => (!strata || strata.includes(s)) && !existing.some((q) => q.stratum === s)
+  const requested = (s: Stratum) => !strata || strata.includes(s)
+  const have = (s: Stratum) => existing.filter((q) => q.stratum === s).length
+  const want = (s: Stratum) => requested(s) && have(s) === 0
+  const used = new Set(existing.flatMap((q) => q.goldSessionIds))
   const queries: BenchQuery[] = []
   // Each stratum is written as soon as it is built, so a crash costs one.
   const keep = (built: BenchQuery[]) => {
@@ -242,10 +248,13 @@ export const buildBench = async ({ dir, seed, excludePathPatterns, search, strat
   // Disjoint sources: coding candidates are dealt round-robin to the three
   // coding strata, so no session is the gold of two generated queries.
   const dealt = (index: number) => coding.filter((_, i) => i % 3 === index)
+  // A generated stratum short of its target (a query removed before freezing)
+  // is topped up from sessions no query uses yet.
   for (const [index, plan] of PLANS.entries()) {
-    if (!want(plan.stratum)) continue
-    const sessions = plan.stratum === 'crossclass' ? personal : dealt(index)
-    keep(await buildFromSessions(plan, sessions, files.judgeCwd, log))
+    const missing = plan.target - have(plan.stratum)
+    if (!requested(plan.stratum) || missing <= 0) continue
+    const sessions = (plan.stratum === 'crossclass' ? personal : dealt(index)).filter((id) => !used.has(id))
+    keep(await buildFromSessions({ ...plan, target: missing }, sessions, files.judgeCwd, log))
   }
   if (want('noanswer')) keep(await buildNoAnswer(seed, files.judgeCwd, files.build, search, log))
   if (want('real')) keep(await buildReal(snapshot))
