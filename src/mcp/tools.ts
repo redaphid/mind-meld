@@ -134,9 +134,7 @@ down for everyone afterwards. Search only gets quieter if you tell it.
       includeNoise: z.boolean().optional().describe('Include sessions reported as useless, and switch off the ranking penalty that demotes results resembling reported noise. False by default. Pass true when you are debugging what the index actually holds rather than looking for an answer -- with it off you cannot tell "no such conversation" apart from "it was reported as noise".'),
     },
     async (params) => {
-      const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
-      const projectIds = matchingProjects.map((p) => p.id)
-      const { results, degraded } = await searchWithDiagnostics(params)
+      const { results, degraded, projectIds } = await searchWithDiagnostics(params)
       return {
         content: [
           { type: 'text', text: formatSearchResults(results, projectIds, degraded) },
