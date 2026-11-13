@@ -1,6 +1,7 @@
 import assert from 'node:assert'
 import { config } from '../config.js'
 import { query } from '../db/postgres.js'
+import { findAutomatedDrift } from '../embeddings/automated-flags.js'
 import { notWarmup } from './title.js'
 
 // Bad-summary signal SQL is kept in lockstep with scripts/audit-summaries.sh and
@@ -66,6 +67,9 @@ export type HealthMetrics = {
   sessionEmbeddingAgeSeconds: number | null
   messageEmbeddingAgeSeconds: number | null
   pendingMessageEmbeddings: number
+  // Live sessions whose stored automated flag disagrees with the classifier,
+  // by direction. Both are 0 after any sync run; see findAutomatedDrift.
+  automatedFlagDrift: { unflagged: number; staleFlag: number }
 }
 
 const gatherCoverage = async () => {
@@ -153,6 +157,7 @@ export const getHealth = async (): Promise<HealthMetrics> => {
   const coverage = await gatherCoverage()
   const bad = await gatherBadSummaries()
   const embeddings = await gatherEmbeddingHealth()
+  const drift = await findAutomatedDrift()
 
   const denominator = coverage.summarized + coverage.nullBacklog
   const coveragePct = denominator === 0 ? 100 : (coverage.summarized / denominator) * 100
@@ -165,6 +170,10 @@ export const getHealth = async (): Promise<HealthMetrics> => {
     badSummaryTotal: bad.total,
     badSummaryByCategory: bad.byCategory,
     ...embeddings,
+    automatedFlagDrift: {
+      unflagged: drift.filter((d) => !d.stored).length,
+      staleFlag: drift.filter((d) => d.stored).length,
+    },
   }
 }
 
@@ -199,10 +208,16 @@ ${badBreakdown || '  - (none)'}
 - Last message embedding: ${formatAge(h.messageEmbeddingAgeSeconds)}
 - Pending message embeddings: ${h.pendingMessageEmbeddings}
 
+## Automated Flags (both should be 0)
+- Classified automated, not flagged: ${h.automatedFlagDrift.unflagged}
+- Flagged, no rule matches: ${h.automatedFlagDrift.staleFlag}
+
 ---
 
 UNHEALTHY when: coverage drops well below ~95% (summarizer arm degraded);
 NULL backlog grows over time instead of draining; bad-summary total climbs
 (re-summarization regressed); embedding ages exceed the sync interval (sync or
-Ollama stalled); or pending embeddings keep rising (backfill not keeping up.`
+Ollama stalled); or pending embeddings keep rising (backfill not keeping up); or automated-flag
+drift stays non-zero across sync runs (a syncing process lacks
+MINDMELD_AUTOMATED_PREFIXES, or no sync is running).`
 }
