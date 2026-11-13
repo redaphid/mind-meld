@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 // The scheduled sync is what every worker container runs once a cycle. These
 // tests are about which phases it runs under the AI gate, so every phase is
@@ -39,10 +39,13 @@ import { drainIngestSpool } from './ingest-spool.js'
 import { generatePendingEmbeddings, updateAggregateEmbeddings } from '../embeddings/batch.js'
 import { ensureEmbeddingModel } from '../embeddings/ollama.js'
 import { ensureSummarizeModel } from '../embeddings/summarize.js'
+import { query } from '../db/postgres.js'
+import { config } from '../config.js'
 
 beforeEach(() => {
   vi.clearAllMocks()
   aiHold.mockResolvedValue(null)
+  vi.mocked(query).mockResolvedValue({ rows: [], rowCount: 0 } as never)
 })
 
 describe('runFullSync', () => {
@@ -135,5 +138,53 @@ describe('runFullSync phases', () => {
 
     vi.mocked(syncClaudeHistory).mockRejectedValueOnce(new Error('permission denied'))
     expect((await runFullSync()).errors).toEqual([expect.stringContaining('permission denied')])
+  })
+})
+
+// The flag a session was written with stays until its transcript changes, and
+// an unchanged transcript is never rewritten. So a prefix configured after a
+// session last synced never reached it, however many runs followed (#177).
+describe('runFullSync and the automated flag', () => {
+  const prefixes = config.automated.prefixes
+  afterEach(() => { config.automated.prefixes = prefixes })
+
+  const indexHolds = (session: { stored: boolean; opening: string }) =>
+    vi.mocked(query).mockImplementation((async (sql: string) =>
+      sql.includes('opening')
+        ? { rows: [{ id: 7, source: 'claude_code', machine: 'lairbox', ...session }] }
+        : { rows: [], rowCount: sql.startsWith('UPDATE') ? 1 : 0 }) as never)
+  const flagWrites = () => vi.mocked(query).mock.calls.filter(([sql]) => String(sql).startsWith('UPDATE sessions'))
+
+  it('flags a session whose opening line matches a prefix configured after it last synced', async () => {
+    config.automated.prefixes = ['Night-shift lair report:']
+    indexHolds({ stored: false, opening: 'Night-shift lair report: all quiet' })
+
+    const result = await runFullSync({ sources: [] })
+
+    expect(flagWrites()).toHaveLength(1)
+    expect(flagWrites()[0][1]).toEqual([[7], [false]])
+    expect(result.automatedFlagsCorrected).toBe(1)
+    expect(result.errors).toEqual([])
+  })
+
+  // A session flagged now must leave the queue before this run summarizes it.
+  it('corrects flags before the embedding phase reads the queue', async () => {
+    config.automated.prefixes = ['Night-shift lair report:']
+    indexHolds({ stored: false, opening: 'Night-shift lair report: all quiet' })
+
+    await runFullSync({ sources: [] })
+
+    const write = vi.mocked(query).mock.invocationCallOrder[vi.mocked(query).mock.calls.findIndex(([sql]) => String(sql).startsWith('UPDATE sessions'))]
+    expect(write).toBeLessThan(vi.mocked(generatePendingEmbeddings).mock.invocationCallOrder[0])
+  })
+
+  it('writes nothing when every stored flag already agrees', async () => {
+    config.automated.prefixes = ['Night-shift lair report:']
+    indexHolds({ stored: true, opening: 'Night-shift lair report: all quiet' })
+
+    const result = await runFullSync({ sources: [] })
+
+    expect(flagWrites()).toEqual([])
+    expect(result.automatedFlagsCorrected).toBe(0)
   })
 })
