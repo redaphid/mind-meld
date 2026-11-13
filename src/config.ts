@@ -114,6 +114,17 @@ export const config = {
   // things: it tags that one session, and it teaches search what noise LOOKS
   // like, so that SIMILAR sessions nobody has reported are ranked down too. The
   // second half is this block.
+  // The search event log (src/mcp/search-log.ts). Off stops new rows only; the
+  // list handle is still returned so output stays the same shape.
+  searchLog: {
+    enabled: getEnvBool("MINDMELD_SEARCH_LOG", true),
+    // Rows waiting to be written. Past it new rows are dropped and counted, so
+    // a stalled database costs log rows, never memory or search latency.
+    queueCapacity: getEnvInt("MINDMELD_SEARCH_LOG_QUEUE", 1000),
+    // Days the query text (search_log.request) is kept before it is nulled.
+    rawDays: getEnvInt("MINDMELD_SEARCH_LOG_RAW_DAYS", 180),
+  },
+
   noise: {
     // How hard a result that resembles reported noise is pushed down, as a
     // multiplicative damping: score * (1 - weight * similarityToNearestCluster).
