@@ -146,7 +146,8 @@ describe('runFullSync phases', () => {
 // session last synced never reached it, however many runs followed (#177).
 describe('runFullSync and the automated flag', () => {
   const prefixes = config.automated.prefixes
-  afterEach(() => { config.automated.prefixes = prefixes })
+  const configure = (list: string[]) => Object.assign(config.automated, { prefixes: list })
+  afterEach(() => configure(prefixes))
 
   const indexHolds = (session: { stored: boolean; opening: string }) =>
     vi.mocked(query).mockImplementation((async (sql: string) =>
@@ -156,7 +157,7 @@ describe('runFullSync and the automated flag', () => {
   const flagWrites = () => vi.mocked(query).mock.calls.filter(([sql]) => String(sql).startsWith('UPDATE sessions'))
 
   it('flags a session whose opening line matches a prefix configured after it last synced', async () => {
-    config.automated.prefixes = ['Night-shift lair report:']
+    configure(['Night-shift lair report:'])
     indexHolds({ stored: false, opening: 'Night-shift lair report: all quiet' })
 
     const result = await runFullSync({ sources: [] })
@@ -169,7 +170,7 @@ describe('runFullSync and the automated flag', () => {
 
   // A session flagged now must leave the queue before this run summarizes it.
   it('corrects flags before the embedding phase reads the queue', async () => {
-    config.automated.prefixes = ['Night-shift lair report:']
+    configure(['Night-shift lair report:'])
     indexHolds({ stored: false, opening: 'Night-shift lair report: all quiet' })
 
     await runFullSync({ sources: [] })
@@ -179,7 +180,7 @@ describe('runFullSync and the automated flag', () => {
   })
 
   it('writes nothing when every stored flag already agrees', async () => {
-    config.automated.prefixes = ['Night-shift lair report:']
+    configure(['Night-shift lair report:'])
     indexHolds({ stored: true, opening: 'Night-shift lair report: all quiet' })
 
     const result = await runFullSync({ sources: [] })

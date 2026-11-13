@@ -6,6 +6,7 @@ import { generatePendingEmbeddings, updateAggregateEmbeddings, AGGREGATE_BATCH_S
 import { ensureEmbeddingModel } from '../embeddings/ollama.js';
 import { ensureSummarizeModel } from '../embeddings/summarize.js';
 import { query } from '../db/postgres.js';
+import { findAutomatedDrift, correctAutomatedDrift } from '../embeddings/automated-flags.js';
 import { aiHold, AI_HOLD_NOTICE, type AiHold } from './sync-control.js';
 
 const MAX_AGGREGATE_DRAIN_MS = 50 * 60 * 1000;
@@ -45,6 +46,10 @@ export interface FullSyncResult {
     drained: number;
     quarantined: number;
   };
+  // Sessions whose stored automated flag no longer matched the classifier.
+  // Non-zero once after a pattern changes; non-zero every run means two
+  // processes classify differently (one lacks MINDMELD_AUTOMATED_PREFIXES).
+  automatedFlagsCorrected: number;
   embeddings: {
     messagesEmbedded: number;
     sessionsUpdated: number;
@@ -87,6 +92,7 @@ export async function runFullSync(options?: {
     history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
     memories: emptyMemoryStats(),
     spool: { configured: false, drained: 0, quarantined: 0 },
+    automatedFlagsCorrected: 0,
     embeddings: { messagesEmbedded: 0, sessionsUpdated: 0 },
     held: null,
     errors: [],
@@ -187,6 +193,21 @@ export async function runFullSync(options?: {
     }
   } catch (e) {
     const error = `Ingest spool drain failed: ${e}`;
+    console.error(error);
+    errors.push(error);
+  }
+
+  // The file sync above rewrites a session's automated flag only when its
+  // transcript changed, so a pattern configured since never reaches the rest
+  // (#177). Before the embedding phase, so a session flagged here is not
+  // summarized by this run.
+  try {
+    result.automatedFlagsCorrected = await correctAutomatedDrift(await findAutomatedDrift());
+    if (result.automatedFlagsCorrected > 0)
+      console.log(`
+--- Automated flag corrected on ${result.automatedFlagsCorrected} sessions ---`);
+  } catch (e) {
+    const error = `Automated flag check failed: ${e}`;
     console.error(error);
     errors.push(error);
   }
