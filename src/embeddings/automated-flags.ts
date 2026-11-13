@@ -2,8 +2,9 @@ import { query } from '../db/postgres.js'
 import { isAutomated } from './classify.js'
 
 // Sources synced through syncSession in src/sync/claude-code.ts, which
-// classifies a session by its first user message: they carry no title since
-// #95. Every other writer classifies the title it writes.
+// classifies a transcript by its first user message: transcripts carry no
+// title since #95. Memory backups share the claude_code source but hold no user
+// message, and their writer classifies the title, as every other writer does.
 const FIRST_PROMPT_SOURCES = ['claude_code', 'codex']
 
 // A live session whose stored is_automated is the opposite of what
@@ -23,12 +24,12 @@ export type FlagDrift = {
 export const findAutomatedDrift = async (): Promise<FlagDrift[]> => {
   const { rows } = await query<FlagDrift & { opening: string | null }>(
     `SELECT s.id, src.name AS source, COALESCE(s.machine, p.machine) AS machine, s.is_automated AS stored,
-            split_part(CASE WHEN src.name = ANY($1::text[]) THEN m.content_text ELSE s.title END, E'\\n', 1) AS opening
+            split_part(CASE WHEN m.found THEN m.content_text ELSE s.title END, E'\\n', 1) AS opening
      FROM sessions s
      JOIN projects p ON p.id = s.project_id
      JOIN sources src ON src.id = p.source_id
      LEFT JOIN LATERAL (
-       SELECT content_text FROM messages
+       SELECT true AS found, content_text FROM messages
        WHERE src.name = ANY($1::text[]) AND session_id = s.id AND role = 'user'
        ORDER BY sequence_num NULLS FIRST, timestamp, id
        LIMIT 1
