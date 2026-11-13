@@ -15,6 +15,10 @@ export type SystemSpec = {
   // none, or the gold session's project path (the project-boost diagnosis).
   cwd?: 'query' | 'none' | 'gold'
   module?: string
+  // On steering items, hand the examples to search: today as likeSession /
+  // unlikeSession ids, and to a module also as `steering` on its params, so a
+  // recipe-based search can read them without a legacy parameter.
+  steer?: 'toward' | 'away'
   derive?: { from: string; transform: 'reverse' | 'shuffle' }
 }
 
@@ -29,7 +33,7 @@ export const BUILTIN_SYSTEMS: Record<string, SystemSpec> = {
   'hybrid-shuffled': { derive: { from: 'hybrid', transform: 'shuffle' } },
 }
 
-type SearchFn = (params: SearchParams) => Promise<SearchOutcome>
+type SearchFn = (params: BenchSearchParams) => Promise<SearchOutcome>
 
 const loadSearch = async (spec: SystemSpec, configDir: string): Promise<SearchFn> => {
   if (!spec.module) return searchWithDiagnostics
@@ -41,10 +45,16 @@ const loadSearch = async (spec: SystemSpec, configDir: string): Promise<SearchFn
   return loaded.searchWithDiagnostics
 }
 
-export const paramsFor = (query: BenchQuery, spec: SystemSpec): SearchParams => {
+export type BenchSearchParams = SearchParams & { steering?: { toward?: number[]; away?: number[] } }
+
+export const paramsFor = (query: BenchQuery, spec: SystemSpec): BenchSearchParams => {
   const cwd =
     spec.cwd === 'none' ? undefined : spec.cwd === 'gold' ? (query.goldProjectPath ?? undefined) : query.replay.cwd
+  const toward = spec.steer === 'toward' ? query.steering?.toward : undefined
+  const away = spec.steer === 'away' ? query.steering?.away : undefined
   return {
+    ...(toward && { likeSession: toward.map(String), steering: { toward } }),
+    ...(away && { unlikeSession: away.map(String), steering: { away } }),
     query: query.text,
     limit: K,
     dataClass: query.dataClass,

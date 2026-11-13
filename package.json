@@ -50,6 +50,7 @@
     "bench:compare": "tsx scripts/bench-compare.ts",
     "bench:validate": "tsx scripts/bench-validate.ts",
     "bench:freeze": "tsx scripts/bench-freeze.ts",
+    "bench:steer": "tsx scripts/bench-steer.ts",
     "db:migrate": "tsx scripts/migrate.ts",
     "db:reset": "docker compose down -v && docker compose up -d",
     "docker:up": "docker compose up -d",

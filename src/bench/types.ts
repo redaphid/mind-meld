@@ -1,6 +1,6 @@
 import type { MatchedTier } from '../mcp/search.js'
 
-export const STRATA = ['natural', 'paraphrase', 'keyword', 'crossclass', 'noanswer', 'real'] as const
+export const STRATA = ['natural', 'paraphrase', 'keyword', 'crossclass', 'noanswer', 'real', 'steering'] as const
 export type Stratum = (typeof STRATA)[number]
 
 export type Grade = 0 | 1 | 2 | 3
@@ -37,6 +37,8 @@ export type BenchQuery = {
   // Sessions that would match trivially, e.g. the transcript a real search
   // was made in, which quotes the query.
   excludeSessionIds: number[]
+  // Steering items only: the examples a steering system is handed.
+  steering?: { toward: number[]; away: number[] }
 }
 
 export type Judgment = {
