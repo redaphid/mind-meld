@@ -120,17 +120,23 @@ const assertNotTruncated = (
   throw new TruncationError(label, count);
 };
 
-// Summarize a single chunk of text
-export async function summarizeChunk(
-  text: string,
-  isChunkOfMany: boolean,
-  maxTokens?: number,
-): Promise<string> {
-  const contextNote = isChunkOfMany
-    ? "This is one chunk of a larger conversation. Preserve all technical details for later combination."
-    : "";
+// How a session's text becomes the text that is stored, shown and embedded.
+// One value per style keeps the threshold and both prompts together, so a
+// caller can never pair one style's chunk prompt with another's merge prompt.
+export type SummaryStyle = {
+  // Joined transcripts at or under this many chars are stored verbatim.
+  verbatimAtOrBelowChars: number;
+  chunkPrompt: (text: string, isChunkOfMany: boolean) => string;
+  mergePrompt: (combined: string) => string;
+};
 
-  const prompt = `${NO_THINK}
+export const CODING_STYLE: SummaryStyle = {
+  verbatimAtOrBelowChars: 8000,
+  chunkPrompt: (text, isChunkOfMany) => {
+    const contextNote = isChunkOfMany
+      ? "This is one chunk of a larger conversation. Preserve all technical details for later combination."
+      : "";
+    return `${NO_THINK}
 You are writing a dense technical summary of a coding conversation. The summary is used for semantic search, so it must describe what actually happened — not reproduce it.
 
 ${contextNote}
@@ -154,6 +160,31 @@ CONVERSATION:
 ${text}
 
 SUMMARY:`;
+  },
+  mergePrompt: (combined) => `${NO_THINK}
+Merge the following chunk summaries of a single coding conversation into one coherent summary.
+
+Rules:
+- Preserve concrete nouns from each chunk (file paths, function names, error messages, decisions) inline as prose.
+- Remove redundancy — if two chunks mention the same thing, say it once.
+- Maintain chronological flow where it matters.
+- NO code blocks, NO triple backticks, NO verbatim output, NO invented examples.
+- Output the merged summary only. No preamble, no "Combined Summary:" heading.
+
+CHUNK SUMMARIES:
+${combined}
+
+MERGED SUMMARY:`,
+};
+
+// Summarize a single chunk of text
+export async function summarizeChunk(
+  text: string,
+  isChunkOfMany: boolean,
+  maxTokens?: number,
+  style: SummaryStyle = CODING_STYLE,
+): Promise<string> {
+  const prompt = style.chunkPrompt(text, isChunkOfMany);
 
   const response = await fetchWithRetry(
     `${config.ollama.url}/api/generate`,
@@ -210,11 +241,14 @@ SUMMARY:`;
 }
 
 // Combine multiple summaries into one
-export async function combineSummaries(summaries: string[]): Promise<string> {
+export async function combineSummaries(
+  summaries: string[],
+  style: SummaryStyle = CODING_STYLE,
+): Promise<string> {
   const combined = summaries.join("\n\n---\n\n");
 
   // If combined summaries are short enough, return as-is
-  if (combined.length <= MAX_CHARS_BEFORE_SUMMARIZE) {
+  if (combined.length <= style.verbatimAtOrBelowChars) {
     console.log(
       `SUMMARY-OF-SUMMARIES (${summaries.length} chunk summaries joined as-is, ${combined.length} chars):\n${combined}`,
     );
@@ -228,20 +262,7 @@ export async function combineSummaries(summaries: string[]): Promise<string> {
     );
     const startedAt = performance.now();
 
-    const prompt = `${NO_THINK}
-Merge the following chunk summaries of a single coding conversation into one coherent summary.
-
-Rules:
-- Preserve concrete nouns from each chunk (file paths, function names, error messages, decisions) inline as prose.
-- Remove redundancy — if two chunks mention the same thing, say it once.
-- Maintain chronological flow where it matters.
-- NO code blocks, NO triple backticks, NO verbatim output, NO invented examples.
-- Output the merged summary only. No preamble, no "Combined Summary:" heading.
-
-CHUNK SUMMARIES:
-${combined}
-
-MERGED SUMMARY:`;
+    const prompt = style.mergePrompt(combined);
 
     let response: Response;
     try {
@@ -292,7 +313,7 @@ MERGED SUMMARY:`;
   console.log(
     `Combined summaries too long (${combined.length} chars), chunking recursively...`,
   );
-  return summarizeConversation(summaries);
+  return summarizeConversation(summaries, style);
 }
 
 // Split messages into chunks that fit within context window.
@@ -373,11 +394,12 @@ export const SHORT_CONVERSATION_CHARS = MAX_CHARS_BEFORE_SUMMARIZE;
 
 export async function summarizeConversation(
   messages: string[],
+  style: SummaryStyle = CODING_STYLE,
 ): Promise<string> {
   const combined = messages.join("\n\n---\n\n");
 
   // If short enough, no summarization needed
-  if (combined.length <= MAX_CHARS_BEFORE_SUMMARIZE) {
+  if (combined.length <= style.verbatimAtOrBelowChars) {
     return combined;
   }
 
@@ -385,7 +407,7 @@ export async function summarizeConversation(
   if (combined.length <= MAX_SUMMARIZER_INPUT_CHARS) {
     console.log(`Summarizing conversation (${combined.length} chars)...`);
     const startedAt = performance.now();
-    const summary = await summarizeChunk(combined, false);
+    const summary = await summarizeChunk(combined, false, undefined, style);
     console.log(
       `Summarized to ${summary.length} chars in ${((performance.now() - startedAt) / 1000).toFixed(1)}s:\n${summary}`,
     );
@@ -417,7 +439,7 @@ export async function summarizeConversation(
       // catch's truncation fallback runs and the next level is strictly smaller.
       const summary = assertShrunk(
         chunkText,
-        await summarizeChunk(chunkText, true),
+        await summarizeChunk(chunkText, true, undefined, style),
       );
       chunkSummaries.push(summary);
       console.log(
@@ -431,7 +453,7 @@ export async function summarizeConversation(
   }
 
   // Combine all chunk summaries
-  return combineSummaries(chunkSummaries);
+  return combineSummaries(chunkSummaries, style);
 }
 
 // A summary that isn't smaller than its input is not a summary. qwen3 at 0.3 falls
