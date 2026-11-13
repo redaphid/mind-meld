@@ -82,3 +82,14 @@ describe('when the effective project class differs', () => {
     expect(error).toHaveProperty('message', 'Snapshot dataClass must match the stored project class')
   })
 })
+
+// Every other writer classifies what it writes; this one stored false (#177).
+describe('when a snapshot thread opens like an automated run', () => {
+  it('stores it flagged automated', async () => {
+    const automated = payload()
+    automated.session.title = 'Huddle in #lair: lantern standup'
+    await ingestSnapshot(7, automated)
+    const insert = query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO sessions'))
+    expect(insert?.[1].at(-1)).toBe(true)
+  })
+})
