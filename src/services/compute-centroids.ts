@@ -25,6 +25,7 @@ export const computeSessionCentroid = async (
      FROM messages m
      JOIN embeddings e ON m.id = e.message_id
      WHERE m.session_id = $1
+       AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = m.session_id AND s.deleted_at IS NULL)
        AND e.chroma_collection = $2
        AND m.content_text IS NOT NULL
        AND LENGTH(m.content_text) > 10`,
@@ -50,6 +51,7 @@ export const computeSessionCentroid = async (
        FROM messages m
        JOIN embeddings e ON m.id = e.message_id
        WHERE m.session_id = $1
+       AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = m.session_id AND s.deleted_at IS NULL)
          AND e.chroma_collection = $2
          AND m.id > $3
        ORDER BY m.id
@@ -105,7 +107,7 @@ export const computeProjectCentroid = async (
      FROM messages m
      JOIN sessions s ON m.session_id = s.id
      JOIN embeddings e ON m.id = e.message_id
-     WHERE s.project_id = $1
+     WHERE s.project_id = $1 AND s.deleted_at IS NULL
        AND e.chroma_collection = $2
        AND m.content_text IS NOT NULL
        AND LENGTH(m.content_text) > 10`,
@@ -131,7 +133,7 @@ export const computeProjectCentroid = async (
        FROM messages m
        JOIN sessions s ON m.session_id = s.id
        JOIN embeddings e ON m.id = e.message_id
-       WHERE s.project_id = $1
+       WHERE s.project_id = $1 AND s.deleted_at IS NULL
          AND e.chroma_collection = $2
          AND m.id > $3
        ORDER BY m.id
@@ -187,7 +189,7 @@ export const updateSessionCentroid = async (sessionId: number): Promise<void> =>
        SET centroid_vector = $1,
            centroid_message_count = $2,
            centroid_computed_at = NOW()
-       WHERE id = $3`,
+       WHERE id = $3 AND deleted_at IS NULL`,
       [centroidJson, result.count, sessionId]
     )
   }
@@ -197,6 +199,7 @@ export const updateSessionCentroid = async (sessionId: number): Promise<void> =>
  * Compute and store centroid for a project
  */
 export const updateProjectCentroid = async (projectId: number): Promise<void> => {
+  const version = await query<{ version: string }>('SELECT xmin::text AS version FROM projects WHERE id = $1', [projectId])
   const result = await computeProjectCentroid(projectId)
 
   if (result) {
@@ -206,8 +209,8 @@ export const updateProjectCentroid = async (projectId: number): Promise<void> =>
        SET centroid_vector = $1,
            centroid_message_count = $2,
            centroid_computed_at = NOW()
-       WHERE id = $3`,
-      [centroidJson, result.count, projectId]
+       WHERE id = $3 AND xmin::text = $4`,
+      [centroidJson, result.count, projectId, version.rows[0]?.version]
     )
   }
 }
@@ -222,7 +225,7 @@ export const computeAllSessionCentroids = async (): Promise<void> => {
      FROM sessions s
      JOIN messages m ON s.id = m.session_id
      JOIN embeddings e ON m.id = e.message_id
-     WHERE e.chroma_collection = $1
+     WHERE e.chroma_collection = $1 AND s.deleted_at IS NULL
        AND ${notWarmup('s')}
      ORDER BY s.id`,
     [config.chroma.collections.messages]
@@ -257,7 +260,7 @@ export const computeAllProjectCentroids = async (): Promise<void> => {
      JOIN sessions s ON p.id = s.project_id
      JOIN messages m ON s.id = m.session_id
      JOIN embeddings e ON m.id = e.message_id
-     WHERE e.chroma_collection = $1
+     WHERE e.chroma_collection = $1 AND s.deleted_at IS NULL
      ORDER BY p.id`,
     [config.chroma.collections.messages]
   )

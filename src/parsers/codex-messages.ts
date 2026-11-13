@@ -99,7 +99,9 @@ export function parseCodexLine(line: string, sequenceNum: number): ParsedLine {
       isSidechain: false,
     };
   } else if (payloadType === 'function_call_output' || payloadType === 'custom_tool_call_output') {
-    const output = textValue(payload.output);
+    // Tool outputs can be content-part arrays carrying base64 screenshots; index
+    // their text only — the image stays in contentJson.
+    const output = Array.isArray(payload.output) ? contentText(payload.output, 'tool') : textValue(payload.output);
     message = {
       uuid: externalId,
       parentUuid: null,

@@ -1692,7 +1692,33 @@ components:
     IngestPayload:
       type: object
       required: [source, project, session, messages]
+      description: |
+        Append is the default. Snapshot mode replaces a complete logical thread atomically.
+        Supply dataClass matching the stored source, mode: snapshot, and snapshot:
+        {revision: positive safe integer, complete: true}. Messages must be chronological
+        with unique normalized externalIds and strictly increasing nonnegative sequenceNums.
+        Empty messages tombstone the thread. Older revisions are ignored; equal revisions
+        with different normalized content return 400. Newer identical content advances
+        the revision without creating a session. Changed content creates an immutable
+        session and hides its predecessor from readers and search, including vector hits.
+        Current snapshots are searchable immediately without waiting for a summary.
+        The caller must persist increasing revisions and send complete snapshots, never pages.
       properties:
+        mode:
+          type: string
+          enum: [append, snapshot]
+          default: append
+        snapshot:
+          type: object
+          required: [revision, complete]
+          properties:
+            revision:
+              type: integer
+              minimum: 1
+              maximum: 9007199254740991
+            complete:
+              type: boolean
+              const: true
         source:
           type: string
           description: |
@@ -1807,9 +1833,16 @@ components:
           type: integer
         projectId:
           type: integer
-        sessionId:
+        status:
+          type: string
+          enum: [applied, unchanged, stale]
+          description: Present for snapshot mode only.
+        revision:
           type: integer
-          description: Use this id with the `getSession` MCP tool.
+          description: Current head revision, including when the submitted revision was stale.
+        sessionId:
+          type: [integer, 'null']
+          description: Current session id; null for a tombstoned snapshot.
         messagesInserted:
           type: integer
           description: Newly inserted messages; `0` on a replayed payload.
