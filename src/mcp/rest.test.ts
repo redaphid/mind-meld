@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { toSearchHit, toSearchResponse, toDigest, toMessages, toMessage } from './rest.js'
+import { toSearchHit, toSearchResponse, toDigest, toMessages, toMessage, parseSearchShape } from './rest.js'
 import type { SearchResult } from './search.js'
 import type { SessionDigest, MessagesResult, SessionMessage } from './session.js'
 
@@ -15,6 +15,10 @@ const hit = (over: Partial<SearchResult> = {}): SearchResult => ({
   score: 0.5,
   matched_tier: 'session',
   snippet: 'we fixed **NaN** embeddings',
+  noise_damping: null,
+  evidence: [{ arm: 'session', rank: 1, cosine: 0.8 }],
+  base: 0.5,
+  adjustments: [],
   ...over,
 })
 
@@ -50,6 +54,9 @@ describe('toSearchHit', () => {
       noiseDamping: null,
       snippet: 'we fixed **NaN** embeddings',
       cursor: null,
+      evidence: [{ arm: 'session', rank: 1, cosine: 0.8 }],
+      base: 0.5,
+      adjustments: [],
     })
   })
 
@@ -195,5 +202,28 @@ describe('toMessage', () => {
   it('maps a missing sequence number to null', () => {
     const dto = toMessage(message({ sequence_num: null as unknown as number }))
     expect(dto.sequenceNum).toBeNull()
+  })
+})
+
+describe('parseSearchShape', () => {
+  it('defaults to a hybrid search of 20', () => {
+    expect(parseSearchShape({})).toEqual({ mode: 'hybrid', limit: 20 })
+  })
+
+  it.each(['semantic', 'text', 'hybrid'])('accepts mode %s', (mode) => {
+    expect(parseSearchShape({ mode })).toEqual({ mode, limit: 20 })
+  })
+
+  it.each(['vector', 'Hybrid', '', ['text', 'hybrid']])('rejects mode %j instead of running hybrid', (mode) => {
+    expect(parseSearchShape({ mode })).toEqual({ error: 'mode must be one of semantic, text, hybrid' })
+  })
+
+  it.each(['0', '-3', '2.5', 'ten'])('rejects limit %s', (limit) => {
+    expect(parseSearchShape({ limit })).toEqual({ error: 'limit must be a positive integer' })
+  })
+
+  it('caps the limit at 100', () => {
+    expect(parseSearchShape({ limit: '1' })).toEqual({ mode: 'hybrid', limit: 1 })
+    expect(parseSearchShape({ limit: '500' })).toEqual({ mode: 'hybrid', limit: 100 })
   })
 })

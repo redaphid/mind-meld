@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
 import { listProjects, listSessions, getActivity } from './browse.js'
-import { toSearchResponse, toDigest, toMessages, toMessage } from './rest.js'
+import { toSearchResponse, toDigest, toMessages, toMessage, parseSearchShape } from './rest.js'
 import { STATS_WINDOWS, usageStats } from './usage-stats.js'
 import { listQuarantine, replayQuarantine, countPending } from '../sync/quarantine.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -12,7 +12,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
-import { searchWithDiagnostics, UnknownDataClassError, DEFAULT_SEARCH_MODE } from './search.js'
+import { searchWithDiagnostics, UnknownDataClassError } from './search.js'
 import {
   searchLog,
   restCaller,
@@ -525,15 +525,20 @@ const logRestFollowUp = (req: any, tool: FollowUpTool, target: FollowUpTarget) =
 
 app.get('/api/search', apiRoute('Search', async (req, res) => {
   const q = typeof req.query.q === 'string' ? req.query.q : undefined
-  const mode = req.query.mode as 'semantic' | 'text' | 'hybrid' | undefined
 
   if (!q?.trim()) {
     res.status(400).json({ status: 'error', error: 'q is required' })
     return
   }
 
+  const shape = parseSearchShape(req.query)
+  if ('error' in shape) {
+    res.status(400).json({ status: 'error', error: shape.error })
+    return
+  }
+  const { mode, limit } = shape
+
   const list = mintListHandle()
-  const resolvedMode = mode && ['semantic', 'text', 'hybrid'].includes(mode) ? mode : DEFAULT_SEARCH_MODE
   const logged = {
     kind: 'search' as const,
     at: new Date(),
@@ -541,7 +546,7 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
     tool: 'rest:search' as const,
     list,
     request: { ...req.query },
-    mode: resolvedMode,
+    mode,
   }
   const started = performance.now()
 
@@ -556,8 +561,8 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
     outcome = await searchWithDiagnostics({
       query: q,
       negativeQuery: typeof req.query.not === 'string' ? req.query.not : undefined,
-      mode: resolvedMode,
-      limit: Math.min(intParam(req.query.limit, 20), 100),
+      mode,
+      limit,
       source: typeof req.query.source === 'string' ? req.query.source : undefined,
       since: typeof req.query.since === 'string' ? req.query.since : undefined,
       cwd,
@@ -593,7 +598,7 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
 
   searchLog.record({ ...logged, totalMs: performance.now() - started, results: outcome.results, degraded: outcome.degraded, armMs: outcome.armMs })
 
-  res.json(toSearchResponse({ query: q, list, mode: resolvedMode, outcome }))
+  res.json(toSearchResponse({ query: q, list, mode, outcome }))
 }))
 
 app.get('/api/projects', apiRoute('Projects', async (_req, res) => {

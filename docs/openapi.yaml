@@ -287,13 +287,14 @@ paths:
           example: how did I set up the cloudflare tunnel
         - name: mode
           in: query
+          description: Any other value is a 400.
           schema:
             type: string
             enum: [hybrid, semantic, text]
             default: hybrid
         - name: limit
           in: query
-          description: Hits to return. Capped at 100.
+          description: Hits to return. Capped at 100; a limit that is not a positive integer is a 400.
           schema:
             type: integer
             default: 20
@@ -443,7 +444,7 @@ paths:
                     items:
                       $ref: '#/components/schemas/SearchHit'
         '400':
-          description: Missing `q`.
+          description: Missing `q`, an unknown `mode` or `dataClass`, or a `limit` that is not a positive integer.
           content:
             application/json:
               schema:
@@ -2203,7 +2204,7 @@ components:
 
     SearchHit:
       type: object
-      required: [sessionId, title, titleSource, project, projectPath, source, dataClass, date, score, matchedTier, noiseDamping, snippet, cursor]
+      required: [sessionId, title, titleSource, project, projectPath, source, dataClass, date, score, matchedTier, noiseDamping, snippet, cursor, evidence, base, adjustments]
       properties:
         sessionId:
           type: integer
@@ -2249,12 +2250,16 @@ components:
         score:
           type: number
           description: |
-            Fused rank score, plus a boost when the session belongs to a project
-            matching `cwd`. Comparable within one response, not across responses.
+            The ordering key: `base` with each of `adjustments` applied in
+            order. Comparable within one response, not across responses, and
+            not a measure of match quality; for that read the cosines in
+            `evidence`.
         matchedTier:
           type: string
           enum: [session, chunk, message]
-          description: Which index tier produced the hit.
+          description: |
+            The tier of the first entry in `evidence`, the arm that ranked the
+            session best. A full-text match is a `message`.
         noiseDamping:
           description: |
             The factor the noise penalty multiplied `score` by, where 1 means
@@ -2288,6 +2293,70 @@ components:
               properties:
                 messageId:
                   type: integer
+        evidence:
+          description: |
+            Every arm that found the session, best first: lowest rank, ties
+            broken in the order session, chunk, message, lexical. `rank` is
+            1-based, the session's position in that arm after filtering, which
+            is the position fusion scored it at. `cosine` is the raw similarity
+            of the session's nearest vector in that arm. `tsRank` is Postgres
+            `ts_rank` of its best matching message, comparable only within one
+            query.
+          type: array
+          minItems: 1
+          items:
+            oneOf:
+              - type: object
+                required: [arm, rank, cosine]
+                properties:
+                  arm: { type: string, const: session }
+                  rank: { type: integer, minimum: 1 }
+                  cosine: { type: number }
+              - type: object
+                required: [arm, rank, cosine, chunkIndex]
+                properties:
+                  arm: { type: string, const: chunk }
+                  rank: { type: integer, minimum: 1 }
+                  cosine: { type: number }
+                  chunkIndex: { type: integer }
+              - type: object
+                required: [arm, rank, cosine, messageId]
+                properties:
+                  arm: { type: string, const: message }
+                  rank: { type: integer, minimum: 1 }
+                  cosine: { type: number }
+                  messageId: { type: integer }
+              - type: object
+                required: [arm, rank, tsRank, messageId]
+                properties:
+                  arm: { type: string, const: lexical }
+                  rank: { type: integer, minimum: 1 }
+                  tsRank: { type: number }
+                  messageId: { type: integer }
+        base:
+          type: number
+          description: The reciprocal-rank fusion of the ranks in `evidence`, before any adjustment.
+        adjustments:
+          description: |
+            Applied to `base` in this order. `noise` multiplies by `factor`;
+            `similarity` is the cosine to the nearest reported-noise cluster,
+            and a factor of 1 means measured and clean. Absent when the penalty
+            was off or the session has no summary vector (`noiseDamping` null).
+            `project` adds `boost` for a session in a project matching `cwd`.
+          type: array
+          items:
+            oneOf:
+              - type: object
+                required: [kind, similarity, factor]
+                properties:
+                  kind: { type: string, const: noise }
+                  similarity: { type: number }
+                  factor: { type: number, minimum: 0, maximum: 1 }
+              - type: object
+                required: [kind, boost]
+                properties:
+                  kind: { type: string, const: project }
+                  boost: { type: number }
 
     Project:
       type: object
