@@ -3,8 +3,8 @@ import path from 'node:path'
 import { sessionIdsMatchingPaths, startedAtOf } from './corpus.js'
 import { judgePairs, type Pair } from './judge.js'
 import { compareScores, indexJudgments, reportScores, scoreRuns, visibleResults, type Visibility } from './score.js'
-import { appendJsonl, benchFiles, loadBench, readJson, readJsonl, writeJson } from './store.js'
-import { BUILTIN_SYSTEMS, deriveRun, searcherFor, type Searcher, type SystemSpec } from './systems.js'
+import { appendJsonl, benchFiles, loadBench, readIdList, readJson, readJsonl, writeJson, type BenchFiles } from './store.js'
+import { BUILTIN_SYSTEMS, deriveRun, searcherFor, searchUndegraded, type Searcher, type SystemSpec } from './systems.js'
 import type { BenchQuery, Manifest, Run, StratumReport } from './types.js'
 
 const STATUS_URL = 'http://127.0.0.1:3847/api/system'
@@ -33,9 +33,10 @@ export const resolveSystems = (names: string[], configFile?: string): Map<string
   )
 }
 
-export const visibilityFor = async (manifest: Manifest): Promise<Visibility> => ({
+export const visibilityFor = async (manifest: Manifest, files: BenchFiles): Promise<Visibility> => ({
   snapshotMaxSessionId: manifest.snapshotMaxSessionId,
   excludedSessionIds: new Set(await sessionIdsMatchingPaths(manifest.excludePathPatterns)),
+  loopedSessionIds: new Set(readIdList(files.loopedSessionIds)),
 })
 
 export type RunOptions = {
@@ -49,8 +50,6 @@ export type RunOptions = {
   degradedRetries?: number
   log?: (line: string) => void
 }
-
-const DEGRADED_WAIT_MS = 20_000
 
 const runSearches = async (
   queries: BenchQuery[],
@@ -68,13 +67,8 @@ const runSearches = async (
     const order = systems.map((_, i) => systems[(i + qi) % systems.length])
     for (const system of order) {
       if (done.get(system)!.has(query.id)) continue
-      let run = await searchers.get(system)!(query)
-      for (let attempt = 0; run.degraded && attempt < retries; attempt++) {
-        retried++
-        log(`degraded (${run.degraded}); waiting before retry ${attempt + 1}`)
-        await new Promise((r) => setTimeout(r, DEGRADED_WAIT_MS))
-        run = await searchers.get(system)!(query)
-      }
+      const { run, retries: used } = await searchUndegraded(searchers.get(system)!, query, retries, log)
+      retried += used
       const started = await startedAtOf(run.results.map((r) => r.sessionId))
       const full: Run = { system, ...run, results: run.results.map((r) => ({ ...r, startedAt: started.get(r.sessionId) ?? null })) }
       appendJsonl(files.run(`${name}-${system}`), [full])
@@ -107,7 +101,7 @@ export const missingPairs = (queries: BenchQuery[], runs: Run[], judged: Set<str
 
 export const judgeMissing = async (dir: string, runs: Run[], log: (line: string) => void) => {
   const { files, manifest, queries, judgments } = loadBench(dir)
-  const visibility = await visibilityFor(manifest)
+  const visibility = await visibilityFor(manifest, files)
   const judged = new Set(
     judgments.filter((j) => j.promptVersion === manifest.promptVersion && j.repeat === 0).map((j) => `${j.queryId}:${j.sessionId}`)
   )
@@ -124,8 +118,8 @@ export const judgeMissing = async (dir: string, runs: Run[], log: (line: string)
 }
 
 export const scoreSavedRun = async (dir: string, runs: Run[]) => {
-  const { manifest, queries, judgments } = loadBench(dir)
-  return scoreRuns(queries, runs, indexJudgments(judgments, manifest.promptVersion), await visibilityFor(manifest))
+  const { files, manifest, queries, judgments } = loadBench(dir)
+  return scoreRuns(queries, runs, indexJudgments(judgments, manifest.promptVersion), await visibilityFor(manifest, files))
 }
 
 export const runBench = async ({ dir, systems, config, name, from, judge, degradedRetries = 2, log = console.error }: RunOptions) => {

@@ -10,9 +10,11 @@ import {
   type PairedDifference,
 } from './metrics.js'
 import {
+  GOLD_SUMMARIES,
   HEADLINE_STRATA,
   STRATA,
   type BenchQuery,
+  type GoldSummary,
   type Grade,
   type Judgment,
   type Run,
@@ -37,7 +39,15 @@ export const indexJudgments = (judgments: Judgment[], promptVersion: string): Gr
   return index
 }
 
-export type Visibility = { snapshotMaxSessionId: number; excludedSessionIds: Set<number> }
+export type Visibility = {
+  snapshotMaxSessionId: number
+  excludedSessionIds: Set<number>
+  // Sessions whose stored summary is a repetition loop; reports split on it.
+  loopedSessionIds: Set<number>
+}
+
+export const goldSummaryOf = (query: BenchQuery, looped: Set<number>): GoldSummary | null =>
+  query.goldSessionIds.some((id) => looped.has(id)) ? 'loop' : query.goldSummaryKind
 
 // What a run is scored on: results that existed at the snapshot (later
 // ingestion, including the harness's own transcripts, must not move scores),
@@ -54,7 +64,7 @@ export const visibleResults = (run: Run, query: BenchQuery, visibility: Visibili
 export type QueryScore = {
   queryId: string
   stratum: Stratum
-  goldSummaryKind: BenchQuery['goldSummaryKind']
+  goldSummaryKind: GoldSummary | null
   ndcg10: number | null
   rrGold: number | null
   recallGold10: number | null
@@ -117,17 +127,15 @@ export const summarize = (
 
 type Group = { stratum: StratumReport['stratum']; slice: Slice; keep: (s: QueryScore) => boolean }
 
-const GROUPS: Group[] = [
-  { stratum: 'headline', slice: 'all', keep: (s) => HEADLINE_STRATA.includes(s.stratum) },
-  ...STRATA.map((stratum): Group => ({ stratum, slice: 'all', keep: (s) => s.stratum === stratum })),
-  ...(['raw', 'generated'] as const).map(
-    (kind): Group => ({
-      stratum: 'headline',
-      slice: kind,
-      keep: (s) => HEADLINE_STRATA.includes(s.stratum) && s.goldSummaryKind === kind,
-    })
+const inGroup = (stratum: StratumReport['stratum'], s: QueryScore) =>
+  stratum === 'headline' ? HEADLINE_STRATA.includes(s.stratum) : s.stratum === stratum
+
+const GROUPS: Group[] = (['headline', ...STRATA] as const).flatMap((stratum) => [
+  { stratum, slice: 'all', keep: (s: QueryScore) => inGroup(stratum, s) },
+  ...GOLD_SUMMARIES.map(
+    (kind): Group => ({ stratum, slice: kind, keep: (s) => inGroup(stratum, s) && s.goldSummaryKind === kind })
   ),
-]
+])
 
 export const scoreRuns = (
   queries: BenchQuery[],
@@ -139,7 +147,8 @@ export const scoreRuns = (
   return queries.flatMap((query) => {
     const run = runByQuery.get(query.id)
     if (!run) return []
-    return [scoreQuery(query, visibleResults(run, query, visibility), grades.get(query.id) ?? new Map(), run)]
+    const score = scoreQuery(query, visibleResults(run, query, visibility), grades.get(query.id) ?? new Map(), run)
+    return [{ ...score, goldSummaryKind: goldSummaryOf(query, visibility.loopedSessionIds) }]
   })
 }
 

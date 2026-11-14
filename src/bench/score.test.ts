@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { compareScores, indexJudgments, scoreQuery, scoreRuns, visibleResults } from './score.js'
+import { compareScores, indexJudgments, reportScores, scoreQuery, scoreRuns, visibleResults } from './score.js'
 import type { BenchQuery, Grade, Judgment, Run, RunResult } from './types.js'
 
 const queryOf = (over: Partial<BenchQuery> = {}): BenchQuery => ({
@@ -35,7 +35,7 @@ const runOf = (ids: number[], over: Partial<Run> = {}): Run => ({
   ...over,
 })
 
-const visibility = { snapshotMaxSessionId: 100, excludedSessionIds: new Set([13]) }
+const visibility = { snapshotMaxSessionId: 100, excludedSessionIds: new Set([13]), loopedSessionIds: new Set<number>() }
 
 describe('visibleResults', () => {
   it('drops sessions newer than the snapshot and excluded ones, then re-ranks', () => {
@@ -125,5 +125,33 @@ describe('compareScores', () => {
       (c) => c.stratum === 'natural' && c.metric === 'ndcg10'
     )!
     expect(ndcg.difference!.hi < 0).toBe(true)
+  })
+})
+
+describe('gold summary slices', () => {
+  const queries = [
+    queryOf({ id: 'q-raw', goldSessionIds: [1], goldSummaryKind: 'raw' }),
+    queryOf({ id: 'q-looped', goldSessionIds: [2], goldSummaryKind: 'generated' }),
+    queryOf({ id: 'q-clean', goldSessionIds: [3], goldSummaryKind: 'generated' }),
+  ]
+  const runs = queries.map((q) => runOf([], { queryId: q.id }))
+  const scores = scoreRuns(queries, runs, new Map(), { ...visibility, loopedSessionIds: new Set([2]) })
+
+  it('files a query whose gold summary loops under loop, whatever kind it was built with', () => {
+    expect(scores.map((s) => [s.queryId, s.goldSummaryKind])).toEqual([
+      ['q-raw', 'raw'],
+      ['q-looped', 'loop'],
+      ['q-clean', 'generated'],
+    ])
+  })
+
+  it('reports each stratum split by raw, generated and loop', () => {
+    const slices = reportScores('system-bumbling-otter', scores).filter((r) => r.stratum === 'natural').map((r) => [r.slice, r.n])
+    expect(slices).toEqual([
+      ['all', 3],
+      ['raw', 1],
+      ['generated', 1],
+      ['loop', 1],
+    ])
   })
 })

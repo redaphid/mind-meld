@@ -75,7 +75,13 @@ export type Interval = { mean: number; lo: number; hi: number }
 // built against full text, and noanswer because it has nothing to rank.
 export const HEADLINE_STRATA: Stratum[] = ['natural', 'keyword', 'crossclass', 'real']
 
-export type Slice = 'all' | SummaryKind
+// How the gold session's stored summary reads at scoring time. `loop` is a
+// generated summary that degenerated into repetition, listed by id in the
+// bench directory because it is measured outside the harness.
+export type GoldSummary = SummaryKind | 'loop'
+export const GOLD_SUMMARIES: GoldSummary[] = ['raw', 'generated', 'loop']
+
+export type Slice = 'all' | GoldSummary
 
 export type StratumReport = {
   system: string
