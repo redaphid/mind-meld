@@ -668,11 +668,12 @@ search/getSession/getMessages to find and read notes back later.`,
         id: number
         title: string | null
         summary: string | null
+        generated_title: string | null
         project_name: string
         started_at: Date
         message_count: number
       }>(
-        `SELECT s.id, s.title, s.summary, p.name as project_name, s.started_at, s.message_count
+        `SELECT s.id, s.title, s.summary, s.generated_title, p.name as project_name, s.started_at, s.message_count
          FROM sessions s
          JOIN projects p ON s.project_id = p.id
          WHERE p.id = ANY($1::int[]) AND s.deleted_at IS NULL
