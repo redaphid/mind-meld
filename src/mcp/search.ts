@@ -26,6 +26,7 @@ import {
   type EvidenceList,
   type Scored,
 } from './evidence.js'
+import { DEFAULT_SEARCH_MODE, type SearchMode } from './search-mode.js'
 
 const PROJECT_BOOST = 0.5
 
@@ -33,10 +34,6 @@ const UNLIKE_DAMPENING = 0.2
 
 type WeightedId = { id: string; weight: number }
 type ResolvedCentroid = { id: string; weight: number; centroid: number[] }
-
-export const SEARCH_MODES = ['semantic', 'text', 'hybrid'] as const
-export type SearchMode = (typeof SEARCH_MODES)[number]
-export const isSearchMode = (value: unknown): value is SearchMode => SEARCH_MODES.includes(value as SearchMode)
 
 export type SearchParams = {
   query?: string
@@ -145,8 +142,6 @@ const assertKnownDataClasses = async (dataClasses: string[]) => {
 }
 
 export type MatchedTier = 'session' | 'chunk' | 'message'
-
-export const DEFAULT_SEARCH_MODE = 'hybrid' satisfies SearchParams['mode']
 
 export type SearchCursor = { chunk_index?: number; message_id?: number }
 

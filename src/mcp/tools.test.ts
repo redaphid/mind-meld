@@ -21,9 +21,7 @@ const formatSearchResults = vi.fn((_r: unknown, options?: { list?: string | null
 vi.mock('./search.js', () => ({
   searchWithDiagnostics: (...args: unknown[]) => doSearch(...(args as [])),
   formatSearchResults: (...args: Parameters<typeof formatSearchResults>) => formatSearchResults(...args),
-  DEFAULT_SEARCH_MODE: 'hybrid',
   findProjectsByPath: (...args: unknown[]) => findProjectsByPath(...(args as [])),
-  SEARCH_MODES: ['semantic', 'text', 'hybrid'],
 }))
 
 const digest = vi.fn(async () => ({ title: 'a session' }))

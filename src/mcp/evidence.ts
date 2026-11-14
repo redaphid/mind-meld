@@ -6,7 +6,7 @@
 
 // The order arms are fused in, and the tie-break when two arms rank a session
 // equally well.
-export const ARMS = ['session', 'chunk', 'message', 'lexical'] as const
+const ARMS = ['session', 'chunk', 'message', 'lexical'] as const
 export type Arm = (typeof ARMS)[number]
 
 // `rank` is 1-based: the session's position in that arm's list after filtering

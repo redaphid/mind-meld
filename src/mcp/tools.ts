@@ -2,7 +2,8 @@ import assert from 'node:assert'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { query } from '../db/postgres.js'
-import { searchWithDiagnostics, formatSearchResults, findProjectsByPath, DEFAULT_SEARCH_MODE, SEARCH_MODES } from './search.js'
+import { searchWithDiagnostics, formatSearchResults, findProjectsByPath } from './search.js'
+import { DEFAULT_SEARCH_MODE, SEARCH_MODES } from './search-mode.js'
 import { sinceSchema } from './since.js'
 import {
   getSessionDigest,

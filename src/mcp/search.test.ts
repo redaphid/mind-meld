@@ -893,6 +893,29 @@ describe('formatSearchResults', () => {
     expect(text).toContain('(no snippet)')
   })
 
+  it('shows each arm compactly, and the score breakdown only when explain is asked for', () => {
+    const scored = result({
+      score: 0.5139,
+      base: 0.0323,
+      matched_tier: 'message' as const,
+      evidence: [
+        { arm: 'message', rank: 1, cosine: 0.612, messageId: 9 },
+        { arm: 'lexical', rank: 2, tsRank: 0.0607, messageId: 9 },
+        { arm: 'chunk', rank: 4, cosine: 0.5, chunkIndex: 0 },
+      ] as EvidenceList,
+      adjustments: [
+        { kind: 'noise', similarity: 0.71, factor: 0.43 },
+        { kind: 'project', boost: 0.5 },
+      ] as Adjustment[],
+    })
+    const plain = formatSearchResults([scored])
+    expect(plain).toContain('Score: 0.514 | Matched: message (message #1 0.61, text #2, chunk #4 0.50)')
+    expect(plain).not.toContain('Why:')
+    expect(formatSearchResults([scored], { explain: true })).toContain(
+      'Why: base 0.0323 | noise ×0.430 (sim 0.71) | project +0.5 | text #2 ts_rank 0.0607'
+    )
+  })
+
   describe('noise', () => {
     const below = config.noise.nudgeBelow - 0.05
     const lightlyDamped = (config.noise.nudgeBelow + 1) / 2
