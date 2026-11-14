@@ -374,6 +374,42 @@ const EmbeddingActivity = () => {
   `
 }
 
+const rate = r => (r == null ? 'n/a' : `${Math.round(r * 100)}%`)
+const fixed = (n, digits) => (n == null ? 'n/a' : n.toFixed(digits))
+
+// From /api/stats, the same numbers the `stats` MCP tool prints. Headline is
+// the last 7 days; each figure's 30-day value sits under or beside it.
+const UsageCard = () => {
+  const { data, error } = useApi('/api/stats')
+  if (!data)
+    return html`<${Card} title="Search usage">
+      ${error ? html`<div class="faint">usage unavailable</div>` : html`<${Spinner} />`}
+    <//>`
+
+  const [week, month] = data.windows
+  const line = (label, f) => html`<div class="m" style="margin:4px 0 0;font-size:13px">
+    <span>${label}</span><span class="right nowrap">${f(week)} <span class="faint">· ${f(month)}</span></span>
+  </div>`
+
+  return html`<${Card} title="Search usage" action=${html`<span class="faint">7d · 30d</span>`}>
+    <div class="stat-grid" style="margin-bottom:8px">
+      <${Stat} n=${week.searches} label="Searches" sub=${`30d ${fmtNum(month.searches)}`} />
+      <${Stat} n=${rate(week.openedShare)} exact=${rate(week.openedShare)} label="Opened ≤10 min" sub=${`30d ${rate(month.openedShare)}`} />
+      <${Stat} n=${fixed(week.openedRank.mrr, 2)} exact=${fixed(week.openedRank.mrr, 3)} label="MRR of open" sub=${`30d ${fixed(month.openedRank.mrr, 2)}`} />
+      <${Stat} n=${fixed(week.latencyMs.p50, 0)} exact=${fixed(week.latencyMs.p50, 1)} label="p50 ms" sub=${`30d ${fixed(month.latencyMs.p50, 0)}`} />
+    </div>
+    ${line('Median opened rank', w => fixed(w.openedRank.median, 1))}
+    ${line('No results', w => rate(w.noResultRate))}
+    ${line('Degraded', w => rate(w.degradedRate))}
+    ${line('p90 ms', w => fixed(w.latencyMs.p90, 0))}
+    ${Object.keys(week.stageMs)
+      .filter(s => week.stageMs[s].p50 != null || month.stageMs[s].p50 != null)
+      .map(s => line(`${s.replace(/Ms$/, '')} p50/p90 ms`, w => `${fixed(w.stageMs[s].p50, 0)}/${fixed(w.stageMs[s].p90, 0)}`))}
+    ${line('Feedback per search', w => fixed(w.feedbackPerSearch, 2))}
+    ${Object.keys(week.vectorParams).map(p => line(p, w => fmtNum(w.vectorParams[p])))}
+  <//>`
+}
+
 export const OverviewView = () => {
   const status = useApi('/status')
   const activity = useApi('/api/activity', { days: 30 })
@@ -475,6 +511,8 @@ export const OverviewView = () => {
         <span class="right faint nowrap">review →</span>
       </div>
     </button>`}
+
+    <${UsageCard} />
 
     <${Card} title="Last 30 days">
       ${activity.loading && html`<${Spinner} />`}

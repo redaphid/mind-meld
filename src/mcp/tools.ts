@@ -20,6 +20,7 @@ import { resolveTitle } from './title.js'
 import { applyTags, removeTags, getTags, formatTagWrite, defaultExcludedTags, type TagTarget } from './tags.js'
 import { USELESS_TAG, hasNoiseVector, invalidateNoiseClusters } from './noise.js'
 import { writeNote, formatWrittenNote, NOTE_TAG } from './notes.js'
+import { STATS_WINDOWS, usageStats, formatUsageStats } from './usage-stats.js'
 import {
   searchLog,
   mcpCaller,
@@ -317,7 +318,7 @@ to getMessages.`,
 
   server.tool(
     'stats',
-    'Get statistics about your conversation history',
+    'Get statistics about your conversation history, and how search is used over the last 7 and 30 days: searches, opens, rank of the opened result, latency, feedback and vector-parameter use',
     {},
     async () => {
       const stats = await query<{
@@ -368,6 +369,8 @@ to getMessages.`,
       output += `\n## Top Projects\n\n`
       for (const row of topProjects.rows)
         output += `- **${row.name}:** ${row.session_count} sessions, ${row.message_count} messages\n`
+
+      output += `\n` + formatUsageStats(await Promise.all(STATS_WINDOWS.map(usageStats)))
 
       return { content: [{ type: 'text', text: output }] }
     }

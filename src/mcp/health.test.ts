@@ -16,6 +16,7 @@ const wireQueries = (overrides: {
   coverage?: Row
   bad?: Row
   embeddings?: Row
+  sessions?: Row[]
   scanPages?: Row[][]
 }) => {
   const scanPages = [...(overrides.scanPages ?? [])]
@@ -46,11 +47,35 @@ const wireQueries = (overrides: {
     if (sql.includes('null_backlog')) return Promise.resolve(rows(coverage))
     if (sql.includes('any_bad')) return Promise.resolve(rows(bad))
     if (sql.includes('pending_msgs')) return Promise.resolve(rows(embeddings))
+    if (sql.includes('AS opening')) return Promise.resolve(rows(...(overrides.sessions ?? [])))
     throw new Error(`unexpected query: ${sql.slice(0, 60)}`)
   })
 }
 
 describe('getHealth', () => {
+  // The count that would have shown 798 sessions drifting for two months (#177).
+  it('counts sessions whose stored automated flag disagrees with the classifier, by direction', async () => {
+    const session = (id: number, stored: boolean, opening: string) => ({ id, source: 'claude_code', machine: null, stored, opening })
+    wireQueries({
+      sessions: [
+        session(1, false, 'You are a Slack monitoring assistant for the lair'),
+        session(2, true, 'Fix the lantern'),
+        session(3, true, 'You are a curiosity curator'),
+        session(4, false, 'Fix the kraken'),
+      ],
+    })
+    const h = await getHealth()
+    expect(h.automatedFlagDrift).toEqual({ unflagged: 1, unexplained: 1 })
+    expect(formatHealth(h)).toContain('Should be flagged and is not: 1')
+    expect(formatHealth(h)).toContain('Flagged, and this process\x27s rule does not explain it: 1')
+    expect(formatHealth(h)).toContain('Automated Flags: UNHEALTHY')
+  })
+
+  it('calls automated flags healthy only when neither count is set', async () => {
+    wireQueries({ sessions: [{ id: 1, source: 'claude_code', machine: null, stored: false, opening: 'Fix the lantern' }] })
+    expect(formatHealth(await getHealth())).toContain('Automated Flags: HEALTHY')
+  })
+
   it('computes coverage as summarized / (summarized + null backlog)', async () => {
     wireQueries({ coverage: { total: '100', summarized: '90', null_backlog: '10' } })
     const h = await getHealth()
