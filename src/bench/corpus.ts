@@ -8,8 +8,8 @@ import type { QueryReplay, SummaryKind } from './types.js'
 
 // Sessions under ~8,000 characters are never summarized: their "summary" is
 // the transcript itself, prefixed with a role tag.
-export const RAW_SUMMARY = /^\[[A-Z_]+\]: /
-export const summaryKindOf = (summary: string | null): SummaryKind | null =>
+const RAW_SUMMARY = /^\[[A-Z_]+\]: /
+const summaryKindOf = (summary: string | null): SummaryKind | null =>
   summary === null ? null : RAW_SUMMARY.test(summary) ? 'raw' : 'generated'
 
 const DATA_CLASS_SQL = 'COALESCE(p.data_class, src.data_class)'
@@ -163,7 +163,7 @@ export const corpusStats = async (): Promise<Record<string, number>> => {
 
 // A relative "since" ("7d", "last week") meant relative to when the agent
 // searched; replaying it relative to today would search a different window.
-export const resolveSinceAt = (since: string, at: Date): string => {
+const resolveSinceAt = (since: string, at: Date): string => {
   const trimmed = since.trim()
   if (/^\d+(\.\d+)?$/.test(trimmed)) return parseSinceDate(trimmed)!.toISOString()
   const relative = ms(trimmed as Parameters<typeof ms>[0])

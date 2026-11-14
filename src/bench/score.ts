@@ -46,7 +46,7 @@ export type Visibility = {
   loopedSessionIds: Set<number>
 }
 
-export const goldSummaryOf = (query: BenchQuery, looped: Set<number>): GoldSummary | null =>
+const goldSummaryOf = (query: BenchQuery, looped: Set<number>): GoldSummary | null =>
   query.goldSessionIds.some((id) => looped.has(id)) ? 'loop' : query.goldSummaryKind
 
 // What a run is scored on: results that existed at the snapshot (later
@@ -98,7 +98,7 @@ export const scoreQuery = (query: BenchQuery, results: RunResult[], grades: Map<
 
 const present = (values: (number | null)[]) => values.filter((v): v is number => v !== null)
 
-export const summarize = (
+const summarize = (
   system: string,
   stratum: StratumReport['stratum'],
   slice: Slice,
@@ -157,8 +157,8 @@ export const reportScores = (system: string, scores: QueryScore[]): StratumRepor
     .filter(({ picked }) => picked.length > 0)
     .map(({ g, picked }) => summarize(system, g.stratum, g.slice, picked))
 
-export const METRICS = ['ndcg10', 'rrGold', 'recallGold10', 'meanGrade5', 'junk5', 'falsePositive'] as const
-export type Metric = (typeof METRICS)[number]
+const METRICS = ['ndcg10', 'rrGold', 'recallGold10', 'meanGrade5', 'junk5', 'falsePositive'] as const
+type Metric = (typeof METRICS)[number]
 
 export type Comparison = {
   a: string

@@ -74,7 +74,7 @@ type Plan = { stratum: Stratum; kind: 'natural' | 'paraphrase' | 'keyword'; data
 
 // Absent topics are the harder half of noanswer (raw best-match cosine
 // separates gibberish from real queries almost perfectly), so they get more.
-export const TARGETS = { natural: 35, paraphrase: 35, keyword: 25, crossclass: 20, gibberish: 10, absentTopic: 20 }
+const TARGETS = { natural: 35, paraphrase: 35, keyword: 25, crossclass: 20, gibberish: 10, absentTopic: 20 }
 
 const PLANS: Plan[] = [
   { stratum: 'natural', kind: 'natural', dataClass: ['coding'], target: TARGETS.natural },

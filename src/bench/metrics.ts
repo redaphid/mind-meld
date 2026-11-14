@@ -72,9 +72,9 @@ export const shuffled = <T>(items: T[], seed: string): T[] => {
   return out
 }
 
-export const mean = (values: number[]) => values.reduce((a, b) => a + b, 0) / values.length
+const mean = (values: number[]) => values.reduce((a, b) => a + b, 0) / values.length
 
-export const BOOTSTRAP = { resamples: 10_000, seed: 'mindmeld-bench' }
+const BOOTSTRAP = { resamples: 10_000, seed: 'mindmeld-bench' }
 
 const resampledMeans = (values: number[], resamples: number, seed: string): number[] => {
   const random = mulberry32(seedOf(seed))

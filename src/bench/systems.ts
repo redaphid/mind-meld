@@ -45,9 +45,9 @@ const loadSearch = async (spec: SystemSpec, configDir: string): Promise<SearchFn
   return loaded.searchWithDiagnostics
 }
 
-export type BenchSearchParams = SearchParams & { steering?: { toward?: number[]; away?: number[] } }
+type BenchSearchParams = SearchParams & { steering?: { toward?: number[]; away?: number[] } }
 
-export const paramsFor = (query: BenchQuery, spec: SystemSpec): BenchSearchParams => {
+const paramsFor = (query: BenchQuery, spec: SystemSpec): BenchSearchParams => {
   const cwd =
     spec.cwd === 'none' ? undefined : spec.cwd === 'gold' ? (query.goldProjectPath ?? undefined) : query.replay.cwd
   const toward = spec.steer === 'toward' ? query.steering?.toward : undefined

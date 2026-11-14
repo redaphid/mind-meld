@@ -16,7 +16,7 @@ const STEM = 5
 
 const stem = (word: string) => word.slice(0, STEM)
 
-export const contentWords = (text: string): string[] =>
+const contentWords = (text: string): string[] =>
   [...new Set(text.toLowerCase().split(/[^a-z0-9]+/))].filter((w) => w.length >= 3 && !STOPWORDS.has(w))
 
 // Query words that also appear, stemmed, anywhere in the shown text.

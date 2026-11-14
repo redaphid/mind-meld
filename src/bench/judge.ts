@@ -29,7 +29,7 @@ export const renderCard = (label: string, card: SessionCard, snippets: string[])
   return lines.join('\n')
 }
 
-export const renderJudgePrompt = (queryText: string, cards: string[]) =>
+const renderJudgePrompt = (queryText: string, cards: string[]) =>
   `Search query: ${JSON.stringify(queryText)}\n\n${cards.join('\n\n')}`
 
 export const parseGrades = (output: string, labels: string[]): Map<string, Grade> => {

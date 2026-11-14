@@ -11,7 +11,7 @@ const STATUS_URL = 'http://127.0.0.1:3847/api/system'
 
 // The GPU gate decides whether search embeds at once or waits; a run made
 // behind a busy gate measures the queue, not search. Read-only GET.
-export const gateState = async (): Promise<unknown> => {
+const gateState = async (): Promise<unknown> => {
   try {
     const response = await fetch(STATUS_URL, { signal: AbortSignal.timeout(5000) })
     const body = (await response.json()) as { ollama?: { gate?: unknown } }
@@ -33,7 +33,7 @@ export const resolveSystems = (names: string[], configFile?: string): Map<string
   )
 }
 
-export const visibilityFor = async (manifest: Manifest, files: BenchFiles): Promise<Visibility> => ({
+const visibilityFor = async (manifest: Manifest, files: BenchFiles): Promise<Visibility> => ({
   snapshotMaxSessionId: manifest.snapshotMaxSessionId,
   excludedSessionIds: new Set(await sessionIdsMatchingPaths(manifest.excludePathPatterns)),
   loopedSessionIds: new Set(readIdList(files.loopedSessionIds)),
@@ -80,7 +80,7 @@ const runSearches = async (
 
 // Every pair the pool systems put in a visible top ten, plus every gold
 // session, that the cache has no grade for yet.
-export const missingPairs = (queries: BenchQuery[], runs: Run[], judged: Set<string>, visibility: Visibility): Pair[] => {
+const missingPairs = (queries: BenchQuery[], runs: Run[], judged: Set<string>, visibility: Visibility): Pair[] => {
   const byQuery = new Map(queries.map((q) => [q.id, q]))
   const pairs = new Map<string, Pair>()
   const add = (query: BenchQuery, sessionId: number, snippet: string | null) => {
@@ -99,7 +99,7 @@ export const missingPairs = (queries: BenchQuery[], runs: Run[], judged: Set<str
   return [...pairs.values()]
 }
 
-export const judgeMissing = async (dir: string, runs: Run[], log: (line: string) => void) => {
+const judgeMissing = async (dir: string, runs: Run[], log: (line: string) => void) => {
   const { files, manifest, queries, judgments } = loadBench(dir)
   const visibility = await visibilityFor(manifest, files)
   const judged = new Set(
@@ -118,7 +118,7 @@ export const judgeMissing = async (dir: string, runs: Run[], log: (line: string)
   return pairs.length
 }
 
-export const scoreSavedRun = async (dir: string, runs: Run[]) => {
+const scoreSavedRun = async (dir: string, runs: Run[]) => {
   const { files, manifest, queries, judgments } = loadBench(dir)
   return scoreRuns(queries, runs, indexJudgments(judgments, manifest.promptVersion), await visibilityFor(manifest, files))
 }

@@ -11,11 +11,11 @@ import { appendJsonl, benchFiles, loadBench, readJsonl, sha256Of, writeJson } fr
 import { searchUndegraded, type Searcher } from './systems.js'
 import type { BenchQuery, Judgment, Run } from './types.js'
 
-export const steeringFile = (dir: string) => path.join(dir, 'steering.jsonl')
+const steeringFile = (dir: string) => path.join(dir, 'steering.jsonl')
 
 const DEGRADED_RETRIES = 2
 
-export const asQuery = (item: SteeringItem): BenchQuery => ({
+const asQuery = (item: SteeringItem): BenchQuery => ({
   id: item.id,
   stratum: 'steering',
   text: item.text,
