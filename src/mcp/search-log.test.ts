@@ -145,12 +145,12 @@ describe('the rows the default log writes', () => {
     query.mockClear()
     searchLog.record({
       kind: 'search', at, caller, tool: 'search', list: 'Lk3x9qa' as never, request: { query: 'q' }, mode: 'text', totalMs: 12,
-      results: [], degraded: { semantic: false, cause: 'unavailable', reason: 'gate shut' }, armMs: { semanticMs: null, fullTextMs: 9 },
+      results: [], degraded: { semantic: false, cause: 'unavailable', reason: 'gate shut' }, armMs: { semanticMs: null, embedMs: null, sessionMs: null, chunkMs: null, messageMs: null, fullTextMs: 9 },
     })
     await searchLog.flushed()
     const [sql, params] = query.mock.calls[0] as [string, unknown[]]
     expect(sql).toContain('INSERT INTO search_log')
-    expect(params).toEqual([at, 'mcp:abc', 'mcp-http', 'c/1', 'search', 'Lk3x9qa', { query: 'q' }, requestHash({ query: 'q' }), 'text', '[]', 0, 'unavailable', null, { totalMs: 12, semanticMs: null, fullTextMs: 9 }])
+    expect(params).toEqual([at, 'mcp:abc', 'mcp-http', 'c/1', 'search', 'Lk3x9qa', { query: 'q' }, requestHash({ query: 'q' }), 'text', '[]', 0, 'unavailable', null, { totalMs: 12, semanticMs: null, embedMs: null, sessionMs: null, chunkMs: null, messageMs: null, fullTextMs: 9 }])
   })
 
   it('writes a failed search with its error class and no results', async () => {

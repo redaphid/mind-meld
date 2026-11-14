@@ -470,9 +470,17 @@ const SWITCHED_OFF: SearchDegradation = {
   reason: 'semantic search is switched off in mindmeld; it stays off until someone switches it back on',
 }
 
-// Each arm's own wall time, null when it did not run. The arms run
-// concurrently, so these do not sum to the search's total.
-export type ArmMs = { semanticMs: number | null; fullTextMs: number | null }
+// Each stage's own wall time, null when it did not run. semanticMs spans the
+// embed and the three tiers, which run concurrently with each other and with
+// full text, so none of these sum to the search's total.
+export type ArmMs = {
+  semanticMs: number | null
+  embedMs: number | null
+  sessionMs: number | null
+  chunkMs: number | null
+  messageMs: number | null
+  fullTextMs: number | null
+}
 
 export type SearchOutcome = {
   results: SearchResult[]
@@ -635,19 +643,33 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     return arm
   }
 
+  const armMs: ArmMs = { semanticMs: null, embedMs: null, sessionMs: null, chunkMs: null, messageMs: null, fullTextMs: null }
+  const timed = async <T>(stage: keyof ArmMs, run: () => Promise<T>): Promise<T> => {
+    const started = performance.now()
+    try {
+      return await run()
+    } finally {
+      armMs[stage] = performance.now() - started
+    }
+  }
+
   // Settled in claim order. A failed embedding is the one entry, since no tier
   // can run without the vector; this never rejects.
   const semanticArms = async (): Promise<PromiseSettledResult<ArmHits | null>[]> => {
     try {
-      const embedding = await composeQueryVector(
+      const embedding = await timed('embedMs', () => composeQueryVector(
         params.query,
         params.negativeQuery,
         likeSessionCentroids,
         unlikeSessionCentroids,
         likeProjectCentroids,
         unlikeProjectCentroids
-      )
-      return await Promise.allSettled([sessionTier(embedding), chunkTier(embedding), messageTier(embedding)])
+      ))
+      return await Promise.allSettled([
+        timed('sessionMs', () => sessionTier(embedding)),
+        timed('chunkMs', () => chunkTier(embedding)),
+        timed('messageMs', () => messageTier(embedding)),
+      ])
     } catch (reason) {
       return [{ status: 'rejected', reason }]
     }
@@ -752,15 +774,6 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
 
   const wantsSemantic = mode === 'semantic' || mode === 'hybrid'
   if (wantsSemantic && !vectorsOn) degraded = SWITCHED_OFF
-  const armMs: ArmMs = { semanticMs: null, fullTextMs: null }
-  const timed = async <T>(arm: keyof ArmMs, run: () => Promise<T>): Promise<T> => {
-    const started = performance.now()
-    try {
-      return await run()
-    } finally {
-      armMs[arm] = performance.now() - started
-    }
-  }
   const [semantic, ftsRows] = await Promise.all([
     wantsSemantic && vectorsOn ? timed('semanticMs', semanticArms) : [],
     (mode === 'text' || mode === 'hybrid') && params.query ? timed('fullTextMs', fullTextRows) : null,
