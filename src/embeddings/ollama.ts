@@ -118,6 +118,10 @@ ${text}`,
 // raises it immediately and the caller can fall back to something that does not
 // need a GPU. Waiting out a cooldown is a background worker's job.
 //
+// `cancel` is the caller giving up: an aborted search must not keep the one
+// slot busy embedding a query nobody will read. A request still queued for the
+// slot fails the moment it gets it, without reaching Ollama.
+//
 // It also asks the gate to let it through while shut. The gate stays shut for
 // a 180 s cooldown after every proxy restart and while a game holds the card,
 // and a query embedding is one small bge-m3 call, which the gate admits on
@@ -125,7 +129,7 @@ ${text}`,
 // cooldown exists to keep minutes of summarization off a busy GPU.
 export const GATE_OVERRIDE_HEADER = "X-GPU-Gate-Override";
 
-const fetchOnce: typeof fetch = async (input, init) => {
+const fetchOnce = (cancel: AbortSignal): typeof fetch => async (input, init) => {
   const { interactiveTimeoutMs } = config.ollama;
   const headers = new Headers(init?.headers);
   headers.set(GATE_OVERRIDE_HEADER, "interactive");
@@ -134,14 +138,13 @@ const fetchOnce: typeof fetch = async (input, init) => {
       fetch(input, {
         ...init,
         headers,
-        signal: AbortSignal.timeout(interactiveTimeoutMs),
+        signal: AbortSignal.any([cancel, AbortSignal.timeout(interactiveTimeoutMs)]),
       }),
     interactiveTimeoutMs,
   );
 };
 
 let client: Ollama | null = null;
-let interactiveClient: Ollama | null = null;
 
 // One ollama serves both bge-m3 (vectorization) and qwen3 (generation).
 export function getOllamaClient(): Ollama {
@@ -158,15 +161,10 @@ export function getOllamaClient(): Ollama {
 // one gives up quickly so its caller can degrade, instead of retrying so the
 // work is never lost. Anything queued, batched or scheduled wants
 // getOllamaClient() instead — dropping background work is how the queue stops
-// draining.
-export function getInteractiveOllamaClient(): Ollama {
-  if (!interactiveClient) {
-    interactiveClient = new Ollama({
-      host: config.ollama.url,
-      fetch: fetchOnce,
-    });
-  }
-  return interactiveClient;
+// draining. One per request, because ollama-js takes no per-request signal and
+// its abort() would cancel every caller's requests.
+export function getInteractiveOllamaClient(cancel: AbortSignal): Ollama {
+  return new Ollama({ host: config.ollama.url, fetch: fetchOnce(cancel) });
 }
 
 // truncate:false is load-bearing everywhere we embed. Ollama's default silently

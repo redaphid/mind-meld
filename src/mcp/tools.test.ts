@@ -17,11 +17,10 @@ vi.mock('../db/postgres.js', () => ({
 // in the text it hands back to an LLM.
 const doSearch = vi.fn(async () => ({ results: [], degraded: null, projectIds: [] as number[] }))
 const findProjectsByPath = vi.fn(async () => [{ id: 7, name: 'proj' }])
-const formatSearchResults = vi.fn((_r: unknown, _p: unknown, _d: unknown, list?: string) => `SEARCH RESULTS${list ? ` ${list}` : ''}`)
+const formatSearchResults = vi.fn((_r: unknown, options?: { list?: string | null }) => `SEARCH RESULTS${options?.list ? ` ${options.list}` : ''}`)
 vi.mock('./search.js', () => ({
   searchWithDiagnostics: (...args: unknown[]) => doSearch(...(args as [])),
   formatSearchResults: (...args: Parameters<typeof formatSearchResults>) => formatSearchResults(...args),
-  DEFAULT_SEARCH_MODE: 'hybrid',
   findProjectsByPath: (...args: unknown[]) => findProjectsByPath(...(args as [])),
 }))
 
@@ -486,6 +485,15 @@ describe('every advertised tool executes', () => {
     expect(names).not.toContain('saveNote')
   })
 
+  // `explain` changes only the rendering, so search must never see it.
+  it('passes explain to the formatter and not to search', async () => {
+    const client = await connect()
+    await client.callTool({ name: 'search', arguments: { query: 'query-text-lantern-heron', explain: true } })
+    await client.close()
+    expect(doSearch).toHaveBeenLastCalledWith({ query: 'query-text-lantern-heron' })
+    expect(formatSearchResults).toHaveBeenLastCalledWith([], { degraded: null, list: expect.stringMatching(/^L/), explain: true })
+  })
+
   // Search already resolved the cwd; asking again cost a second query a search.
   describe('when a search names a cwd', () => {
     beforeEach(async () => {
@@ -493,10 +501,6 @@ describe('every advertised tool executes', () => {
       const client = await connect()
       await client.callTool({ name: 'search', arguments: { query: 'query-text-lantern-heron', cwd: '/w/proj' } })
       await client.close()
-    })
-
-    it('labels results with the projects search resolved', () => {
-      expect(formatSearchResults).toHaveBeenLastCalledWith([], [7071], null, expect.stringMatching(/^L/))
     })
 
     it('does not resolve the cwd a second time', () => {
