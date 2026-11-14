@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import pg from 'pg'
 import { applyMigration } from './migrations.js'
+import { withMigrationLock } from '../__tests__/pg-migration-lock.js'
 
 const execAsync = promisify(exec)
 const INIT_DB = resolve(dirname(fileURLToPath(import.meta.url)), '../../init-db')
@@ -96,7 +97,9 @@ beforeAll(async () => {
   // The real migration chain, exactly as src/db/migrations.ts applies it —
   // everything before 019, so fixtures exist in the world 019 will meet.
   const files = (await readdir(INIT_DB)).filter((f) => f.endsWith('.sql') && f < '019').sort()
-  for (const f of files) await psqlFile(SCRATCH_DB, join(INIT_DB, f))
+  await withMigrationLock(PG, async () => {
+    for (const f of files) await psqlFile(SCRATCH_DB, join(INIT_DB, f))
+  })
 
   db = new pg.Client({ ...PG, database: SCRATCH_DB })
   await db.connect()
@@ -394,7 +397,9 @@ describe.skipIf(!dbAvailable)('migration 019 refuses to merge across machines', 
     await crossAdmin.connect()
     await crossAdmin.query(`CREATE DATABASE ${CROSS_DB}`)
     const files = (await readdir(INIT_DB)).filter((f) => f.endsWith('.sql') && f < '019').sort()
-    for (const f of files) await psqlFile(CROSS_DB, join(INIT_DB, f))
+    await withMigrationLock(PG, async () => {
+      for (const f of files) await psqlFile(CROSS_DB, join(INIT_DB, f))
+    })
 
     crossDb = new pg.Client({ ...PG, database: CROSS_DB })
     await crossDb.connect()

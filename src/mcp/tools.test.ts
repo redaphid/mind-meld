@@ -15,11 +15,12 @@ vi.mock('../db/postgres.js', () => ({
 
 // The tool calls the diagnostics-carrying form, so a degraded search can say so
 // in the text it hands back to an LLM.
-const doSearch = vi.fn(async () => ({ results: [], degraded: null }))
+const doSearch = vi.fn(async () => ({ results: [], degraded: null, projectIds: [] as number[] }))
 const findProjectsByPath = vi.fn(async () => [{ id: 7, name: 'proj' }])
+const formatSearchResults = vi.fn((_r: unknown, _p: unknown, _d: unknown, list?: string) => `SEARCH RESULTS${list ? ` ${list}` : ''}`)
 vi.mock('./search.js', () => ({
   searchWithDiagnostics: (...args: unknown[]) => doSearch(...(args as [])),
-  formatSearchResults: (_r: unknown, _p: unknown, _d: unknown, list?: string) => `SEARCH RESULTS${list ? ` ${list}` : ''}`,
+  formatSearchResults: (...args: Parameters<typeof formatSearchResults>) => formatSearchResults(...args),
   DEFAULT_SEARCH_MODE: 'hybrid',
   findProjectsByPath: (...args: unknown[]) => findProjectsByPath(...(args as [])),
 }))
@@ -484,15 +485,22 @@ describe('every advertised tool executes', () => {
     expect(names).not.toContain('saveNote')
   })
 
-  it('only resolves cwd to projects when a cwd was given', async () => {
-    const client = await connect()
+  // Search already resolved the cwd; asking again cost a second query a search.
+  describe('when a search names a cwd', () => {
+    beforeEach(async () => {
+      doSearch.mockResolvedValueOnce({ results: [], degraded: null, projectIds: [7071] })
+      const client = await connect()
+      await client.callTool({ name: 'search', arguments: { query: 'query-text-lantern-heron', cwd: '/w/proj' } })
+      await client.close()
+    })
 
-    await client.callTool({ name: 'search', arguments: { query: 'x' } })
-    expect(findProjectsByPath).not.toHaveBeenCalled()
+    it('labels results with the projects search resolved', () => {
+      expect(formatSearchResults).toHaveBeenLastCalledWith([], [7071], null, expect.stringMatching(/^L/))
+    })
 
-    await client.callTool({ name: 'search', arguments: { query: 'x', cwd: '/w/proj' } })
-    expect(findProjectsByPath).toHaveBeenCalledWith('/w/proj')
-    await client.close()
+    it('does not resolve the cwd a second time', () => {
+      expect(findProjectsByPath).not.toHaveBeenCalled()
+    })
   })
 
   it('says so, rather than failing, when a lookup finds nothing', async () => {

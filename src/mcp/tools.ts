@@ -178,10 +178,8 @@ down for everyone afterwards. Search only gets quieter if you tell it.
       }
       const started = performance.now()
       try {
-        const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
-        const projectIds = matchingProjects.map((p) => p.id)
-        const { results, degraded } = await searchWithDiagnostics(params)
-        searchLog.record({ ...logged, totalMs: performance.now() - started, results, degraded })
+        const { results, degraded, projectIds, armMs } = await searchWithDiagnostics(params)
+        searchLog.record({ ...logged, totalMs: performance.now() - started, results, degraded, armMs })
         return {
           content: [
             { type: 'text', text: formatSearchResults(results, projectIds, degraded, list) },
