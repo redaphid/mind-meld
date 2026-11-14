@@ -203,11 +203,12 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
       id: number
       title: string | null
       summary: string | null
+      generated_title: string | null
       project: string
       last_synced_at: string
       message_count: number
     }>(`
-      SELECT s.id, s.title, s.summary, p.name as project,
+      SELECT s.id, s.title, s.summary, s.generated_title, p.name as project,
              s.last_synced_at, s.message_count
       FROM sessions s
       JOIN projects p ON s.project_id = p.id
@@ -239,9 +240,10 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
       started_at: string
       title: string | null
       summary: string | null
+      generated_title: string | null
       project: string
     }>(`
-      SELECT s.started_at, s.title, s.summary, p.name as project
+      SELECT s.started_at, s.title, s.summary, s.generated_title, p.name as project
       FROM sessions s
       JOIN projects p ON s.project_id = p.id
       WHERE s.deleted_at IS NULL

@@ -3,6 +3,7 @@ import { config } from '../config.js'
 import { query } from '../db/postgres.js'
 import { notWarmup } from './title.js'
 import { isRepetitionLoop, LOOP_MIN_CHARS } from '../embeddings/repetition-loop.js'
+import { VERBATIM_TRANSCRIPT_PATTERN } from '../embeddings/verbatim.js'
 
 // Bad-summary signal SQL is kept in lockstep with scripts/audit-summaries.sh and
 // scripts/reset-bad-summaries.ts. If you change a signal there, change it here too.
@@ -94,7 +95,7 @@ const gatherCoverage = async () => {
 // Verbatim transcripts are stored as `[ROLE]: ...` lines (batch.ts formats
 // them so), and a conversation that repeats itself is not a summarizer fault;
 // everything else in sessions.summary is model output.
-const VERBATIM_TRANSCRIPT = `'^\\[[A-Z_]+\\]:'`
+const VERBATIM_TRANSCRIPT = `'${VERBATIM_TRANSCRIPT_PATTERN}'`
 const LOOP_SCAN_PAGE = 500
 
 export const loopingSummaryIds = async (): Promise<number[]> => {

@@ -1,3 +1,5 @@
+import { isVerbatimTranscript } from '../embeddings/verbatim.js'
+
 // Session title resolution (issue #95).
 //
 // `sessions.title` used to be `firstMessage.slice(0, 200)` for every Claude Code
@@ -10,13 +12,20 @@
 //
 //   1. the stored title, when the source actually supplied one (Android threads
 //      do; Claude Code has no title field, so it now stores NULL)
-//   2. the opening sentence of the summary, once one exists
-//   3. nothing — an honest blank beats a misleading sentence
+//   2. the generated title, when the summary is the session's own transcript
+//      (short sessions are stored verbatim, and their opening line is a raw
+//      "[USER]: ..." message, not a topic)
+//   3. the opening sentence of the summary, once one exists
+//   4. nothing — an honest blank beats a misleading sentence
+//
+// A generated title is used only over a verbatim summary. Where a real summary
+// exists its opening sentence did as well as a generated title in a blind
+// judgment (7 vs 9 of 16), while over a transcript the generated one won 15 of 16.
 //
 // `titleSource` travels with the title so a consumer can tell a real title from
 // a derived one, rather than having to guess as it does today.
 
-export type TitleSource = 'source' | 'summary' | 'none'
+export type TitleSource = 'source' | 'generated' | 'summary' | 'none'
 
 export type ResolvedTitle = {
   title: string | null
@@ -52,12 +61,19 @@ const openingSentence = (line: string): string => {
  * `titleSource: 'none'`, and the caller shows the project, date and snippet
  * instead of a fabricated topic.
  */
-export const resolveTitle = (row: { title: string | null; summary: string | null }): ResolvedTitle => {
+export const resolveTitle = (row: {
+  title: string | null
+  summary: string | null
+  generated_title: string | null
+}): ResolvedTitle => {
   const stored = row.title?.trim()
   if (stored) return { title: stored, titleSource: 'source' }
 
   const summary = row.summary?.trim()
   if (!summary) return NO_TITLE
+
+  const generated = row.generated_title?.trim()
+  if (generated && isVerbatimTranscript(summary)) return { title: generated, titleSource: 'generated' }
 
   const line = firstMeaningfulLine(summary)
   if (!line) return NO_TITLE

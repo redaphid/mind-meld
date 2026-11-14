@@ -9,6 +9,7 @@ export type SessionMetadata = {
   project_id: number
   title: string | null
   summary: string | null
+  generated_title: string | null
   project_name: string
   project_path: string
   source_name: string
@@ -70,7 +71,7 @@ const DEFAULT_CHUNK_LIMIT = 20
 const DEFAULT_CHAR_BUDGET = 24000
 
 const SELECT_METADATA = `
-  SELECT s.id, s.external_id, s.title, s.summary, p.id as project_id,
+  SELECT s.id, s.external_id, s.title, s.summary, s.generated_title, p.id as project_id,
          p.name as project_name, p.path as project_path,
          src.name as source_name, s.started_at, s.ended_at, s.message_count,
          s.model_used, s.git_branch, s.total_input_tokens, s.total_output_tokens

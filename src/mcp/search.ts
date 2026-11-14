@@ -303,6 +303,7 @@ type SessionRow = {
   id: number
   title: string | null
   summary: string | null
+  generated_title: string | null
   project_name: string
   project_path: string
   source_name: string
@@ -317,7 +318,7 @@ type SessionRow = {
 const AUTOMATED_FILTER = `($2::boolean OR s.is_automated = false)`
 
 const SESSION_QUERY = `
-  SELECT s.id, s.title, s.summary, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
+  SELECT s.id, s.title, s.summary, s.generated_title, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
          src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
          s.started_at, s.ended_at, s.message_count, p.id as project_id
   FROM sessions s
@@ -351,7 +352,7 @@ type MessageAnchoredRow = SessionRow & { message_id: number; content_text: strin
 
 const getSessionsByMessageIds = (messageIds: number[], includeAutomated: boolean) =>
   hydrate<MessageAnchoredRow>(
-    `SELECT s.id, s.title, s.summary, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
+    `SELECT s.id, s.title, s.summary, s.generated_title, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
             src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
             s.started_at, s.ended_at, s.message_count, p.id as project_id,
             m.id as message_id, m.content_text
@@ -369,7 +370,7 @@ type ChunkAnchoredRow = SessionRow & { chunk_id: number; chunk_index: number; ch
 
 const getSessionsByChunkIds = (chunkIds: number[], includeAutomated: boolean) =>
   hydrate<ChunkAnchoredRow>(
-    `SELECT s.id, s.title, s.summary, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
+    `SELECT s.id, s.title, s.summary, s.generated_title, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
             src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
             s.started_at, s.ended_at, s.message_count, p.id as project_id,
             c.id as chunk_id, c.chunk_index, c.summary as chunk_summary
@@ -404,7 +405,7 @@ const resolveCentroids = async (table: 'sessions' | 'projects', weightedIds: Wei
 
 // resolveTitle returns camelCase; SearchResult is the SQL-shaped snake_case row
 // shared with the MCP tools, so the seam converts once here.
-const resolveTitleFields = (row: { title: string | null; summary: string | null }) => {
+const resolveTitleFields = (row: Parameters<typeof resolveTitle>[0]) => {
   const { title, titleSource } = resolveTitle(row)
   return { title, title_source: titleSource }
 }
@@ -729,6 +730,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       message_id: number
       title: string | null
       summary: string | null
+      generated_title: string | null
       project_name: string
       project_path: string
       source_name: string
@@ -753,7 +755,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
         WHERE ${conditions.join('\n          AND ')}
         ORDER BY m.session_id, rank DESC
       )
-      SELECT rm.session_id, rm.message_id, s.title, s.summary, p.name as project_name, p.path as project_path,
+      SELECT rm.session_id, rm.message_id, s.title, s.summary, s.generated_title, p.name as project_name, p.path as project_path,
              src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
              s.started_at, s.ended_at, s.message_count, rm.rank,
              p.id as project_id,
