@@ -28,11 +28,24 @@ const readBody = async res => {
   return body
 }
 
+// Names this tab to the search log, so opening a hit links to the search it
+// came from (src/mcp/search-log.ts). One id per tab, kept across reloads.
+const tabId = (() => {
+  const fresh = Math.random().toString(36).slice(2, 10)
+  try {
+    const id = sessionStorage.getItem('mindmeld-tab') ?? fresh
+    sessionStorage.setItem('mindmeld-tab', id)
+    return id
+  } catch {
+    return fresh
+  }
+})()
+
 export const apiGet = async (path, params, signal) =>
   readBody(
     await fetch(buildUrl(path, params), {
       signal,
-      headers: { accept: 'application/json' },
+      headers: { accept: 'application/json', 'x-mindmeld-caller': `ui:${tabId}`, 'x-mindmeld-client': 'web-ui' },
     })
   )
 
