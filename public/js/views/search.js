@@ -178,6 +178,7 @@ export const SearchView = () => {
                   tier=${r.matchedTier}
                   score=${r.score}
                   cursor=${r.cursor}
+                  list=${data.list}
                 />
               `
             )}
