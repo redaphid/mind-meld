@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   chunkMessagesWithIndices,
+  combineSummaries,
   summarizeChunk,
   summarizeConversation,
   TruncationError,
 } from "./summarize.js";
+import { isRepetitionLoop } from "./repetition-loop.js";
 
 describe("chunkMessagesWithIndices", () => {
   it("keeps small messages in a single chunk", () => {
@@ -202,4 +204,73 @@ describe("summarizeConversation when the model echoes its input", () => {
     // The old code called Ollama unboundedly; bounded now that each level shrinks.
     expect(vi.mocked(fetch).mock.calls.length).toBeLessThan(60);
   }, 20000);
+});
+
+// 117 of 136 looped session summaries on a live index came from the merge,
+// which stored whatever the model returned: 8,192 tokens of one clause.
+describe("repetition loops", () => {
+  const words = (n: number, tag: string) =>
+    Array.from({ length: n }, (_, i) => `${tag}${i}`).join(" ");
+  const LOOP = `${words(80, "start")} ${Array(60).fill(words(10, "again")).join(" ")}`;
+  const HONEST = `The session ${words(150, "fact")} ended with the queue drained.`;
+  const reply = (response: string) =>
+    ({
+      ok: true,
+      status: 200,
+      json: async () => ({ response, done: true, prompt_eval_count: 100 }),
+    }) as unknown as Response;
+  const chunkSummaries = Array.from({ length: 4 }, (_, i) => words(400, `chunk${i}x`));
+
+  beforeEach(() => vi.stubGlobal("fetch", vi.fn()));
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("keeps the joined chunk summaries when the merge loops twice", async () => {
+    vi.mocked(fetch).mockResolvedValue(reply(LOOP));
+    const merged = await combineSummaries(chunkSummaries);
+    expect(isRepetitionLoop(merged)).toBe(false);
+    expect(merged).toBe(chunkSummaries.join("\n\n---\n\n"));
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+  });
+
+  it("takes the retry when only the first merge loops", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(reply(LOOP))
+      .mockResolvedValueOnce(reply(HONEST));
+    await expect(combineSummaries(chunkSummaries)).resolves.toBe(HONEST);
+  });
+
+  it("does not store a loop from a single-pass summary", async () => {
+    let call = 0;
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      const prompt = String(JSON.parse((init as RequestInit).body as string).prompt);
+      call++;
+      return reply(
+        prompt.includes("one chunk of a larger conversation")
+          ? `Part ${call}: ${words(150, `part${call}x`)} and the queue drained.`
+          : LOOP,
+      );
+    });
+    const messages = Array.from({ length: 6 }, (_, i) => words(300, `m${i}x`));
+    const summary = await summarizeConversation(messages);
+    expect(isRepetitionLoop(summary)).toBe(false);
+    expect(summary).toContain("queue drained");
+  });
+
+  it("splits one looping message into two passes, not three", async () => {
+    const chunkPrompts: string[] = [];
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      const prompt = String(JSON.parse((init as RequestInit).body as string).prompt);
+      if (!prompt.includes("one chunk of a larger conversation")) return reply(LOOP);
+      chunkPrompts.push(prompt);
+      return reply(`Part ${chunkPrompts.length}: ${words(150, "p")} and the queue drained.`);
+    });
+    await summarizeConversation([words(2000, "giant")]);
+    expect(chunkPrompts).toHaveLength(2);
+  });
+
+  it("does not retry a refusal, which is the prompt talking rather than chance", async () => {
+    vi.mocked(fetch).mockResolvedValue(reply("NO_UPDATE"));
+    await expect(summarizeChunk("text", true)).rejects.toThrow(/too short/);
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+  });
 });

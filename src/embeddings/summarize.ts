@@ -1,5 +1,6 @@
 import { config } from "../config.js";
 import { withOllamaGate } from "./ollama-gate.js";
+import { isRepetitionLoop, longestRepeatedRun } from "./repetition-loop.js";
 
 export const SUMMARIZE_MODEL = config.embeddings.summarizeModel;
 
@@ -120,17 +121,23 @@ const assertNotTruncated = (
   throw new TruncationError(label, count);
 };
 
-// Summarize a single chunk of text
-export async function summarizeChunk(
-  text: string,
-  isChunkOfMany: boolean,
-  maxTokens?: number,
-): Promise<string> {
-  const contextNote = isChunkOfMany
-    ? "This is one chunk of a larger conversation. Preserve all technical details for later combination."
-    : "";
+// How a session's text becomes the text that is stored, shown and embedded.
+// One value per style keeps the threshold and both prompts together, so a
+// caller can never pair one style's chunk prompt with another's merge prompt.
+export type SummaryStyle = {
+  // Joined transcripts at or under this many chars are stored verbatim.
+  verbatimAtOrBelowChars: number;
+  chunkPrompt: (text: string, isChunkOfMany: boolean) => string;
+  mergePrompt: (combined: string) => string;
+};
 
-  const prompt = `${NO_THINK}
+const CODING_STYLE: SummaryStyle = {
+  verbatimAtOrBelowChars: 8000,
+  chunkPrompt: (text, isChunkOfMany) => {
+    const contextNote = isChunkOfMany
+      ? "This is one chunk of a larger conversation. Preserve all technical details for later combination."
+      : "";
+    return `${NO_THINK}
 You are writing a dense technical summary of a coding conversation. The summary is used for semantic search, so it must describe what actually happened — not reproduce it.
 
 ${contextNote}
@@ -154,7 +161,41 @@ CONVERSATION:
 ${text}
 
 SUMMARY:`;
+  },
+  mergePrompt: (combined) => `${NO_THINK}
+Merge the following chunk summaries of a single coding conversation into one coherent summary.
 
+Rules:
+- Preserve concrete nouns from each chunk (file paths, function names, error messages, decisions) inline as prose.
+- Remove redundancy — if two chunks mention the same thing, say it once.
+- Maintain chronological flow where it matters.
+- NO code blocks, NO triple backticks, NO verbatim output, NO invented examples.
+- Output the merged summary only. No preamble, no "Combined Summary:" heading.
+
+CHUNK SUMMARIES:
+${combined}
+
+MERGED SUMMARY:`,
+};
+
+// The model's answer was produced but is not a summary. Distinct from a
+// transport failure: retrying the same prompt can succeed, and the caller may
+// hold an honest fallback text.
+class SummaryRejectedError extends Error {
+  constructor(
+    readonly kind: "control-marker" | "too-short" | "loop",
+    message: string,
+  ) {
+    super(message);
+    this.name = "SummaryRejectedError";
+  }
+}
+
+const generate = async (
+  prompt: string,
+  numPredict: number,
+  label: string,
+): Promise<string> => {
   const response = await fetchWithRetry(
     `${config.ollama.url}/api/generate`,
     {
@@ -169,13 +210,11 @@ SUMMARY:`;
         options: {
           temperature: 0.3,
           num_ctx: SUMMARIZER_NUM_CTX,
-          num_predict:
-            maxTokens ??
-            (isChunkOfMany ? MAX_CHUNK_SUMMARY_TOKENS : MAX_SUMMARY_TOKENS),
+          num_predict: numPredict,
         },
       }),
     },
-    "summarizeChunk",
+    label,
   );
 
   if (!response.ok) {
@@ -184,15 +223,44 @@ SUMMARY:`;
   }
 
   const result = (await response.json()) as OllamaGenerateResponse;
-  assertNotTruncated(result, "summarizeChunk");
+  assertNotTruncated(result, label);
+  return rejectNonSummary(stripThinking(result.response));
+};
 
-  const summary = stripThinking(result.response);
+// Sampling at 0.3 makes a loop unlikely to recur on the same prompt, so one
+// fresh attempt is worth its cost. A refusal or an echoed marker is the prompt
+// talking, not chance, so those are not retried.
+const retryIfLooped = async (attempt: () => Promise<string>) => {
+  try {
+    return await attempt();
+  } catch (e) {
+    if (!(e instanceof SummaryRejectedError) || e.kind !== "loop") throw e;
+    console.warn(`Retrying once after a repetition loop: ${e.message}`);
+    return attempt();
+  }
+};
 
+// Summarize a single chunk of text
+export async function summarizeChunk(
+  text: string,
+  isChunkOfMany: boolean,
+  maxTokens?: number,
+  style: SummaryStyle = CODING_STYLE,
+): Promise<string> {
+  const prompt = style.chunkPrompt(text, isChunkOfMany);
+  const numPredict =
+    maxTokens ??
+    (isChunkOfMany ? MAX_CHUNK_SUMMARY_TOKENS : MAX_SUMMARY_TOKENS);
+  return retryIfLooped(() => generate(prompt, numPredict, "summarizeChunk"));
+}
+
+const rejectNonSummary = (summary: string): string => {
   if (CONTROL_MARKER.test(summary)) {
     console.error(
       `Rejected summary (control marker): ${JSON.stringify(summary)}`,
     );
-    throw new Error(
+    throw new SummaryRejectedError(
+      "control-marker",
       `Summary is a control marker (${JSON.stringify(summary.slice(0, 40))}); model echoed instead of summarizing`,
     );
   }
@@ -201,20 +269,31 @@ SUMMARY:`;
     console.error(
       `Rejected summary (${summary.length} chars): ${JSON.stringify(summary)}`,
     );
-    throw new Error(
+    throw new SummaryRejectedError(
+      "too-short",
       `Summary too short (${summary.length} chars < ${MIN_SUMMARY_CHARS}); likely prompt-injected or refused`,
     );
   }
 
+  if (isRepetitionLoop(summary)) {
+    throw new SummaryRejectedError(
+      "loop",
+      `Summary is a repetition loop (${summary.length} chars, ${longestRepeatedRun(summary)} repeated windows)`,
+    );
+  }
+
   return summary;
-}
+};
 
 // Combine multiple summaries into one
-export async function combineSummaries(summaries: string[]): Promise<string> {
+export async function combineSummaries(
+  summaries: string[],
+  style: SummaryStyle = CODING_STYLE,
+): Promise<string> {
   const combined = summaries.join("\n\n---\n\n");
 
   // If combined summaries are short enough, return as-is
-  if (combined.length <= MAX_CHARS_BEFORE_SUMMARIZE) {
+  if (combined.length <= style.verbatimAtOrBelowChars) {
     console.log(
       `SUMMARY-OF-SUMMARIES (${summaries.length} chunk summaries joined as-is, ${combined.length} chars):\n${combined}`,
     );
@@ -228,56 +307,30 @@ export async function combineSummaries(summaries: string[]): Promise<string> {
     );
     const startedAt = performance.now();
 
-    const prompt = `${NO_THINK}
-Merge the following chunk summaries of a single coding conversation into one coherent summary.
+    const prompt = style.mergePrompt(combined);
 
-Rules:
-- Preserve concrete nouns from each chunk (file paths, function names, error messages, decisions) inline as prose.
-- Remove redundancy — if two chunks mention the same thing, say it once.
-- Maintain chronological flow where it matters.
-- NO code blocks, NO triple backticks, NO verbatim output, NO invented examples.
-- Output the merged summary only. No preamble, no "Combined Summary:" heading.
-
-CHUNK SUMMARIES:
-${combined}
-
-MERGED SUMMARY:`;
-
-    let response: Response;
+    let summary: string;
     try {
-      response = await fetchWithRetry(
-        `${config.ollama.url}/api/generate`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: SUMMARIZE_MODEL,
-            prompt,
-            stream: false,
-            think: false,
-            keep_alive: "30m",
-            options: {
-              temperature: 0.3,
-              num_ctx: SUMMARIZER_NUM_CTX,
-              num_predict: MAX_SUMMARY_TOKENS,
-            },
-          }),
-        },
-        "combineSummaries",
+      summary = assertShrunk(
+        combined,
+        await retryIfLooped(() =>
+          generate(prompt, MAX_SUMMARY_TOKENS, "combineSummaries"),
+        ),
       );
-    } catch {
+    } catch (e) {
+      if (e instanceof TruncationError) throw e;
+      if (e instanceof SummaryRejectedError || e instanceof NotShrunkError) {
+        // The chunk summaries are honest model output already; storing them
+        // joined beats storing a loop. 117 of the 136 looped session summaries
+        // found 2026-11-13 came from this merge, which had no check at all.
+        console.warn(
+          `combineSummaries: merge rejected (${e.message}); keeping ${summaries.length} chunk summaries joined`,
+        );
+        return combined;
+      }
       // Fall back to concatenation on persistent failure
       return combined.slice(0, MAX_CHARS_BEFORE_SUMMARIZE * 3);
     }
-
-    if (!response.ok) {
-      // Fall back to concatenation
-      return combined.slice(0, MAX_CHARS_BEFORE_SUMMARIZE * 3);
-    }
-
-    const result = (await response.json()) as OllamaGenerateResponse;
-    assertNotTruncated(result, "combineSummaries");
-    const summary = stripThinking(result.response);
 
     console.log(
       `SUMMARY-OF-SUMMARIES (merged ${summaries.length} chunk summaries → ${summary.length} chars in ${((performance.now() - startedAt) / 1000).toFixed(1)}s):\n${summary}`,
@@ -292,7 +345,7 @@ MERGED SUMMARY:`;
   console.log(
     `Combined summaries too long (${combined.length} chars), chunking recursively...`,
   );
-  return summarizeConversation(summaries);
+  return summarizeConversation(summaries, style);
 }
 
 // Split messages into chunks that fit within context window.
@@ -373,11 +426,12 @@ export const SHORT_CONVERSATION_CHARS = MAX_CHARS_BEFORE_SUMMARIZE;
 
 export async function summarizeConversation(
   messages: string[],
+  style: SummaryStyle = CODING_STYLE,
 ): Promise<string> {
   const combined = messages.join("\n\n---\n\n");
 
   // If short enough, no summarization needed
-  if (combined.length <= MAX_CHARS_BEFORE_SUMMARIZE) {
+  if (combined.length <= style.verbatimAtOrBelowChars) {
     return combined;
   }
 
@@ -385,15 +439,32 @@ export async function summarizeConversation(
   if (combined.length <= MAX_SUMMARIZER_INPUT_CHARS) {
     console.log(`Summarizing conversation (${combined.length} chars)...`);
     const startedAt = performance.now();
-    const summary = await summarizeChunk(combined, false);
-    console.log(
-      `Summarized to ${summary.length} chars in ${((performance.now() - startedAt) / 1000).toFixed(1)}s:\n${summary}`,
-    );
-    return summary;
+    try {
+      const summary = await summarizeChunk(combined, false, undefined, style);
+      console.log(
+        `Summarized to ${summary.length} chars in ${((performance.now() - startedAt) / 1000).toFixed(1)}s:\n${summary}`,
+      );
+      return summary;
+    } catch (e) {
+      if (!(e instanceof SummaryRejectedError) || e.kind !== "loop") throw e;
+      // Looped twice in one pass. Shorter passes loop less (a runaway fills
+      // the room num_predict gives it), and a throw here would leave the
+      // session pending, to loop again on every sync cycle.
+      // + 10 undoes chunkMessages' per-piece reserve, so this is two passes, not three.
+      return summarizeInChunks(messages, Math.ceil(combined.length / 2) + 10, style);
+    }
   }
 
-  // Too long for one chunk - split and summarize each chunk
-  const chunks = chunkMessages(messages, MAX_SUMMARIZER_INPUT_CHARS);
+  return summarizeInChunks(messages, MAX_SUMMARIZER_INPUT_CHARS, style);
+}
+
+async function summarizeInChunks(
+  messages: string[],
+  maxChunkChars: number,
+  style: SummaryStyle,
+): Promise<string> {
+  const combined = messages.join("\n\n---\n\n");
+  const chunks = chunkMessages(messages, maxChunkChars);
   console.log(
     `Conversation too long (${combined.length} chars), splitting into ${chunks.length} chunks...`,
   );
@@ -417,7 +488,7 @@ export async function summarizeConversation(
       // catch's truncation fallback runs and the next level is strictly smaller.
       const summary = assertShrunk(
         chunkText,
-        await summarizeChunk(chunkText, true),
+        await summarizeChunk(chunkText, true, undefined, style),
       );
       chunkSummaries.push(summary);
       console.log(
@@ -431,7 +502,7 @@ export async function summarizeConversation(
   }
 
   // Combine all chunk summaries
-  return combineSummaries(chunkSummaries);
+  return combineSummaries(chunkSummaries, style);
 }
 
 // A summary that isn't smaller than its input is not a summary. qwen3 at 0.3 falls
@@ -439,9 +510,11 @@ export async function summarizeConversation(
 // 2026-07-28 merging 19,499 chars of chunk summaries into 50,831 chars of the same
 // clause repeated. Callers rely on this shrinking, so refuse rather than hand back
 // something they'll only have to re-summarize.
+class NotShrunkError extends Error {}
+
 const assertShrunk = (input: string, summary: string) => {
   if (summary.length < input.length) return summary;
-  throw new Error(
+  throw new NotShrunkError(
     `Summarization did not shrink text (${input.length} → ${summary.length} chars); model likely looped`,
   );
 };
