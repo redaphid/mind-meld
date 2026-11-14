@@ -450,7 +450,8 @@ export async function summarizeConversation(
       // Looped twice in one pass. Shorter passes loop less (a runaway fills
       // the room num_predict gives it), and a throw here would leave the
       // session pending, to loop again on every sync cycle.
-      return summarizeInChunks(messages, Math.ceil(combined.length / 2), style);
+      // + 10 undoes chunkMessages' per-piece reserve, so this is two passes, not three.
+      return summarizeInChunks(messages, Math.ceil(combined.length / 2) + 10, style);
     }
   }
 

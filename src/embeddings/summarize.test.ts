@@ -256,6 +256,18 @@ describe("repetition loops", () => {
     expect(summary).toContain("queue drained");
   });
 
+  it("splits one looping message into two passes, not three", async () => {
+    const chunkPrompts: string[] = [];
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      const prompt = String(JSON.parse((init as RequestInit).body as string).prompt);
+      if (!prompt.includes("one chunk of a larger conversation")) return reply(LOOP);
+      chunkPrompts.push(prompt);
+      return reply(`Part ${chunkPrompts.length}: ${words(150, "p")} and the queue drained.`);
+    });
+    await summarizeConversation([words(2000, "giant")]);
+    expect(chunkPrompts).toHaveLength(2);
+  });
+
   it("does not retry a refusal, which is the prompt talking rather than chance", async () => {
     vi.mocked(fetch).mockResolvedValue(reply("NO_UPDATE"));
     await expect(summarizeChunk("text", true)).rejects.toThrow(/too short/);
