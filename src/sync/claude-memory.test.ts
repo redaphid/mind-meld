@@ -42,10 +42,10 @@ vi.mock('../config.js', () => ({ config: configMock }));
 const {
   discoverMemoryDirs,
   discoverMemoryFiles,
-  memoryExternalId,
   versionExternalId,
   syncClaudeMemories,
 } = await import('./claude-memory.js');
+const { memoryExternalId } = await import('./memory-id.js');
 
 const MEMORY = `---
 name: sample-memory
