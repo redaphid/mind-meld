@@ -52,8 +52,9 @@ describe("persistSessionChunks on a long session's small remainder", () => {
       { id: 3, role: "user", content_text: "thanks, that fixed it" },
     ];
 
-    await persistSessionChunks(42, messages);
+    const persisted = await persistSessionChunks(42, messages);
 
+    expect(persisted?.map((c) => c.verbatim)).toEqual([false, false, true]);
     const summaries = storedChunkSummaries();
     const last = summaries.at(-1) ?? "";
     expect(last.length).toBeLessThanOrEqual(CHUNK_VERBATIM_CHARS);
@@ -79,7 +80,9 @@ describe("persistSessionChunks on a long session's small remainder", () => {
         }) as unknown as Response,
     );
 
-    await persistSessionChunks(43, messages);
+    const persisted = await persistSessionChunks(43, messages);
+
+    expect(persisted?.at(-1)?.verbatim).toBe(true);
 
     const last = storedChunkSummaries().at(-1) ?? "";
     expect(last).toContain("y".repeat(CHUNK_VERBATIM_CHARS));
