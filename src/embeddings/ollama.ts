@@ -121,12 +121,23 @@ ${text}`,
 // `cancel` is the caller giving up: an aborted search must not keep the one
 // slot busy embedding a query nobody will read. A request still queued for the
 // slot fails the moment it gets it, without reaching Ollama.
+//
+// It also asks the gate to let it through while shut. The gate stays shut for
+// a 180 s cooldown after every proxy restart and while a game holds the card,
+// and a query embedding is one small bge-m3 call, which the gate admits on
+// embedding endpoints only. Background work must never send this header: the
+// cooldown exists to keep minutes of summarization off a busy GPU.
+export const GATE_OVERRIDE_HEADER = "X-GPU-Gate-Override";
+
 const fetchOnce = (cancel: AbortSignal): typeof fetch => async (input, init) => {
   const { interactiveTimeoutMs } = config.ollama;
+  const headers = new Headers(init?.headers);
+  headers.set(GATE_OVERRIDE_HEADER, "interactive");
   return withOllamaGate(
     () =>
       fetch(input, {
         ...init,
+        headers,
         signal: AbortSignal.any([cancel, AbortSignal.timeout(interactiveTimeoutMs)]),
       }),
     interactiveTimeoutMs,
