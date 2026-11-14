@@ -53,6 +53,7 @@ knip.jsonc
 # directory left crash-looping forever on ERR_MODULE_NOT_FOUND (task 274).
 scripts
 !scripts/compute-centroids.ts
+!scripts/backup
 *.sh
 
 # Logs

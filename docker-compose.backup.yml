@@ -1,0 +1,55 @@
+# Daily verified backups of postgres, chroma and the host's untracked config.
+#
+# Its own compose project on purpose: starting it never creates, recreates or
+# restarts the database containers, whichever project name they were created
+# under. It reaches them by container name and borrows chroma's data volume
+# read-only from the running container.
+#
+#   docker compose -p mindmeld-db-backup -f docker-compose.backup.yml up -d --build
+#
+# Always pass -p. COMPOSE_PROJECT_NAME in .env outranks `name:` below, so
+# without -p this service joins the main project, where a --remove-orphans run
+# from either file deletes the other file's containers.
+#
+# Set MINDMELD_BACKUP_DIR in .env to a directory that is synced off this machine
+# (it must contain BACKUP_REQUIRE_MARKER, default `.stfolder`, or every run
+# refuses to start). Runs log `ERROR: mindmeld-backup: ...` on any failure.
+# See docs/backups.md.
+name: mindmeld-db-backup
+
+services:
+  backup:
+    build:
+      context: .
+      dockerfile: Dockerfile.backup
+    image: mindmeld-backup:local
+    container_name: mindmeld-backup
+    restart: unless-stopped
+    environment:
+      PGHOST: ${BACKUP_PGHOST:-mindmeld-postgres}
+      PGPORT: 5432
+      PGUSER: mindmeld
+      PGDATABASE: conversations
+      PGPASSWORD: ${POSTGRES_PASSWORD:-mindmeld}
+      CHROMA_DATA: /data
+      BACKUP_AT_UTC: ${BACKUP_AT_UTC:-03:17}
+      BACKUP_KEEP: ${BACKUP_KEEP:-2}
+      BACKUP_HOST_CONFIG_FILES: ${BACKUP_HOST_CONFIG_FILES:-.env docker-compose.override.yml}
+      BACKUP_REQUIRE_MARKER: ${BACKUP_REQUIRE_MARKER:-.stfolder}
+      RESTORE_TEST_EVERY_DAYS: ${RESTORE_TEST_EVERY_DAYS:-7}
+      # Optional: failures are also pushed here directly. Unset, they are only logged.
+      NTFY_URL: ${BACKUP_NTFY_URL:-}
+      NTFY_TOPIC: ${BACKUP_NTFY_TOPIC:-}
+      NTFY_USER: ${BACKUP_NTFY_USER:-}
+      NTFY_PASS: ${BACKUP_NTFY_PASS:-}
+    volumes_from:
+      - container:${BACKUP_CHROMA_CONTAINER:-mindmeld-chroma}:ro
+    volumes:
+      - ${MINDMELD_BACKUP_DIR:?set MINDMELD_BACKUP_DIR in .env}:/backup
+      # The checkout holding .env and the compose override, read-only.
+      - ${MINDMELD_HOST_CONFIG_DIR:-.}:/host-config:ro
+
+networks:
+  default:
+    name: mindmeld-network
+    external: true
