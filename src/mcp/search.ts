@@ -131,6 +131,8 @@ const assertKnownDataClasses = async (dataClasses: string[]) => {
 
 export type MatchedTier = 'session' | 'chunk' | 'message'
 
+export const DEFAULT_SEARCH_MODE = 'hybrid' satisfies SearchParams['mode']
+
 export type SearchCursor = { chunk_index?: number; message_id?: number }
 
 export type SearchResult = {
@@ -468,12 +470,25 @@ const SWITCHED_OFF: SearchDegradation = {
   reason: 'semantic search is switched off in mindmeld; it stays off until someone switches it back on',
 }
 
+// Each stage's own wall time, null when it did not run. semanticMs spans the
+// embed and the three tiers, which run concurrently with each other and with
+// full text, so none of these sum to the search's total.
+export type ArmMs = {
+  semanticMs: number | null
+  embedMs: number | null
+  sessionMs: number | null
+  chunkMs: number | null
+  messageMs: number | null
+  fullTextMs: number | null
+}
+
 export type SearchOutcome = {
   results: SearchResult[]
   degraded: SearchDegradation | null
   // The projects the cwd resolved to (empty without one), so a caller labelling
   // results by project does not resolve the cwd a second time.
   projectIds: number[]
+  armMs: ArmMs
 }
 
 // Every hit is scored by its session's summary vector, whichever arm found it,
@@ -490,7 +505,7 @@ const scoringVectors = async (sessionIds: number[]): Promise<Map<number, number[
 
 export const searchWithDiagnostics = async (params: SearchParams): Promise<SearchOutcome> => {
   const limit = params.limit ?? 8
-  const mode = params.mode ?? 'hybrid'
+  const mode = params.mode ?? DEFAULT_SEARCH_MODE
   const includeAutomated = params.includeAutomated ?? false
 
   if (
@@ -628,19 +643,33 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     return arm
   }
 
+  const armMs: ArmMs = { semanticMs: null, embedMs: null, sessionMs: null, chunkMs: null, messageMs: null, fullTextMs: null }
+  const timed = async <T>(stage: keyof ArmMs, run: () => Promise<T>): Promise<T> => {
+    const started = performance.now()
+    try {
+      return await run()
+    } finally {
+      armMs[stage] = performance.now() - started
+    }
+  }
+
   // Settled in claim order. A failed embedding is the one entry, since no tier
   // can run without the vector; this never rejects.
   const semanticArms = async (): Promise<PromiseSettledResult<ArmHits | null>[]> => {
     try {
-      const embedding = await composeQueryVector(
+      const embedding = await timed('embedMs', () => composeQueryVector(
         params.query,
         params.negativeQuery,
         likeSessionCentroids,
         unlikeSessionCentroids,
         likeProjectCentroids,
         unlikeProjectCentroids
-      )
-      return await Promise.allSettled([sessionTier(embedding), chunkTier(embedding), messageTier(embedding)])
+      ))
+      return await Promise.allSettled([
+        timed('sessionMs', () => sessionTier(embedding)),
+        timed('chunkMs', () => chunkTier(embedding)),
+        timed('messageMs', () => messageTier(embedding)),
+      ])
     } catch (reason) {
       return [{ status: 'rejected', reason }]
     }
@@ -746,8 +775,8 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
   const wantsSemantic = mode === 'semantic' || mode === 'hybrid'
   if (wantsSemantic && !vectorsOn) degraded = SWITCHED_OFF
   const [semantic, ftsRows] = await Promise.all([
-    wantsSemantic && vectorsOn ? semanticArms() : [],
-    (mode === 'text' || mode === 'hybrid') && params.query ? fullTextRows() : null,
+    wantsSemantic && vectorsOn ? timed('semanticMs', semanticArms) : [],
+    (mode === 'text' || mode === 'hybrid') && params.query ? timed('fullTextMs', fullTextRows) : null,
   ])
 
   // A failed tier ends the semantic block there and keeps the tiers before
@@ -826,7 +855,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     if (tags && tags.length > 0) result.tags = tags
   }
 
-  return { results: page, degraded, projectIds }
+  return { results: page, degraded, projectIds, armMs }
 }
 
 // The plain form, for callers that have nothing useful to do with the
@@ -862,7 +891,8 @@ NEVER report a session just because it is off-topic for this query: a report tea
 export const formatSearchResults = (
   results: SearchResult[],
   projectIds: number[] = [],
-  degraded: SearchDegradation | null = null
+  degraded: SearchDegradation | null = null,
+  list: string | null = null
 ) => {
   if (results.length === 0) return `No matching conversations found.${degradedNote(degraded)}`
 
@@ -892,5 +922,6 @@ export const formatSearchResults = (
     })
     .join('\n\n')
 
-  return `Found ${results.length} relevant conversations:\n\n${output}${noiseNote(results)}${degradedNote(degraded)}`
+  const handle = list ? ` (list ${list})` : ''
+  return `Found ${results.length} relevant conversations${handle}:\n\n${output}${noiseNote(results)}${degradedNote(degraded)}`
 }

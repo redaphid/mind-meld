@@ -22,6 +22,7 @@ const MANAGED = [
   'LOG_RETENTION_DAYS',
   'SYNC_INCREMENTAL',
   'MINDMELD_SEMANTIC',
+  'MINDMELD_SEARCH_LOG',
 ] as const;
 
 type ManagedKey = (typeof MANAGED)[number];
@@ -192,5 +193,19 @@ describe('MINDMELD_SEMANTIC', () => {
 
   it('refuses a value it does not recognise', async () => {
     await expect(loadConfig({ MINDMELD_SEMANTIC: 'of' })).rejects.toThrow('MINDMELD_SEMANTIC');
+  });
+});
+
+// Read with the same strict switch: "on" once parsed as off, silently
+// stopping the log while the switch said otherwise.
+describe('MINDMELD_SEARCH_LOG', () => {
+  it('is on when unset, and on when set to "on"', async () => {
+    expect((await loadConfig({})).searchLog.enabled).toBe(true);
+    expect((await loadConfig({ MINDMELD_SEARCH_LOG: 'on' })).searchLog.enabled).toBe(true);
+  });
+
+  it('is off when set to "off", and refuses a typo', async () => {
+    expect((await loadConfig({ MINDMELD_SEARCH_LOG: 'off' })).searchLog.enabled).toBe(false);
+    await expect(loadConfig({ MINDMELD_SEARCH_LOG: 'of' })).rejects.toThrow('MINDMELD_SEARCH_LOG');
   });
 });
