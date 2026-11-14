@@ -8,10 +8,12 @@
 import { exec } from 'node:child_process'
 import { promisify } from 'node:util'
 import { readdir } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import pg from 'pg'
+import { applyMigration } from '../db/migrations.js'
+import { withMigrationLock } from './pg-migration-lock.js'
 
 const execAsync = promisify(exec)
 export const INIT_DB = resolve(dirname(fileURLToPath(import.meta.url)), '../../init-db')
@@ -51,16 +53,11 @@ export const dbAvailable = (await canReachPostgres()) && (await hasPsqlBinary())
 if (!dbAvailable && process.env.REQUIRE_DATABASE === '1')
   throw new Error(`REQUIRE_DATABASE=1 but no PostgreSQL with psql at ${PG.host}:${PG.port}`)
 
-// No ON_ERROR_STOP flag here: src/db/migrations.ts does not pass one either,
-// and the historical chain only applies under that leniency (001's
-// search_messages has a syntax error that 003 repairs).
-export const psqlFile = async (database: string, file: string) => {
-  await execAsync(`psql -h ${PG.host} -p ${PG.port} -U ${PG.user} -d ${database} -f "${file}"`, {
-    env: { ...process.env, PGPASSWORD: PG.password },
-  })
-}
+// Applied through the runner's own psql invocation, so these tests exercise
+// exactly what mcp runs at startup: ON_ERROR_STOP, one transaction per file.
+export const psqlFile = (database: string, file: string) => applyMigration({ ...PG, database }, INIT_DB, basename(file))
 
-export const initDbFiles = async (keep: (file: string) => boolean = () => true) =>
+const initDbFiles = async (keep: (file: string) => boolean = () => true) =>
   (await readdir(INIT_DB)).filter((f) => f.endsWith('.sql') && keep(f)).sort()
 
 // Creates an empty database and returns its name with a way to drop it.
@@ -77,5 +74,8 @@ export const createScratchDatabase = async (prefix: string) => {
 }
 
 export const applyInitDb = async (database: string, keep?: (file: string) => boolean) => {
-  for (const f of await initDbFiles(keep)) await psqlFile(database, join(INIT_DB, f))
+  const files = await initDbFiles(keep)
+  await withMigrationLock(PG, async () => {
+    for (const f of files) await psqlFile(database, join(INIT_DB, f))
+  })
 }

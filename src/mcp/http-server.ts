@@ -776,7 +776,7 @@ app.post('/api/ingest', async (req: any, res: any) => {
 })
 
 const start = async () => {
-  await runMigrations()
+  await runMigrations(config.postgres)
 
   // Only `mcp` writes the startup value, and only "off". The sync image runs
   // its binary afresh every cycle, so a worker writing it would undo a UI

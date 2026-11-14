@@ -1,62 +1,71 @@
-import { exec } from 'child_process'
-import { promisify } from 'util'
-import { query } from './postgres.js'
-import { readdir } from 'fs/promises'
-import { join, dirname } from 'path'
-import { fileURLToPath } from 'url'
-import { config } from '../config.js'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { readdir } from 'node:fs/promises'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import pg from 'pg'
 
-const execAsync = promisify(exec)
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const MIGRATIONS_DIR = join(__dirname, '../../init-db')
+const execFileAsync = promisify(execFile)
+export const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), '../../init-db')
 
-export const runMigrations = async (): Promise<void> => {
-  // Create migrations tracking table if it doesn't exist
-  await query(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      filename VARCHAR(255) PRIMARY KEY,
-      applied_at TIMESTAMP WITH TIME ZONE DEFAULT now()
-    )
-  `)
+type PgTarget = { host: string; port: number; user: string; password: string; database: string }
 
-  // Get list of migration files
-  const files = await readdir(MIGRATIONS_DIR)
-  const sqlFiles = files.filter(f => f.endsWith('.sql')).sort()
+// The filename is written into SQL below, so only names of this shape are migrations.
+export const MIGRATION_NAME = /^\d{3}-[a-z0-9-]+\.sql$/
 
-  for (const filename of sqlFiles) {
-    // Check if already applied
-    const result = await query<{ filename: string }>(
-      'SELECT filename FROM schema_migrations WHERE filename = $1',
-      [filename]
-    )
+const TRACKING_TABLE = `CREATE TABLE IF NOT EXISTS schema_migrations (
+  filename VARCHAR(255) PRIMARY KEY,
+  applied_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+)`
 
-    if (result.rows.length > 0) {
-      console.log(`Migration already applied: ${filename}`)
-      continue
-    }
-
-    console.log(`Applying migration: ${filename}`)
-    const filePath = join(MIGRATIONS_DIR, filename)
-
-    try {
-      // Use psql for PL/pgSQL compatibility
-      const { host, port, user, password, database } = config.postgres
-      const env = { ...process.env, PGPASSWORD: password }
-      await execAsync(
-        `psql -h ${host} -p ${port} -U ${user} -d ${database} -f "${filePath}"`,
-        { env }
-      )
-
-      await query(
-        'INSERT INTO schema_migrations (filename) VALUES ($1)',
-        [filename]
-      )
-      console.log(`Applied: ${filename}`)
-    } catch (error) {
-      console.error(`Failed to apply migration ${filename}:`, error)
-      throw error
-    }
+export class MigrationError extends Error {
+  constructor(readonly filename: string, readonly psqlOutput: string) {
+    super(`Migration ${filename} failed and was rolled back; it is not recorded and no later migration ran.\n${psqlOutput}`)
+    this.name = 'MigrationError'
   }
+}
 
-  console.log('Migrations complete')
+// One psql run, one transaction: the tracking table, the file, and the row that
+// records it commit together or not at all. psql rather than the pg driver
+// because migrations use psql meta-commands (019 sets ON_ERROR_STOP itself).
+// No migration may open its own transaction or use CREATE INDEX CONCURRENTLY.
+export const applyMigration = async (target: PgTarget, dir: string, filename: string): Promise<void> => {
+  if (!MIGRATION_NAME.test(filename)) throw new Error(`Not a migration file name: ${filename}`)
+  const args = [
+    '-X', '-q', '-v', 'ON_ERROR_STOP=1', '--single-transaction',
+    '-h', target.host, '-p', String(target.port), '-U', target.user, '-d', target.database,
+    '-c', TRACKING_TABLE,
+    '-f', join(dir, filename),
+    '-c', `INSERT INTO schema_migrations (filename) VALUES ('${filename}')`,
+  ]
+  try {
+    await execFileAsync('psql', args, { env: { ...process.env, PGPASSWORD: target.password } })
+  } catch (error) {
+    const e = error as { stderr?: string; message: string }
+    throw new MigrationError(filename, e.stderr?.trim() || e.message)
+  }
+}
+
+const appliedMigrations = async (target: PgTarget): Promise<Set<string>> => {
+  const client = new pg.Client(target)
+  await client.connect()
+  try {
+    await client.query(TRACKING_TABLE)
+    const { rows } = await client.query<{ filename: string }>('SELECT filename FROM schema_migrations')
+    return new Set(rows.map(r => r.filename))
+  } finally {
+    await client.end()
+  }
+}
+
+export const runMigrations = async (target: PgTarget, dir = MIGRATIONS_DIR): Promise<string[]> => {
+  const applied = await appliedMigrations(target)
+  const pending = (await readdir(dir)).filter(f => f.endsWith('.sql') && !applied.has(f)).sort()
+  for (const filename of pending) {
+    console.log(`Applying migration: ${filename}`)
+    await applyMigration(target, dir, filename)
+    console.log(`Applied: ${filename}`)
+  }
+  console.log(pending.length ? `Migrations complete: ${pending.length} applied` : 'Migrations complete: none pending')
+  return pending
 }

@@ -2,18 +2,13 @@
 // live survey found (issue #33), plus proof that the runtime write path needs
 // no caller-side normalization at all.
 //
-// Needs a reachable Postgres (the local dev stack on :5433). It builds a
+// Needs a reachable Postgres: see src/__tests__/scratch-database.ts. It builds a
 // scratch database, applies the real init-db chain, seeds fixtures, runs 019
-// through psql exactly as src/db/migrations.ts does, and asserts. In CI there
-// is no database, so the whole suite skips — the pure normalization logic is
-// covered by src/utils/project-path.test.ts either way.
+// through the migration runner exactly as mcp does at startup, and asserts.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { join } from 'node:path'
 import pg from 'pg'
 import { INIT_DB, PG, applyInitDb, createScratchDatabase, dbAvailable, psqlFile } from '../__tests__/scratch-database.js'
-
-// 019 protects itself: the file starts with `\set ON_ERROR_STOP on`, so ITS
-// failures abort psql with a nonzero exit wherever it runs.
 let scratch: Awaited<ReturnType<typeof createScratchDatabase>>
 let SCRATCH_DB: string
 let db: pg.Client
