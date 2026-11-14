@@ -117,12 +117,23 @@ ${text}`,
 // A 503 from the GPU gate is returned rather than retried, so the Ollama client
 // raises it immediately and the caller can fall back to something that does not
 // need a GPU. Waiting out a cooldown is a background worker's job.
+//
+// It also asks the gate to let it through while shut. The gate stays shut for
+// a 180 s cooldown after every proxy restart and while a game holds the card,
+// and a query embedding is one small bge-m3 call, which the gate admits on
+// embedding endpoints only. Background work must never send this header: the
+// cooldown exists to keep minutes of summarization off a busy GPU.
+export const GATE_OVERRIDE_HEADER = "X-GPU-Gate-Override";
+
 const fetchOnce: typeof fetch = async (input, init) => {
   const { interactiveTimeoutMs } = config.ollama;
+  const headers = new Headers(init?.headers);
+  headers.set(GATE_OVERRIDE_HEADER, "interactive");
   return withOllamaGate(
     () =>
       fetch(input, {
         ...init,
+        headers,
         signal: AbortSignal.timeout(interactiveTimeoutMs),
       }),
     interactiveTimeoutMs,
