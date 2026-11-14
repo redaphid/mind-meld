@@ -194,7 +194,7 @@ describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
       `SELECT p.external_id, count(s.id)::int AS sessions
        FROM projects p LEFT JOIN sessions s ON s.project_id = p.id
        WHERE p.external_id IN ('-home-u-app', '-home-u-App')
-       GROUP BY p.external_id ORDER BY p.external_id`
+       GROUP BY p.external_id ORDER BY p.external_id COLLATE "C"`
     )
     expect(rows.rows).toEqual([
       { external_id: '-home-u-App', sessions: 1 },
@@ -211,7 +211,7 @@ describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
       `SELECT p.external_id, p.path, count(s.id)::int AS sessions
        FROM projects p LEFT JOIN sessions s ON s.project_id = p.id
        WHERE p.external_id IN ('-mnt-d-data', '-mnt-d-Data')
-       GROUP BY p.external_id, p.path ORDER BY p.external_id`
+       GROUP BY p.external_id, p.path ORDER BY p.external_id COLLATE "C"`
     )
     expect(rows.rows).toEqual([
       { external_id: '-mnt-d-Data', path: '/mnt/d/Data', sessions: 1 },
@@ -223,7 +223,7 @@ describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
   // husk rows, so without this the only copy of the original state lived in
   // CSV files outside the database.
   it('leaves a pre-migration snapshot of projects inside the database', async () => {
-    const backup = await db.query('SELECT external_id, path FROM projects_pre_019 ORDER BY external_id')
+    const backup = await db.query('SELECT external_id, path FROM projects_pre_019 ORDER BY external_id COLLATE "C"')
     // Every fixture row, with the paths as they were before 019 ran.
     expect(backup.rows).toContainEqual({ external_id: '-mnt-d-tools-comfy', path: '/mnt/d/tools/comfy' })
     expect(backup.rows).toContainEqual({
@@ -248,7 +248,7 @@ describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
     const rows = await db.query(
       `SELECT external_id, os FROM projects
        WHERE external_id IN ('D--tools-comfy', '-mnt-d-Data', '-home-alice-Projects-app')
-       ORDER BY external_id`
+       ORDER BY external_id COLLATE "C"`
     )
     expect(rows.rows).toEqual([
       { external_id: '-home-alice-Projects-app', os: null },
@@ -361,7 +361,7 @@ describe.skipIf(!dbAvailable)('migration 019 refuses to merge across machines', 
     await expect(psqlFile(CROSS_DB, join(INIT_DB, '019-canonical-project-paths.sql'))).rejects.toThrow(
       /different machines/
     )
-    const rows = await crossDb.query('SELECT external_id FROM projects ORDER BY external_id')
+    const rows = await crossDb.query('SELECT external_id FROM projects ORDER BY external_id COLLATE "C"')
     expect(rows.rows.map((r) => r.external_id)).toEqual(['shared-a', 'shared-b'])
   })
 })
