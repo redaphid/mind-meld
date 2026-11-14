@@ -143,6 +143,28 @@ describe.skipIf(!dbAvailable)('the automated flag as every writer stores it (scr
     expect(await w.findAutomatedDrift()).toEqual([])
   })
 
+  it('reads the rule to the letter at its edges', async () => {
+    // A transcript row from before #95 can still carry a title; transcripts are
+    // never judged by it.
+    await syncTranscript('claude_code', 'titled-no-prompt', [message('a1', 0, 'assistant', 'hello')])
+    await w.query(`UPDATE sessions SET title = $1 WHERE external_id = 'titled-no-prompt'`, [`${PROMPT} old title`])
+    // A user message stored without a sequence number sorts first.
+    await syncTranscript('claude_code', 'unsequenced', [
+      { ...message('u1', 0, 'user', `${PROMPT} unsequenced`), sequenceNum: null as unknown as number },
+      message('u2', 1, 'user', 'Fix the lantern'),
+    ])
+    // A soft-deleted session is out of scope: never flagged, never drift.
+    configure([])
+    await syncTranscript('claude_code', 'deleted', [message('u1', 0, 'user', `${PROMPT} deleted`)])
+    await w.query(`UPDATE sessions SET deleted_at = NOW() WHERE external_id = 'deleted'`)
+    configure([PROMPT, MEMORY_TITLE])
+
+    expect(await w.flagAutomated()).toBe(0)
+    const stored = await flags()
+    expect([stored['titled-no-prompt'], stored.unsequenced]).toEqual([false, true])
+    expect(await w.findAutomatedDrift()).toEqual([])
+  })
+
   // The defect itself: a session written before its prefix was configured.
   it('flags a session whose file never changes again once its prefix is configured', async () => {
     configure([])
