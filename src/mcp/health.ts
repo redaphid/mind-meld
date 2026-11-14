@@ -2,9 +2,12 @@ import assert from 'node:assert'
 import { config } from '../config.js'
 import { query } from '../db/postgres.js'
 import { notWarmup } from './title.js'
+import { isRepetitionLoop, LOOP_MIN_CHARS } from '../embeddings/repetition-loop.js'
 
 // Bad-summary signal SQL is kept in lockstep with scripts/audit-summaries.sh and
 // scripts/reset-bad-summaries.ts. If you change a signal there, change it here too.
+// `loopy` is the exception: it is not SQL. $1 carries loopingSummaryIds(), so
+// every audit uses the summarizer's own isRepetitionLoop.
 // The `unsummarizable` marker ([unsummarizable]…) is health-tool-only: those are
 // summaries the pipeline gave up on, which still count against quality.
 const BAD_SUMMARY_SIGNALS = `
@@ -22,12 +25,7 @@ const BAD_SUMMARY_SIGNALS = `
       (LENGTH(s.summary) < 500 AND s.content_chars > 8000) AS too_short,
       (s.content_chars > 5000
         AND LENGTH(s.summary)::numeric / NULLIF(s.content_chars, 0) < 0.005) AS over_compressed,
-      (LENGTH(s.summary) > 2000
-        AND array_length(string_to_array(s.summary, ' '), 1) > 300
-        AND (SELECT COUNT(DISTINCT w)::numeric
-               / NULLIF(array_length(string_to_array(s.summary, ' '), 1), 0)
-             FROM unnest(string_to_array(s.summary, ' ')) AS w) < 0.05
-      ) AS loopy,
+      (s.id = ANY($1::int[])) AS loopy,
       (s.summary ~ '^\\s*\\{' AND s.summary ~ '"file_paths"\\s*:') AS json_dump,
       (s.content_chars > 8000
         AND (LENGTH(s.summary) - LENGTH(REPLACE(s.summary, REPEAT(CHR(96), 3), ''))) / 3 >= 4
@@ -93,6 +91,29 @@ const gatherCoverage = async () => {
   }
 }
 
+// Verbatim transcripts are stored as `[ROLE]: ...` lines (batch.ts formats
+// them so), and a conversation that repeats itself is not a summarizer fault;
+// everything else in sessions.summary is model output.
+const VERBATIM_TRANSCRIPT = `'^\\[[A-Z_]+\\]:'`
+const LOOP_SCAN_PAGE = 500
+
+export const loopingSummaryIds = async (): Promise<number[]> => {
+  const ids: number[] = []
+  let after = 0
+  for (;;) {
+    const page = await query<{ id: number; summary: string }>(
+      `SELECT id, summary FROM sessions
+       WHERE summary IS NOT NULL AND id > $1
+         AND LENGTH(summary) >= $2 AND summary !~ ${VERBATIM_TRANSCRIPT}
+       ORDER BY id LIMIT $3`,
+      [after, LOOP_MIN_CHARS, LOOP_SCAN_PAGE]
+    )
+    for (const row of page.rows) if (isRepetitionLoop(row.summary)) ids.push(row.id)
+    if (page.rows.length < LOOP_SCAN_PAGE) return ids
+    after = page.rows[page.rows.length - 1].id
+  }
+}
+
 const gatherBadSummaries = async () => {
   const counters = BAD_SUMMARY_CATEGORIES.map(
     (cat) => `COUNT(*) FILTER (WHERE ${cat}) AS ${cat}`
@@ -104,7 +125,8 @@ const gatherBadSummaries = async () => {
      SELECT
        ${counters},
        COUNT(*) FILTER (WHERE ${anyClause}) AS any_bad
-     FROM scored`
+     FROM scored`,
+    [await loopingSummaryIds()]
   )
   const row = result.rows[0]
   assert(row, 'bad-summary query returned no rows')

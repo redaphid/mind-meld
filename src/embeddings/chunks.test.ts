@@ -17,6 +17,11 @@ const { CHUNK_SIZE_CHARS, CHUNK_VERBATIM_CHARS } = await import("./summarize.js"
 // longer account of work the chunk never described.
 const PADDED = "The user refactored the embedding pipeline in src/embeddings/batch.ts, ".repeat(12);
 
+const LONGER_THAN_CHUNK = Array.from(
+  { length: 700 },
+  (_, i) => `step${i} refactored the embedding pipeline`,
+).join(", ");
+
 const storedChunkSummaries = () =>
   query.mock.calls
     .filter(([sql]) => String(sql).includes("INSERT INTO session_chunks"))
@@ -70,7 +75,7 @@ describe("persistSessionChunks on a long session's small remainder", () => {
         ({
           ok: true,
           status: 200,
-          json: async () => ({ response: PADDED.repeat(4), done: true, prompt_eval_count: 100 }),
+          json: async () => ({ response: LONGER_THAN_CHUNK, done: true, prompt_eval_count: 100 }),
         }) as unknown as Response,
     );
 
