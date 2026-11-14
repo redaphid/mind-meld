@@ -29,6 +29,7 @@ vi.mock('../sync/sync-control.js', () => ({ semanticEnabled: () => semanticOn() 
 const { search, searchWithDiagnostics, resolveDataClasses, formatSearchResults, findProjectsByPath, NOISE_CHECK, FULL_TEXT_ONLY } =
   await import('./search.js')
 const { config } = await import('../config.js')
+import type { Adjustment, EvidenceList } from './evidence.js'
 
 type Row = Record<string, unknown>
 const rows = (...r: Row[]) => ({ rows: r })
@@ -624,6 +625,10 @@ describe('formatSearchResults', () => {
     score: 0.7,
     matched_tier: 'session' as const,
     snippet: 'we fixed it',
+    noise_damping: null,
+    evidence: [{ arm: 'session', rank: 1, cosine: 0.7 }] as EvidenceList,
+    base: 0.7,
+    adjustments: [] as Adjustment[],
     ...over,
   })
 
@@ -638,15 +643,16 @@ describe('formatSearchResults', () => {
     expect(text).toContain('we fixed it')
   })
 
-  it('marks current-project hits and renders cursors', () => {
-    const text = formatSearchResults(
-      [
-        result({ session_id: 2, cursor: { chunk_index: 3 } }),
-        result({ session_id: 3, matched_tier: 'message' as const, cursor: { message_id: 900 }, snippet: null }),
-      ],
-      [2]
-    )
-    expect(text).toContain('[CURRENT PROJECT]')
+  // The label used to compare project ids with session ids, so it marked
+  // whichever result's session id happened to equal a current project's id.
+  it('marks exactly the results the project boost was applied to', () => {
+    const text = formatSearchResults([
+      result({ session_id: 7, cursor: { chunk_index: 3 } }),
+      result({ session_id: 3, adjustments: [{ kind: 'project', boost: 0.5 }], matched_tier: 'message' as const, cursor: { message_id: 900 }, snippet: null }),
+    ])
+    const [first, second] = text.split(/\n\n2\. /)
+    expect(first).not.toContain('[CURRENT PROJECT]')
+    expect(second).toContain('[CURRENT PROJECT]')
     expect(text).toContain('Cursor: chunk 3')
     expect(text).toContain('Cursor: message 900')
     expect(text).toContain('(no snippet)')
@@ -746,6 +752,10 @@ describe('search title resolution (#95)', () => {
         score: 0.5,
         matched_tier: 'message',
         snippet: 'a matching excerpt',
+        noise_damping: null,
+        evidence: [{ arm: 'lexical', rank: 1, tsRank: 0.5, messageId: 1 }],
+        base: 0.5,
+        adjustments: [],
       },
     ])
     expect(formatted).toContain('Session 4268')
@@ -862,7 +872,7 @@ describe('when the query vector cannot be had', () => {
   // An LLM reading the rendered text cannot see the server log, and will treat
   // an empty result as proof the conversation does not exist.
   it('warns in the rendered text, including when nothing matched', () => {
-    const note = formatSearchResults([], [], { semantic: false, cause: 'unavailable', reason: 'gate shut' })
+    const note = formatSearchResults([], { degraded: { semantic: false, cause: 'unavailable', reason: 'gate shut' } })
     expect(note).toContain(FULL_TEXT_ONLY)
     expect(note).toContain('gate shut')
     expect(note).toContain('Retry shortly')
@@ -893,7 +903,7 @@ describe('with the semantic switch off', () => {
   it('says it was switched off, not that it failed', async () => {
     const { degraded } = await searchWithDiagnostics({ query: 'build', mode: 'semantic' })
     expect(degraded?.cause).toBe('switched-off')
-    const note = formatSearchResults([], [], degraded)
+    const note = formatSearchResults([], { degraded })
     expect(note).toContain('switched off')
     expect(note).not.toContain('Retry shortly')
   })

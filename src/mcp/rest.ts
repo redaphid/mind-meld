@@ -5,6 +5,7 @@
 // contract can stay stable while the query layer evolves.
 
 import type { SearchResult } from './search.js'
+import type { Adjustment, EvidenceList } from './evidence.js'
 import type { TitleSource } from './title.js'
 import type { SessionDigest, MessagesResult, RenderedMessage, SessionMessage } from './session.js'
 
@@ -30,6 +31,13 @@ export type SearchHitDto = {
   // the matched region instead of at the top. Null when the hit is the session
   // as a whole.
   cursor: { chunkIndex: number } | { messageId: number } | null
+  // Why it ranked here (src/mcp/evidence.ts): every arm that found it with its
+  // rank and raw similarity, best first, the fused score before adjustments,
+  // and each adjustment. `score` is `base` with the adjustments applied in
+  // order; `matchedTier` and `cursor` come from the first piece of evidence.
+  evidence: EvidenceList
+  base: number
+  adjustments: Adjustment[]
 }
 
 const iso = (value: Date | string | null | undefined): string | null => {
@@ -57,6 +65,9 @@ export const toSearchHit = (r: SearchResult): SearchHitDto => ({
       : r.cursor?.message_id != null
         ? { messageId: r.cursor.message_id }
         : null,
+  evidence: r.evidence,
+  base: r.base,
+  adjustments: r.adjustments,
 })
 
 export type ChunkDto = {

@@ -11,7 +11,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
-import { searchWithDiagnostics, UnknownDataClassError } from './search.js'
+import { searchWithDiagnostics, UnknownDataClassError, SEARCH_MODES, isSearchMode } from './search.js'
 import { SnapshotConflictError } from './ingest-snapshot.js'
 import { IngestPayloadSchema, ingestConversation, MissingDataClassError } from './ingest.js'
 import { getSessionDigest, getMessages, getMessageById } from './session.js'
@@ -498,10 +498,23 @@ const listParam = (raw: unknown): string[] | undefined => {
 // returning the structured results rather than the MCP text rendering.
 app.get('/api/search', apiRoute('Search', async (req, res) => {
   const q = typeof req.query.q === 'string' ? req.query.q : undefined
-  const mode = req.query.mode as 'semantic' | 'text' | 'hybrid' | undefined
 
   if (!q?.trim()) {
     res.status(400).json({ status: 'error', error: 'q is required' })
+    return
+  }
+
+  // An unknown mode used to become hybrid silently, so a typo'd
+  // ?mode=vector returned a different search from the one asked for.
+  const mode = req.query.mode ?? 'hybrid'
+  if (!isSearchMode(mode)) {
+    res.status(400).json({ status: 'error', error: `mode must be one of ${SEARCH_MODES.join(', ')}` })
+    return
+  }
+
+  const limit = intParam(req.query.limit, 20)
+  if (limit < 1) {
+    res.status(400).json({ status: 'error', error: 'limit must be a positive integer' })
     return
   }
 
@@ -516,8 +529,8 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
     outcome = await searchWithDiagnostics({
       query: q,
       negativeQuery: typeof req.query.not === 'string' ? req.query.not : undefined,
-      mode: mode && ['semantic', 'text', 'hybrid'].includes(mode) ? mode : 'hybrid',
-      limit: Math.min(intParam(req.query.limit, 20), 100),
+      mode,
+      limit: Math.min(limit, 100),
       source: typeof req.query.source === 'string' ? req.query.source : undefined,
       since: typeof req.query.since === 'string' ? req.query.since : undefined,
       cwd,
@@ -553,7 +566,7 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
   res.json({
     status: 'ok',
     query: q,
-    mode: mode ?? 'hybrid',
+    mode,
     count: outcome.results.length,
     projectIds: outcome.projectIds,
     // Additive and null on a healthy search, so nothing that ignores it breaks.

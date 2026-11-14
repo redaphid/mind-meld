@@ -117,20 +117,23 @@ ${text}`,
 // A 503 from the GPU gate is returned rather than retried, so the Ollama client
 // raises it immediately and the caller can fall back to something that does not
 // need a GPU. Waiting out a cooldown is a background worker's job.
-const fetchOnce: typeof fetch = async (input, init) => {
+//
+// `cancel` is the caller giving up: an aborted search must not keep the one
+// slot busy embedding a query nobody will read. A request still queued for the
+// slot fails the moment it gets it, without reaching Ollama.
+const fetchOnce = (cancel: AbortSignal): typeof fetch => async (input, init) => {
   const { interactiveTimeoutMs } = config.ollama;
   return withOllamaGate(
     () =>
       fetch(input, {
         ...init,
-        signal: AbortSignal.timeout(interactiveTimeoutMs),
+        signal: AbortSignal.any([cancel, AbortSignal.timeout(interactiveTimeoutMs)]),
       }),
     interactiveTimeoutMs,
   );
 };
 
 let client: Ollama | null = null;
-let interactiveClient: Ollama | null = null;
 
 // One ollama serves both bge-m3 (vectorization) and qwen3 (generation).
 export function getOllamaClient(): Ollama {
@@ -147,15 +150,10 @@ export function getOllamaClient(): Ollama {
 // one gives up quickly so its caller can degrade, instead of retrying so the
 // work is never lost. Anything queued, batched or scheduled wants
 // getOllamaClient() instead — dropping background work is how the queue stops
-// draining.
-export function getInteractiveOllamaClient(): Ollama {
-  if (!interactiveClient) {
-    interactiveClient = new Ollama({
-      host: config.ollama.url,
-      fetch: fetchOnce,
-    });
-  }
-  return interactiveClient;
+// draining. One per request, because ollama-js takes no per-request signal and
+// its abort() would cancel every caller's requests.
+export function getInteractiveOllamaClient(cancel: AbortSignal): Ollama {
+  return new Ollama({ host: config.ollama.url, fetch: fetchOnce(cancel) });
 }
 
 // truncate:false is load-bearing everywhere we embed. Ollama's default silently

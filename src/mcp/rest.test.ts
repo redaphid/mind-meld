@@ -15,6 +15,10 @@ const hit = (over: Partial<SearchResult> = {}): SearchResult => ({
   score: 0.5,
   matched_tier: 'session',
   snippet: 'we fixed **NaN** embeddings',
+  noise_damping: null,
+  evidence: [{ arm: 'session', rank: 1, cosine: 0.8 }],
+  base: 0.5,
+  adjustments: [],
   ...over,
 })
 
@@ -50,6 +54,9 @@ describe('toSearchHit', () => {
       noiseDamping: null,
       snippet: 'we fixed **NaN** embeddings',
       cursor: null,
+      evidence: [{ arm: 'session', rank: 1, cosine: 0.8 }],
+      base: 0.5,
+      adjustments: [],
     })
   })
 

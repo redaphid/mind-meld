@@ -49,6 +49,16 @@ function parseSemanticFlag(value: string | undefined): boolean {
   throw new Error(`MINDMELD_SEMANTIC must be "on" or "off", got "${value}"`);
 }
 
+// Unset means search keeps its limit-relative candidate pools. A typo must not
+// silently fall back to them, because the two settings rank differently.
+function parseSearchPool(value: string | undefined): number | null {
+  const trimmed = (value ?? "").trim();
+  if (trimmed === "") return null;
+  const n = Number(trimmed);
+  if (Number.isInteger(n) && n > 0) return n;
+  throw new Error(`MINDMELD_SEARCH_POOL must be a positive integer, got "${value}"`);
+}
+
 function getEnvFloat(key: string, defaultValue: number): number {
   const value = process.env[key];
   if (!value) return defaultValue;
@@ -268,6 +278,16 @@ export const config = {
   sync: {
     intervalMinutes: getEnvInt("SYNC_INTERVAL_MINUTES", 60),
     incremental: getEnvBool("SYNC_INCREMENTAL", true),
+  },
+
+  search: {
+    // How many hits each arm retrieves before fusion. Null: a multiple of the
+    // requested limit (2x sessions and full text, 3x chunks and messages, 5x
+    // every vector arm under a data-class filter), so a session's rank and
+    // fused score depend on the limit it was asked with. A number: that many
+    // from every arm whatever the limit, so a page of 8 is the first 8 of a
+    // page of 20, and evidence ranks compare across searches.
+    candidatePool: parseSearchPool(process.env.MINDMELD_SEARCH_POOL),
   },
 
   // The semantic switch (src/sync/sync-control.ts). The live value is a row in

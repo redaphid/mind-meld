@@ -2,7 +2,7 @@ import assert from 'node:assert'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { query } from '../db/postgres.js'
-import { searchWithDiagnostics, formatSearchResults, findProjectsByPath } from './search.js'
+import { searchWithDiagnostics, formatSearchResults, findProjectsByPath, SEARCH_MODES } from './search.js'
 import { sinceSchema } from './since.js'
 import {
   getSessionDigest,
@@ -117,8 +117,8 @@ down for everyone afterwards. Search only gets quieter if you tell it.
       negativeQuery: z.string().optional().describe('Negative query - pushes results away from this concept'),
       excludeTerms: z.string().optional().describe('Hard filter - exclude results containing these terms'),
       cwd: z.string().optional().describe('Current working directory - conversations from matching projects get boosted'),
-      mode: z.enum(['semantic', 'text', 'hybrid']).optional().describe('Search mode: hybrid (default), semantic, or text'),
-      limit: z.number().optional().describe('Max results to return (default 8)'),
+      mode: z.enum(SEARCH_MODES).optional().describe('Search mode: hybrid (default), semantic, or text'),
+      limit: z.number().int().min(1).optional().describe('Max results to return (default 8)'),
       source: z.string().optional().describe('Filter to specific source'),
       since: sinceSchema.optional(),
       projectOnly: z.boolean().optional().describe('Only search conversations from the CWD project'),
@@ -132,13 +132,12 @@ down for everyone afterwards. Search only gets quieter if you tell it.
       tags: z.array(z.string()).optional().describe('Only return results carrying ANY of these tags (OR, not AND). Matches a tag on the session OR on any of its messages, so you do not have to know which granularity the tagging agent chose. Tags are free-form and case-insensitive; an unused tag is not an error, it simply matches nothing. Naming a tag here also overrides its default exclusion — tags:["useless"] is how you deliberately reach hidden sessions.'),
       excludeTags: z.array(z.string()).optional().describe('Hide results carrying ANY of these tags, in addition to the default-excluded set. A tag on the session hides the whole session; a tag on a single message only hides that message\'s own hit.'),
       includeNoise: z.boolean().optional().describe('Include sessions reported as useless, and switch off the ranking penalty that demotes results resembling reported noise. False by default. Pass true when you are debugging what the index actually holds rather than looking for an answer -- with it off you cannot tell "no such conversation" apart from "it was reported as noise".'),
+      explain: z.boolean().optional().describe('Add a score breakdown to each result: the fused base score, the noise and project adjustments, and the full-text rank value. Off by default.'),
     },
-    async (params) => {
-      const { results, degraded, projectIds } = await searchWithDiagnostics(params)
+    async ({ explain, ...params }) => {
+      const { results, degraded } = await searchWithDiagnostics(params)
       return {
-        content: [
-          { type: 'text', text: formatSearchResults(results, projectIds, degraded) },
-        ],
+        content: [{ type: 'text', text: formatSearchResults(results, { degraded, explain }) }],
       }
     }
   )
