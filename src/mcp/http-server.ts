@@ -171,7 +171,7 @@ app.get('/mcp', mcpGetHandler)
 app.delete('/mcp', mcpDeleteHandler)
 
 app.get('/health', (req: any, res: any) => {
-  res.json({ status: 'ok', name: 'mindmeld', version })
+  res.json({ status: 'ok', name: 'mindmeld', version, revision: process.env.MINDMELD_REVISION ?? null })
 })
 
 // The REST surface documents itself: serve the spec that ships in the image, so

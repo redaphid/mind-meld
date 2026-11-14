@@ -19,5 +19,11 @@ COPY . .
 # Expose HTTP port
 EXPOSE 3000
 
+# The commit this image was built from, reported by GET /health. The version in
+# package.json only moves on a release, so it cannot tell two builds of main
+# apart. Declared last so it does not invalidate the dependency layer.
+ARG MINDMELD_REVISION=unknown
+ENV MINDMELD_REVISION=$MINDMELD_REVISION
+
 # Run HTTP MCP server
 CMD ["npx", "tsx", "src/mcp/http-server.ts"]

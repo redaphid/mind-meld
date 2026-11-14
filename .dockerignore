@@ -28,6 +28,10 @@ coverage
 # Docs, agent instructions, editor config: never read at runtime, and the
 # largest surface for a personal detail to ride along into a public layer.
 docs
+# The one exception: GET /openapi.yaml serves this file from inside the image.
+# It is already public in this repository, so shipping it exposes nothing new,
+# and without it the route can only 404 unless a host bind-mounts a checkout.
+!docs/openapi.yaml
 *.md
 .claude
 .vscode

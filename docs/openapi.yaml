@@ -1519,6 +1519,13 @@ components:
         version:
           type: string
           description: Version from the running image's `package.json`.
+        revision:
+          type: [string, 'null']
+          description: |
+            Git commit the running image was built from (`MINDMELD_REVISION`,
+            set by the publish workflow). `version` only moves on a release, so
+            two builds of `main` share it; compare this against `main` to tell
+            whether a deployment is current. `null` when run from source.
           examples: ['1.7.1']
 
     Status:
