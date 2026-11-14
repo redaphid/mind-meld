@@ -62,8 +62,15 @@ describe('getHealth', () => {
       ],
     })
     const h = await getHealth()
-    expect(h.automatedFlagDrift).toEqual({ unflagged: 1, staleFlag: 1 })
-    expect(formatHealth(h)).toContain('Classified automated, not flagged: 1')
+    expect(h.automatedFlagDrift).toEqual({ unflagged: 1, unexplained: 1 })
+    expect(formatHealth(h)).toContain('Should be flagged and is not: 1')
+    expect(formatHealth(h)).toContain('Flagged, and this process\x27s rule does not explain it: 1')
+    expect(formatHealth(h)).toContain('Automated Flags: UNHEALTHY')
+  })
+
+  it('calls automated flags healthy only when neither count is set', async () => {
+    wireQueries({ sessions: [{ id: 1, source: 'claude_code', machine: null, stored: false, opening: 'Fix the lantern' }] })
+    expect(formatHealth(await getHealth())).toContain('Automated Flags: HEALTHY')
   })
 
   it('computes coverage as summarized / (summarized + null backlog)', async () => {
