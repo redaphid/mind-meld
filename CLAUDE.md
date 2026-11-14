@@ -624,7 +624,7 @@ pulls.
 Each run fast-forwards the checkout (only when no tracked file is modified),
 pulls the app images, and lets compose's dry run name the containers whose
 image or config changed; nothing else is touched, and it never runs `down` or
-removes a volume. Three rules are deliberate:
+removes a volume. These rules are deliberate:
 
 - **Only a complete set deploys.** A publish pushes each image when its own job
   finishes, so a pull can land mid-publish. The run waits until every app image
@@ -638,7 +638,6 @@ removes a volume. Three rules are deliberate:
   the cause: a failed publish, a dirty checkout, a paused updater. A failed
   update or health check is pushed on its own, since it can leave the host on
   main's revision and still broken.
-
 - **Unknown is not current.** When docker cannot be asked, no app container is
   running, or origin cannot be fetched, `status` says UNKNOWN and exits
   nonzero, and a run that stays unable to tell for the stale threshold alerts.
