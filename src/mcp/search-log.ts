@@ -105,6 +105,10 @@ export const requestHash = (request: Record<string, unknown>): string =>
 // caller's latest search within this window whose results hold the session.
 export const LINK_WINDOW_MINUTES = 30
 
+// Every REST client that does not name itself. It is many unrelated clients,
+// so its follow-ups link only by the list they pass, never by caller.
+export const ANON_REST_CALLER = 'rest:anon'
+
 const INSERT_SEARCH = `
 INSERT INTO search_log (at, caller, transport, client, kind, tool, list, request, request_hash,
                         mode, results, result_count, degraded, error, timings)
@@ -120,7 +124,7 @@ WITH tgt AS (
   FROM search_log l, tgt
   WHERE l.kind = 'search' AND l.results IS NOT NULL
     AND CASE WHEN $7::text IS NOT NULL THEN l.list = $7::text
-             ELSE l.caller = $2 AND l.at > $1::timestamptz - make_interval(mins => ${LINK_WINDOW_MINUTES})
+             ELSE $2 <> '${ANON_REST_CALLER}' AND l.caller = $2 AND l.at > $1::timestamptz - make_interval(mins => ${LINK_WINDOW_MINUTES})
                   AND l.at <= $1::timestamptz
                   AND tgt.sid IS NOT NULL
                   AND l.results @> jsonb_build_array(jsonb_build_object('s', tgt.sid)) END
@@ -268,14 +272,14 @@ export const mcpCaller = (
   client: clientName(clientInfo),
 })
 
-// REST has no session. A client that wants its opens linked names itself
-// (the web UI sends a per-tab id); everyone else shares "rest:anon" and is
-// linked by list handle when it passes one.
+// REST has no session. A client that wants its opens linked by caller names
+// itself with X-Mindmeld-Caller; everyone else shares ANON_REST_CALLER and is
+// linked only by the list handle it passes.
 export const restCaller = (header: (name: string) => string | undefined): Caller => {
   const caller = header('x-mindmeld-caller')
   const client = header('x-mindmeld-client')
   return {
-    key: `rest:${caller && CALLER_TOKEN.test(caller) ? caller : 'anon'}`,
+    key: caller && CALLER_TOKEN.test(caller) ? `rest:${caller}` : ANON_REST_CALLER,
     transport: 'rest',
     client: client && CALLER_TOKEN.test(client) ? client : 'rest',
   }
