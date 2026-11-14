@@ -11,13 +11,20 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PG, applyInitDb, createScratchDatabase, dbAvailable } from '../__tests__/scratch-database.js'
 import { config } from '../config.js'
-import { closePool, query, queries } from '../db/postgres.js'
-import { syncSession } from '../sync/claude-code.js'
-import { syncClaudeMemories } from '../sync/claude-memory.js'
-import { ingestConversation } from '../mcp/ingest.js'
-import { IngestPayloadSchema } from '../mcp/ingest-schema.js'
-import { writeNote } from '../mcp/notes.js'
-import { correctAutomatedDrift, findAutomatedDrift, flagAutomated } from './automated-flags.js'
+// The writers load only when there is a database to write to. A skipped suite
+// that imported them anyway would load modules it never calls, and coverage
+// counts every function of a loaded module.
+const loadWriters = async () => {
+  const { closePool, query, queries } = await import('../db/postgres.js')
+  const { syncSession } = await import('../sync/claude-code.js')
+  const { syncClaudeMemories } = await import('../sync/claude-memory.js')
+  const { ingestConversation } = await import('../mcp/ingest.js')
+  const { IngestPayloadSchema } = await import('../mcp/ingest-schema.js')
+  const { writeNote } = await import('../mcp/notes.js')
+  const { correctAutomatedDrift, findAutomatedDrift, flagAutomated } = await import('./automated-flags.js')
+  return { closePool, query, queries, syncSession, syncClaudeMemories, ingestConversation, IngestPayloadSchema, writeNote, correctAutomatedDrift, findAutomatedDrift, flagAutomated }
+}
+const w = dbAvailable ? await loadWriters() : (undefined as unknown as Awaited<ReturnType<typeof loadWriters>>)
 
 const PROMPT = 'Night-shift lair report:'
 const MEMORY_TITLE = 'Memory: lair-night-log'
@@ -51,15 +58,15 @@ const transcript = (sessionId: string, messages: ReturnType<typeof message>[]) =
 })
 
 const syncTranscript = async (sourceName: string, sessionId: string, messages: ReturnType<typeof message>[]) => {
-  const source = await queries.getSourceByName(sourceName)
-  const projectId = await queries.upsertProject(source!.id, `${sourceName}-lair`, '/srv/lair', 'lair')
-  const result = await syncSession(source!.id, projectId, transcript(sessionId, messages) as never, sourceName)
+  const source = await w.queries.getSourceByName(sourceName)
+  const projectId = await w.queries.upsertProject(source!.id, `${sourceName}-lair`, '/srv/lair', 'lair')
+  const result = await w.syncSession(source!.id, projectId, transcript(sessionId, messages) as never, sourceName)
   expect(result.errors).toEqual([])
 }
 
 const ingest = (mode: 'append' | 'snapshot', externalId: string, title: string, firstLine: string) =>
-  ingestConversation(
-    IngestPayloadSchema.parse({
+  w.ingestConversation(
+    w.IngestPayloadSchema.parse({
       ...(mode === 'snapshot' ? { mode, snapshot: { revision: 1, complete: true } } : {}),
       source: `lair-${mode}`,
       dataClass: 'personal',
@@ -72,7 +79,7 @@ const ingest = (mode: 'append' | 'snapshot', externalId: string, title: string, 
 const flags = async () =>
   Object.fromEntries(
     (
-      await query<{ external_id: string; is_automated: boolean }>(
+      await w.query<{ external_id: string; is_automated: boolean }>(
         `SELECT s.external_id, s.is_automated FROM sessions s WHERE s.deleted_at IS NULL ORDER BY s.external_id`
       )
     ).rows.map((r) => [r.external_id.replace(/^snapshot:.*$/, 'snapshot'), r.is_automated])
@@ -102,20 +109,20 @@ beforeAll(async () => {
     message('u2', 1, 'user', `${PROMPT} inside a tool result`),
   ])
   await syncTranscript('codex', 'codex-prompted', [message('u1', 0, 'user', `${PROMPT} from codex`)])
-  const memories = await syncClaudeMemories()
+  const memories = await w.syncClaudeMemories()
   expect(memories.errors).toEqual([])
   await ingest('append', 'thread-titled', `${PROMPT} thread`, 'hello')
   await ingest('append', 'thread-quoting', 'Weekly lair sync', `${PROMPT} quoted`)
   await ingest('snapshot', 'thread-snapshot', `${PROMPT} snapshot`, 'hello')
-  await writeNote({ text: 'remember the lantern', title: `${PROMPT} note` })
+  await w.writeNote({ text: 'remember the lantern', title: `${PROMPT} note` })
 }, 180_000)
 
 afterAll(async () => {
   configure([])
-  await closePool().catch(() => {})
+  await w?.closePool().catch(() => {})
   await scratch?.drop()
   if (memoryRoot) await rm(memoryRoot, { recursive: true, force: true })
-})
+}, 60_000)
 
 describe.skipIf(!dbAvailable)('the automated flag as every writer stores it (scratch database)', () => {
   it('flags each session by its own kind of opening text, and leaves nothing for the correction to change', async () => {
@@ -133,7 +140,7 @@ describe.skipIf(!dbAvailable)('the automated flag as every writer stores it (scr
       snapshot: true,
       [note]: true,
     })
-    expect(await findAutomatedDrift()).toEqual([])
+    expect(await w.findAutomatedDrift()).toEqual([])
   })
 
   // The defect itself: a session written before its prefix was configured.
@@ -142,9 +149,9 @@ describe.skipIf(!dbAvailable)('the automated flag as every writer stores it (scr
     await syncTranscript('claude_code', 'written-before', [message('u1', 0, 'user', 'Lair census: 3 bats')])
     configure([PROMPT, MEMORY_TITLE, 'Lair census:'])
 
-    expect(await flagAutomated()).toBe(1)
+    expect(await w.flagAutomated()).toBe(1)
     expect((await flags())['written-before']).toBe(true)
-    expect(await flagAutomated()).toBe(0)
+    expect(await w.flagAutomated()).toBe(0)
   })
 
   // A container recreated without the variable must not undo what a configured
@@ -153,7 +160,7 @@ describe.skipIf(!dbAvailable)('the automated flag as every writer stores it (scr
     const before = await flags()
     configure([])
 
-    expect(await flagAutomated()).toBe(0)
+    expect(await w.flagAutomated()).toBe(0)
     await syncTranscript('claude_code', 'prompted', [
       message('u1', 0, 'user', `${PROMPT} all quiet`),
       message('a1', 1, 'assistant', 'noted'),
@@ -164,12 +171,12 @@ describe.skipIf(!dbAvailable)('the automated flag as every writer stores it (scr
 
   it('clears only through the explicit correction, and a repeated correction changes nothing', async () => {
     configure([])
-    const drift = await findAutomatedDrift()
+    const drift = await w.findAutomatedDrift()
     expect(drift.every((d) => d.stored)).toBe(true)
     expect(drift.length).toBeGreaterThan(0)
 
-    expect(await correctAutomatedDrift(drift)).toBe(drift.length)
-    expect(await correctAutomatedDrift(drift)).toBe(0)
+    expect(await w.correctAutomatedDrift(drift)).toBe(drift.length)
+    expect(await w.correctAutomatedDrift(drift)).toBe(0)
     expect(Object.values(await flags()).every((flag) => !flag)).toBe(true)
   })
 })
