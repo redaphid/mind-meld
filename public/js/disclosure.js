@@ -41,7 +41,9 @@ const Section = ({ sessionId, chunk, open, matched, onToggle }) => html`
 
 // session: a search hit or a session list item — both carry an id, a title and
 // enough metadata for rung 1, and differ only in which key holds the id.
-export const DisclosureRow = ({ session, snippet, tier, score, cursor }) => {
+// list: the search's handle, when the row is a search hit, so its opens are
+// logged against that search.
+export const DisclosureRow = ({ session, snippet, tier, score, cursor, list }) => {
   const id = session.id ?? session.sessionId
   const [open, setOpen] = useState(false)
   const [everOpen, setEverOpen] = useState(false)
@@ -50,7 +52,7 @@ export const DisclosureRow = ({ session, snippet, tier, score, cursor }) => {
   const [matchedMessage, setMatchedMessage] = useState(null)
   const [wholeSummary, setWholeSummary] = useState(false)
 
-  const { data, error, loading, reload } = useApi(everOpen ? `/api/sessions/${id}` : null)
+  const { data, error, loading, reload } = useApi(everOpen ? `/api/sessions/${id}` : null, { list })
   const digest = data?.digest
 
   // Opening a hit reveals the region that matched, one rung deeper than a plain
@@ -64,11 +66,14 @@ export const DisclosureRow = ({ session, snippet, tier, score, cursor }) => {
     if (cursor?.messageId != null) setMatchedMessage(cursor.messageId)
   }
 
-  const deepLink = cursor?.messageId
-    ? { msg: cursor.messageId }
-    : cursor?.chunkIndex != null
-      ? { chunk: cursor.chunkIndex }
-      : {}
+  const deepLink = {
+    list,
+    ...(cursor?.messageId
+      ? { msg: cursor.messageId }
+      : cursor?.chunkIndex != null
+        ? { chunk: cursor.chunkIndex }
+        : {}),
+  }
 
   return html`
     <div class="row disc ${open ? 'open' : ''}">
