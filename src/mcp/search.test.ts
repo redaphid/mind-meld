@@ -32,6 +32,10 @@ const { config } = await import('../config.js')
 
 type Row = Record<string, unknown>
 const rows = (...r: Row[]) => ({ rows: r })
+// Hydration asks for every hit of a tier in one query, ids in $1.
+const SESSIONS_BY_ID = 's.id = ANY($1'
+const rowsForIds = (params: unknown[] | undefined, lookup: (id: number) => Row | undefined) =>
+  rows(...(params?.[0] as number[]).flatMap((id): Row[] => { const row = lookup(id); return row ? [row] : [] }))
 
 const sessionRow = (over: Row): Row => ({
   id: 1,
@@ -58,10 +62,8 @@ const fixtures: Record<number, Row> = {
 
 const mockDbForSemantic = () => {
   query.mockImplementation(async (sql: string, params?: unknown[]) => {
-    if (typeof sql === 'string' && sql.includes('s.id = $1')) {
-      const row = fixtures[params?.[0] as number]
-      return row ? rows(row) : rows()
-    }
+    if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID))
+      return rowsForIds(params, (id) => fixtures[id])
     return rows()
   })
 }
@@ -281,13 +283,11 @@ describe('search parameter arms', () => {
   it('surfaces chunk and message tier hits with cursors', async () => {
     query.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (typeof sql === 'string' && sql.includes('session_chunks'))
-        return rows({ ...fixtures[2], chunk_index: 3, chunk_summary: 'the fix section' })
-      if (typeof sql === 'string' && sql.includes('WHERE m.id = $1'))
+        return rows({ ...fixtures[2], chunk_id: 10, chunk_index: 3, chunk_summary: 'the fix section' })
+      if (typeof sql === 'string' && sql.includes('WHERE m.id = ANY($1'))
         return rows({ ...fixtures[2], id: 9, message_id: 900, content_text: 'we fixed it here' })
-      if (typeof sql === 'string' && sql.includes('s.id = $1')) {
-        const row = fixtures[params?.[0] as number]
-        return row ? rows(row) : rows()
-      }
+      if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID))
+        return rowsForIds(params, (id) => fixtures[id])
       return rows()
     })
     querySimilar.mockImplementation(async (collection: string) => {
@@ -309,10 +309,8 @@ describe('search parameter arms', () => {
     query.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (typeof sql === 'string' && sql.includes('FROM projects p') && sql.includes('LIKE'))
         return rows({ id: 7, path: '/p/proj', name: 'proj', source_name: 'claude_code' })
-      if (typeof sql === 'string' && sql.includes('s.id = $1')) {
-        const row = fixtures[params?.[0] as number]
-        return row ? rows(row) : rows()
-      }
+      if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID))
+        return rowsForIds(params, (id) => fixtures[id])
       return rows()
     })
     mockChromaSessionsOnly()
@@ -328,6 +326,17 @@ describe('search parameter arms', () => {
     })
     expect(results.map((r) => r.session_id).sort()).toEqual([1, 2])
     for (const r of results) expect(r.score).toBeGreaterThan(0.5)
+  })
+
+  it('hands back the projects the cwd resolved to', async () => {
+    query.mockImplementation(async (sql: string) =>
+      typeof sql === 'string' && sql.includes('FROM projects p') && sql.includes('LIKE')
+        ? rows({ id: 7, path: '/p/proj', name: 'proj', source_name: 'claude_code' })
+        : rows()
+    )
+    querySimilar.mockResolvedValue({ ids: [[]], distances: [[]] })
+    const outcome = await searchWithDiagnostics({ query: 'x', mode: 'semantic', cwd: '/p/proj/sub' })
+    expect(outcome.projectIds).toEqual([7])
   })
 
   // Both fixtures ended when they started, so there is no recent activity to
@@ -352,10 +361,8 @@ describe('search parameter arms', () => {
         return rows({ centroid_vector: centroid })
       if (typeof sql === 'string' && sql.includes('centroid_vector FROM projects'))
         return rows({ centroid_vector: centroid })
-      if (typeof sql === 'string' && sql.includes('s.id = $1')) {
-        const row = fixtures[params?.[0] as number]
-        return row ? rows(row) : rows()
-      }
+      if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID))
+        return rowsForIds(params, (id) => fixtures[id])
       return rows()
     })
     mockChromaSessionsOnly()
@@ -373,15 +380,150 @@ describe('search parameter arms', () => {
   })
 })
 
+describe('hydrating the semantic hits', () => {
+  const coding = (id: number) => sessionRow({ id, title: `session-title-${id}` })
+  const chromaOrder = [31, 32, 33]
+
+  // Postgres owes no order to an ANY($1) lookup, so it answers here in the
+  // reverse of Chroma's distance order.
+  beforeEach(() => {
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID))
+        return rows(...[...(params?.[0] as number[])].reverse().map(coding))
+      if (typeof sql === 'string' && sql.includes('session_chunks'))
+        return rows(...[...(params?.[0] as number[])].reverse().map((chunkId) => ({ ...coding(chunkId - 100), chunk_id: chunkId, chunk_index: 0, chunk_summary: 'chunk-summary-velvet' })))
+      return rows()
+    })
+  })
+
+  it('ranks session hits in Chroma distance order, not in the order the rows came back', async () => {
+    querySimilar.mockImplementation(async (collection: string) =>
+      collection === 'convo-sessions'
+        ? { ids: [chromaOrder.map((id) => `session-${id}`)], distances: [[0.1, 0.2, 0.3]] }
+        : { ids: [[]], distances: [[]] }
+    )
+    const results = await search({ query: 'query-text-moonlit-ferret', mode: 'semantic' })
+    expect(results.map((r) => r.session_id)).toEqual(chromaOrder)
+  })
+
+  it('ranks chunk hits in Chroma distance order, not in the order the rows came back', async () => {
+    querySimilar.mockImplementation(async (collection: string) =>
+      collection === 'convo-chunks'
+        ? { ids: [chromaOrder.map((id) => `chunk-${id + 100}`)], distances: [[0.1, 0.2, 0.3]] }
+        : { ids: [[]], distances: [[]] }
+    )
+    const results = await search({ query: 'query-text-moonlit-ferret', mode: 'semantic' })
+    expect(results.map((r) => r.session_id)).toEqual(chromaOrder)
+  })
+
+  it('hydrates each tier in one query however many hits it has', async () => {
+    querySimilar.mockImplementation(async (collection: string) =>
+      collection === 'convo-sessions'
+        ? { ids: [chromaOrder.map((id) => `session-${id}`)], distances: [[0.1, 0.2, 0.3]] }
+        : { ids: [[]], distances: [[]] }
+    )
+    await search({ query: 'query-text-moonlit-ferret', mode: 'semantic' })
+    expect(query.mock.calls.filter(([sql]) => String(sql).includes(SESSIONS_BY_ID))).toHaveLength(1)
+  })
+})
+
+describe('when the arms finish out of order', () => {
+  const ftsRow = {
+    ...fixtures[2],
+    session_id: 2,
+    message_id: 900,
+    rank: 0.9,
+    headline: 'headline-text-**gilded**-otter',
+  }
+  let releaseChroma: () => void
+  let chromaPending: boolean
+
+  // Chroma answers only once released; the full-text arm answers at once.
+  beforeEach(() => {
+    chromaPending = true
+    const chromaGate = new Promise<void>((resolve) => {
+      releaseChroma = () => {
+        chromaPending = false
+        resolve()
+      }
+    })
+    querySimilar.mockImplementation(async (collection: string) => {
+      await chromaGate
+      return collection === 'convo-sessions'
+        ? { ids: [['session-2']], distances: [[0.1]] }
+        : { ids: [[]], distances: [[]] }
+    })
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (typeof sql === 'string' && sql.includes('ranked_messages')) return rows(ftsRow)
+      if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID)) return rowsForIds(params, (id) => fixtures[id])
+      return rows()
+    })
+  })
+
+  describe('when full text resolves first', () => {
+    let results: Awaited<ReturnType<typeof search>>
+
+    beforeEach(async () => {
+      const searching = search({ query: 'query-text-gilded-otter', mode: 'hybrid' })
+      setTimeout(() => releaseChroma(), 20)
+      results = await searching
+    })
+
+    it('still lets the session tier claim the session', () => {
+      expect(results.map((r) => [r.session_id, r.matched_tier])).toEqual([[2, 'session']])
+    })
+
+    it('still upgrades the claimed snippet to the full-text headline', () => {
+      expect(results[0].snippet).toContain('**gilded**')
+    })
+  })
+
+  describe('when the chunk tier fails', () => {
+    let outcome: Awaited<ReturnType<typeof searchWithDiagnostics>>
+
+    beforeEach(async () => {
+      querySimilar.mockImplementation(async (collection: string) => {
+        if (collection === 'convo-chunks') throw new Error('error-chroma-sulking-badger')
+        if (collection === 'convo-sessions') return { ids: [['session-2']], distances: [[0.1]] }
+        return { ids: [['msg-900']], distances: [[0.1]] }
+      })
+      query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        if (typeof sql === 'string' && sql.includes('WHERE m.id = ANY($1'))
+          return rows({ ...fixtures[2], id: 9, message_id: 900, content_text: 'message-text-sulking-badger' })
+        if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID)) return rowsForIds(params, (id) => fixtures[id])
+        return rows()
+      })
+      outcome = await searchWithDiagnostics({ query: 'query-text-gilded-otter', mode: 'semantic' })
+    })
+
+    it('keeps the tiers before it and drops the ones after it', () => {
+      expect(outcome.results.map((r) => [r.session_id, r.matched_tier])).toEqual([[2, 'session']])
+    })
+
+    it('reports the failed tier as the reason', () => {
+      expect(outcome.degraded?.reason).toBe('error-chroma-sulking-badger')
+    })
+  })
+
+  it('starts the full-text query without waiting for the semantic arms', async () => {
+    const searching = search({ query: 'query-text-gilded-otter', mode: 'hybrid' })
+    await vi.waitFor(() => {
+      if (!query.mock.calls.some(([sql]) => String(sql).includes('ranked_messages'))) throw new Error('no full-text query yet')
+    })
+    const startedWhileChromaPending = chromaPending
+    releaseChroma()
+    await searching
+    expect(startedWhileChromaPending).toBe(true)
+  })
+})
+
 describe('dataClass validation', () => {
   const withKnownClasses = () => {
     query.mockImplementation(async (sql: string, params?: unknown[]) => {
       if (typeof sql === 'string' && sql.includes('DISTINCT data_class'))
         return rows({ data_class: 'coding' }, { data_class: 'meetings' }, { data_class: 'personal' })
-      if (typeof sql === 'string' && sql.includes('s.id = $1')) {
-        const row = fixtures[params?.[0] as number]
-        return row ? rows(row) : rows()
-      }
+      if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID))
+        return rowsForIds(params, (id) => fixtures[id])
       return rows()
     })
   }
@@ -569,10 +711,8 @@ describe('formatSearchResults', () => {
 describe('search title resolution (#95)', () => {
   it('derives the title from the summary when the source supplied none', async () => {
     query.mockImplementation(async (sql: string, params?: unknown[]) => {
-      if (typeof sql === 'string' && sql.includes('s.id = $1'))
-        return params?.[0] === 2
-          ? rows(sessionRow({ id: 2, title: null, summary: 'Fixed the FTS ranking query.\nThen deployed it.' }))
-          : rows()
+      if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID))
+        return (params?.[0] as number[]).includes(2) ? rows(sessionRow({ id: 2, title: null, summary: 'Fixed the FTS ranking query.\nThen deployed it.' })) : rows()
       return rows()
     })
     mockChromaSessionsOnly()
@@ -587,8 +727,8 @@ describe('search title resolution (#95)', () => {
   // otherwise withheld — but when it is reached, it must not carry a guess.
   it('reports no title rather than inventing one when there is no summary yet', async () => {
     query.mockImplementation(async (sql: string, params?: unknown[]) => {
-      if (typeof sql === 'string' && sql.includes('s.id = $1'))
-        return params?.[0] === 2 ? rows(sessionRow({ id: 2, title: null, summary: null })) : rows()
+      if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID))
+        return (params?.[0] as number[]).includes(2) ? rows(sessionRow({ id: 2, title: null, summary: null })) : rows()
       return rows()
     })
     mockChromaSessionsOnly()
@@ -628,8 +768,8 @@ describe('search title resolution (#95)', () => {
 describe('unsummarized sessions are withheld (#95)', () => {
   it('does not return a session that has no summary', async () => {
     query.mockImplementation(async (sql: string, params?: unknown[]) => {
-      if (typeof sql === 'string' && sql.includes('s.id = $1'))
-        return params?.[0] === 2 ? rows(sessionRow({ id: 2, title: null, summary: null })) : rows()
+      if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID))
+        return (params?.[0] as number[]).includes(2) ? rows(sessionRow({ id: 2, title: null, summary: null })) : rows()
       return rows()
     })
     mockChromaSessionsOnly()
@@ -639,8 +779,8 @@ describe('unsummarized sessions are withheld (#95)', () => {
 
   it('returns it when the caller explicitly asks for unsummarized sessions', async () => {
     query.mockImplementation(async (sql: string, params?: unknown[]) => {
-      if (typeof sql === 'string' && sql.includes('s.id = $1'))
-        return params?.[0] === 2 ? rows(sessionRow({ id: 2, title: null, summary: null })) : rows()
+      if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID))
+        return (params?.[0] as number[]).includes(2) ? rows(sessionRow({ id: 2, title: null, summary: null })) : rows()
       return rows()
     })
     mockChromaSessionsOnly()
@@ -719,6 +859,13 @@ describe('when the query vector cannot be had', () => {
     expect(embed).toHaveBeenCalledTimes(1)
   })
 
+  it('times each arm that ran, and leaves an arm that did not run null', async () => {
+    const hybrid = await searchWithDiagnostics({ query: 'build', mode: 'hybrid' })
+    expect(hybrid.armMs).toEqual({ semanticMs: expect.any(Number), fullTextMs: expect.any(Number) })
+    const text = await searchWithDiagnostics({ query: 'build', mode: 'text' })
+    expect(text.armMs).toEqual({ semanticMs: null, fullTextMs: expect.any(Number) })
+  })
+
   it('reports nothing degraded when the vector arrives', async () => {
     embed.mockResolvedValue({ embeddings: [new Array(1024).fill(0.1)] })
     mockDbForSemantic()
@@ -791,7 +938,7 @@ describe('recency is last activity, not first message', () => {
 
   const onlySession = (row: Row) =>
     query.mockImplementation(async (sql: string) =>
-      typeof sql === 'string' && sql.includes('s.id = $1') ? rows(row) : rows()
+      typeof sql === 'string' && sql.includes(SESSIONS_BY_ID) ? rows(row) : rows()
     )
 
   const ftsRow = (over: Row): Row => ({

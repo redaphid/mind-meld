@@ -65,13 +65,11 @@ export const toSearchResponse = ({
   query,
   list,
   mode,
-  projectIds,
   outcome,
 }: {
   query: string
   list: string
   mode: string
-  projectIds: number[]
   outcome: SearchOutcome
 }) => ({
   status: 'ok' as const,
@@ -79,7 +77,7 @@ export const toSearchResponse = ({
   list,
   mode,
   count: outcome.results.length,
-  projectIds,
+  projectIds: outcome.projectIds,
   // Additive and null on a healthy search, so nothing that ignores it breaks.
   // Non-null means the vector arms were skipped and these results came from
   // full text alone — the difference between "no such conversation" and "the

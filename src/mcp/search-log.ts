@@ -9,7 +9,7 @@
 import { createHash, randomInt } from 'node:crypto'
 import { query } from '../db/postgres.js'
 import { config } from '../config.js'
-import type { SearchDegradation, SearchResult } from './search.js'
+import type { ArmMs, SearchDegradation, SearchResult } from './search.js'
 
 export type Transport = 'mcp-http' | 'mcp-stdio' | 'rest'
 export type Caller = { key: string; transport: Transport; client: string }
@@ -58,7 +58,7 @@ export type SearchEvent = {
   request: Record<string, unknown>
   mode: string
   totalMs: number
-} & ({ results: SearchResult[]; degraded: SearchDegradation | null } | { error: string })
+} & ({ results: SearchResult[]; degraded: SearchDegradation | null; armMs: ArmMs } | { error: string })
 
 export type FollowUpEvent = {
   kind: 'follow-up'
@@ -144,7 +144,7 @@ const insertEvent = async (event: LogEvent): Promise<void> => {
       ok ? event.results.length : null,
       ok ? (event.degraded?.cause ?? null) : null,
       ok ? null : event.error,
-      { totalMs: event.totalMs },
+      { totalMs: event.totalMs, ...(ok ? event.armMs : {}) },
     ])
     return
   }

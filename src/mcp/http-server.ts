@@ -11,7 +11,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
-import { searchWithDiagnostics, findProjectsByPath, UnknownDataClassError, DEFAULT_SEARCH_MODE } from './search.js'
+import { searchWithDiagnostics, UnknownDataClassError, DEFAULT_SEARCH_MODE } from './search.js'
 import {
   searchLog,
   restCaller,
@@ -588,10 +588,9 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
     throw error
   }
 
-  const projectIds = cwd ? (await findProjectsByPath(cwd)).map(p => p.id) : []
-  searchLog.record({ ...logged, totalMs: performance.now() - started, results: outcome.results, degraded: outcome.degraded })
+  searchLog.record({ ...logged, totalMs: performance.now() - started, results: outcome.results, degraded: outcome.degraded, armMs: outcome.armMs })
 
-  res.json(toSearchResponse({ query: q, list, mode: resolvedMode, projectIds, outcome }))
+  res.json(toSearchResponse({ query: q, list, mode: resolvedMode, outcome }))
 }))
 
 app.get('/api/projects', apiRoute('Projects', async (_req, res) => {

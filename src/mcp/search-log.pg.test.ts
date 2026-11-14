@@ -10,6 +10,7 @@ import pg from 'pg'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { runMigrations } from '../db/migrations.js'
+import { withMigrationLock } from '../__tests__/pg-migration-lock.js'
 
 const PG = {
   host: process.env.POSTGRES_HOST ?? '127.0.0.1',
@@ -57,7 +58,7 @@ describe.skipIf(!dbAvailable)('search log against Postgres', () => {
   beforeAll(async () => {
     await admin.connect()
     await admin.query(`CREATE DATABASE ${database}`)
-    await runMigrations({ ...PG, database })
+    await withMigrationLock(PG, () => runMigrations({ ...PG, database }))
     db = new pg.Client({ ...PG, database })
     await db.connect()
     // Full text only: no Chroma or Ollama in a test database.
@@ -108,6 +109,7 @@ describe.skipIf(!dbAvailable)('search log against Postgres', () => {
     expect(search.request).toEqual({ query: 'zebra crossing', mode: 'text' })
     expect(search.results).toEqual([expect.objectContaining({ s: sessionId, rank: 1, tier: 'message' })])
     expect(search.timings.totalMs).toBeGreaterThan(0)
+    expect(search.timings).toEqual({ totalMs: expect.any(Number), semanticMs: null, fullTextMs: expect.any(Number) })
     expect(open).toMatchObject({ kind: 'open', tool: 'getSession', signal: 'open', session_id: sessionId, rank: 1, list: search.list })
     expect(open.caller).toBe(search.caller)
     expect(open.client).toBe('pg-test/1')

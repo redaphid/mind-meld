@@ -83,12 +83,12 @@ export async function querySimilar(
   whereFilter?: Record<string, unknown>
 ): Promise<{
   ids: string[][];
-  documents: (string | null)[][];
-  metadatas: (Record<string, unknown> | null)[][];
   distances: (number | null)[][] | null;
 }> {
   const collection = await getCollection(collectionName);
-  const include = ['documents', 'metadatas', 'distances'];
+  // Search ranks by distance and hydrates from Postgres; documents and
+  // metadatas would only cross the wire to be dropped.
+  const include = ['distances'];
   const results = await collection.query({
     queryEmbeddings: [queryEmbedding],
     nResults,
