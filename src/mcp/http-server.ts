@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import express from 'express'
 import { listProjects, listSessions, getActivity } from './browse.js'
 import { toSearchResponse, toDigest, toMessages, toMessage } from './rest.js'
+import { STATS_WINDOWS, usageStats } from './usage-stats.js'
 import { listQuarantine, replayQuarantine, countPending } from '../sync/quarantine.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { hostHeaderValidation } from '@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js'
@@ -768,6 +769,11 @@ app.post('/api/stand-down', apiRoute('Stand down', async (req, res) => {
 // back to work" should not cost the rest of the window.
 app.post('/api/stand-down/resume', apiRoute('Resume sync', async (_req, res) => {
   res.json({ status: 'ok', ...(await resumeSync()) })
+}))
+
+// Search usage over the last 7 and 30 days, aggregates only (src/mcp/usage-stats.ts).
+app.get('/api/stats', apiRoute('Search usage', async (_req, res) => {
+  res.json({ status: 'ok', windows: await Promise.all(STATS_WINDOWS.map(usageStats)) })
 }))
 
 // The semantic switch: run without the AI pipeline until someone turns it

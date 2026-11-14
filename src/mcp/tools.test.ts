@@ -268,12 +268,25 @@ describe('every advertised tool executes', () => {
         rows: [{ name: 'mind-meld', session_count: 7, message_count: 500 }],
         rowCount: 1,
       } as never)
+    const usage = (searches: number) => ({
+      rows: [{
+        searches, ok: searches, opened: 1, ranked: 1, median_rank: 2, mrr: 0.5, no_result: 0, degraded: 0,
+        p50: 12, p90: 40, feedback: 1, per_day: [{ day: '2026-11-12', client: 'claude-code', mode: 'hybrid', searches }],
+        vector_params: { negativeQuery: 1, likeSession: 0, unlikeSession: 0, likeProject: 0, unlikeProject: 0 },
+      }],
+      rowCount: 1,
+    })
+    query.mockResolvedValueOnce(usage(4) as never).mockResolvedValueOnce(usage(10) as never)
 
     const client = await connect()
     const out = text(await client.callTool({ name: 'stats', arguments: {} }))
     expect(out).toContain('**claude_code** (coding): 4 projects, 10 sessions, 900 messages')
     expect(out).toContain('**coding:** 15 sessions')
     expect(out).toContain('- **mind-meld:** 7 sessions, 500 messages')
+    expect(out).toContain('| | 7d | 30d |')
+    expect(out).toContain('| Searches | 4 | 10 |')
+    expect(out).toContain('| Opened within 10 min | 25.0% | 10.0% |')
+    expect(out).toContain('- 2026-11-12 claude-code hybrid: 4')
     await client.close()
   })
 
