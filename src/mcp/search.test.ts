@@ -631,6 +631,13 @@ describe('formatSearchResults', () => {
     expect(formatSearchResults([])).toBe('No matching conversations found.')
   })
 
+  it('names the list handle on the first line, and only when there are results', () => {
+    expect(formatSearchResults([result()], [], null, 'Lk3x9qa').split('\n')[0]).toBe(
+      'Found 1 relevant conversations (list Lk3x9qa):'
+    )
+    expect(formatSearchResults([], [], null, 'Lk3x9qa')).not.toContain('Lk3x9qa')
+  })
+
   it('renders source and data class together', () => {
     const text = formatSearchResults([result()])
     expect(text).toContain('(claude_code, coding)')
@@ -850,6 +857,17 @@ describe('when the query vector cannot be had', () => {
   it('does not retry the embedding', async () => {
     await searchWithDiagnostics({ query: 'build', mode: 'hybrid' })
     expect(embed).toHaveBeenCalledTimes(1)
+  })
+
+  it('times each stage that ran, and leaves a stage that did not run null', async () => {
+    const ran = expect.any(Number)
+    const shut = await searchWithDiagnostics({ query: 'build', mode: 'hybrid' })
+    expect(shut.armMs).toEqual({ semanticMs: ran, embedMs: ran, sessionMs: null, chunkMs: null, messageMs: null, fullTextMs: ran })
+    embed.mockResolvedValue({ embeddings: [new Array(1024).fill(0.1)] })
+    const open = await searchWithDiagnostics({ query: 'build', mode: 'hybrid' })
+    expect(open.armMs).toEqual({ semanticMs: ran, embedMs: ran, sessionMs: ran, chunkMs: ran, messageMs: ran, fullTextMs: ran })
+    const text = await searchWithDiagnostics({ query: 'build', mode: 'text' })
+    expect(text.armMs).toEqual({ semanticMs: null, embedMs: null, sessionMs: null, chunkMs: null, messageMs: null, fullTextMs: ran })
   })
 
   it('reports nothing degraded when the vector arrives', async () => {
