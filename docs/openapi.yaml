@@ -1701,7 +1701,7 @@ components:
     Status:
       type: object
       required:
-        [status, version, sync, totals, pendingEmbeddings, vectorisedMessages, quarantined, chroma, latestSession]
+        [status, version, sync, totals, pendingEmbeddings, transports, vectorisedMessages, quarantined, chroma, latestSession]
       properties:
         status:
           type: string
@@ -1750,6 +1750,15 @@ components:
                 automated sessions, and any session that ended within the last 30
                 minutes — the embedder defers those rather than re-summarizing a
                 live conversation as it grows, so they are not queued work yet.
+        transports:
+          type: object
+          description: MCP Streamable HTTP sessions currently retained by the process.
+          required: [open]
+          properties:
+            open:
+              type: integer
+              minimum: 0
+              description: Open MCP HTTP sessions, including sessions waiting to be expired or closed.
         vectorisedMessages:
           type: integer
           description: |

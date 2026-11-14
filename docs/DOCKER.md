@@ -110,6 +110,7 @@ Most macOS users need no `.env`. Copy `.env.example` and uncomment what you need
 POSTGRES_PORT=5433
 CHROMA_PORT=8001
 MCP_HTTP_PORT=3847
+MCP_TRANSPORT_IDLE_MINUTES=30  # close inactive MCP HTTP sessions after 30 minutes
 
 # Database — must match on every machine feeding one shared index
 POSTGRES_PASSWORD=mindmeld
