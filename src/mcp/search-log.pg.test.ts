@@ -127,6 +127,22 @@ describe.skipIf(!dbAvailable)('search log against Postgres', () => {
     expect(named).toMatchObject({ list: search.list, rank: 1 })
   })
 
+  it('links an anonymous REST open only when it names the list', async () => {
+    const anon = { key: mod.log.ANON_REST_CALLER, transport: 'rest' as const, client: 'rest' }
+    await db.query(
+      `INSERT INTO search_log (caller, transport, client, kind, tool, list, results)
+       VALUES ($1, 'rest', 'rest', 'search', 'rest:search', 'Lan2an2', $2)`,
+      [anon.key, JSON.stringify([{ s: sessionId, rank: 1 }])]
+    )
+    const base = { kind: 'follow-up' as const, at: new Date(), caller: anon, tool: 'rest:session' as const, request: {} }
+    mod.log.searchLog.record({ ...base, target: { sessionId }, list: null })
+    mod.log.searchLog.record({ ...base, target: { sessionId }, list: 'Lan2an2' as never })
+    await mod.log.searchLog.flushed()
+    const [stranger, named] = (await rows()).slice(-2)
+    expect(stranger).toMatchObject({ caller: 'rest:anon', list: null, rank: null, session_id: sessionId })
+    expect(named).toMatchObject({ list: 'Lan2an2', rank: 1 })
+  })
+
   it('resolves the session of a message-level follow-up', async () => {
     const message = await db.query(`SELECT id FROM messages WHERE session_id = $1`, [sessionId])
     const client = await mcpClient()

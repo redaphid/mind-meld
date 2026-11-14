@@ -504,7 +504,8 @@ and as `list` in REST JSON.
   fills `rank`. The caller is the MCP transport session id over HTTP (exact,
   one per connected client), the process over stdio (one client per process,
   but interleaved work in it is indistinguishable), and the `X-Mindmeld-Caller`
-  header over REST (`rest:anon` without one).
+  header over REST. Without that header a REST client is `rest:anon`, which is
+  many unrelated clients, so its follow-ups link only by the list they pass.
 - **Never on the response path.** `record` only enqueues; one loop writes rows
   in order. A full queue (`MINDMELD_SEARCH_LOG_QUEUE`, 1000) drops and counts;
   a failed insert counts and logs its SQLSTATE only. Both counts are in

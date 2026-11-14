@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS search_log (
     result_count INTEGER,
     degraded     TEXT,            -- SearchDegradation.cause, null when healthy
     error        TEXT,            -- error class name when the search threw
-    timings      JSONB,           -- { totalMs }
+    timings      JSONB,           -- { totalMs, semanticMs, embedMs, sessionMs, chunkMs, messageMs, fullTextMs }
     -- Follow-up rows.
     session_id   INTEGER,
     target       JSONB,           -- { sessionId?, messageId?, chunkIndex? } as asked
