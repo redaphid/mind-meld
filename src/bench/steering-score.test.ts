@@ -34,10 +34,15 @@ describe('scoreSteering', () => {
     expect(score.offTargetRemoved).toBe(0.5)
   })
 
-  // On-target 10 and 30 sit in the base list; the away list loses 30.
-  it('measures collateral: on-target results the away examples lose', () => {
-    const score = scoreSteering(item, { base: [10, 20, 30], toward: [], away: [10] }, grades)
+  // Relevant 10 and 11 sit in the base list beside marginal 30; the away list keeps only 10.
+  it('measures collateral: relevant results the away examples lose', () => {
+    const score = scoreSteering(item, { base: [10, 11, 20, 30], toward: [], away: [10] }, grades)
     expect(score.collateral).toBe(0.5)
+  })
+
+  it('does not count a lost irrelevant bystander as collateral', () => {
+    const score = scoreSteering(item, { base: [10, 30], toward: [], away: [10] }, grades)
+    expect(score.collateral).toBe(0)
   })
 
   it('does not count an away example leaving the list as off-target removal', () => {

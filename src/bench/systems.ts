@@ -89,7 +89,28 @@ export const searcherFor = async (spec: SystemSpec, configDir: string): Promise<
   }
 }
 
-export const deriveRun = (base: Run, system: string, transform: 'reverse' | 'shuffle'): Run => {
+const DEGRADED_WAIT_MS = 20_000
+
+// A degraded search measures the embedding queue, not ranking, so it is
+// retried after a pause; one still degraded after that is kept and counted.
+export const searchUndegraded = async (
+  search: Searcher,
+  query: BenchQuery,
+  retries: number,
+  log: (line: string) => void,
+  waitMs = DEGRADED_WAIT_MS
+) => {
+  let run = await search(query)
+  let attempts = 0
+  for (; run.degraded && attempts < retries; attempts++) {
+    log(`degraded (${run.degraded}); waiting before retry ${attempts + 1}`)
+    await new Promise((r) => setTimeout(r, waitMs))
+    run = await search(query)
+  }
+  return { run, retries: attempts }
+}
+
+export const deriveRun =(base: Run, system: string, transform: 'reverse' | 'shuffle'): Run => {
   const ordered =
     transform === 'reverse' ? [...base.results].reverse() : shuffled(base.results, `${system}:${base.queryId}`)
   return { ...base, system, results: ordered.map((r, i) => ({ ...r, rank: i + 1 })) }

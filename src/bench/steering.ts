@@ -8,10 +8,12 @@ import { shuffled } from './metrics.js'
 import { indexJudgments } from './score.js'
 import { reportSteering, scoreSteering, STEER_DEPTH, type SteeringItem } from './steering-score.js'
 import { appendJsonl, benchFiles, loadBench, readJsonl, sha256Of, writeJson } from './store.js'
-import type { Searcher } from './systems.js'
+import { searchUndegraded, type Searcher } from './systems.js'
 import type { BenchQuery, Judgment, Run } from './types.js'
 
 export const steeringFile = (dir: string) => path.join(dir, 'steering.jsonl')
+
+const DEGRADED_RETRIES = 2
 
 export const asQuery = (item: SteeringItem): BenchQuery => ({
   id: item.id,
@@ -85,8 +87,11 @@ export const buildSteering = async ({ dir, seed, base, target, log }: SteeringBu
       )
     )
     const draft: BenchQuery = asQuery({ id, text, dataClass: ['*'], toward: [], away: [], gold: [], offTarget: [], sourceNote: '' })
-    const baseRun = await base(draft)
-    if (baseRun.degraded) throw new Error(`base search degraded while building steering items: ${baseRun.degraded}`)
+    const { run: baseRun } = await searchUndegraded(base, draft, DEGRADED_RETRIES, log)
+    if (baseRun.degraded) {
+      log(`${id}: base search stayed degraded (${baseRun.degraded}); skipped`)
+      continue
+    }
     const listed = baseRun.results.map((r) => r.sessionId)
     const inTopic = new Set(group.sessions)
     // Toward: up to two on-topic sessions the base search already shows,
@@ -142,15 +147,17 @@ export const runSteering = async (dir: string, name: string, systems: SteeringRu
   const items = readJsonl<SteeringItem>(steeringFile(dir))
   const runFile = (kind: keyof SteeringRun['names']) => files.run(`${name}-steer-${kind}-${systems.names[kind]}`)
   const lists: Record<string, Map<string, number[]>> = {}
+  let degraded = 0
   for (const kind of ['base', 'toward', 'away'] as const) {
     const done = new Map(readJsonl<Run>(runFile(kind)).map((r) => [r.queryId, r]))
     for (const item of items) {
       if (done.has(item.id)) continue
-      const run = await systems[kind](asQuery(item))
+      const { run } = await searchUndegraded(systems[kind], asQuery(item), DEGRADED_RETRIES, log)
       const full: Run = { system: systems.names[kind], ...run }
       appendJsonl(runFile(kind), [full])
       done.set(item.id, full)
     }
+    degraded += [...done.values()].filter((r) => r.degraded).length
     // The same snapshot cut core scoring applies: later ingestion must not move it.
     lists[kind] = new Map(
       [...done].map(([id, r]) => [
@@ -162,7 +169,8 @@ export const runSteering = async (dir: string, name: string, systems: SteeringRu
   const judgments = readJsonl<Judgment>(files.judgments)
   const seen = new Set(judgments.filter((j) => j.repeat === 0 && j.promptVersion === manifest.promptVersion).map((j) => `${j.queryId}:${j.sessionId}`))
   const pairs = items.flatMap((item) =>
-    [...new Set([...lists.base.get(item.id)!.slice(0, 10), ...lists.toward.get(item.id)!.slice(0, 10)])]
+    // Base 20 deep, because collateral counts relevant base results the away search loses.
+    [...new Set([...lists.base.get(item.id)!, ...lists.toward.get(item.id)!.slice(0, 10)])]
       .filter((s) => !seen.has(`${item.id}:${s}`))
       .map((sessionId) => ({ query: asQuery(item), sessionId, snippets: [] }))
   )
@@ -178,7 +186,7 @@ export const runSteering = async (dir: string, name: string, systems: SteeringRu
       grades.get(item.id) ?? new Map()
     )
   )
-  const report = { ...reportSteering(systems.names, scores), steeringSha256: existsSync(steeringFile(dir)) ? sha256Of(steeringFile(dir)) : null }
+  const report = { ...reportSteering(systems.names, scores), degraded, steeringSha256: existsSync(steeringFile(dir)) ? sha256Of(steeringFile(dir)) : null }
   writeJson(path.join(dir, 'reports', `${name}-steering.json`), { report, scores })
   return report
 }

@@ -44,13 +44,15 @@ export const scoreSteering = (
   const baseNdcg = ndcgAt(gradesOf(base), judged, 10)
   const towardNdcg = ndcgAt(gradesOf(toward), judged, 10)
   const offInBase = base.filter((id) => item.offTarget.includes(id))
-  const onInBase = base.filter((id) => !item.offTarget.includes(id))
+  // Collateral is what a person would miss: relevant results the away search
+  // drops. Losing an irrelevant bystander costs nothing.
+  const relevantInBase = base.filter((id) => !item.offTarget.includes(id) && (grades.get(id) ?? 0) >= 2)
   return {
     itemId: item.id,
     recallGain20: recallAt(toward, item.gold, STEER_DEPTH)! - recallAt(base, item.gold, STEER_DEPTH)!,
     ndcgGain10: baseNdcg === null || towardNdcg === null ? null : towardNdcg - baseNdcg,
     offTargetRemoved: offInBase.length === 0 ? null : offInBase.filter((id) => !away.includes(id)).length / offInBase.length,
-    collateral: onInBase.length === 0 ? null : onInBase.filter((id) => !away.includes(id)).length / onInBase.length,
+    collateral: relevantInBase.length === 0 ? null : relevantInBase.filter((id) => !away.includes(id)).length / relevantInBase.length,
   }
 }
 
