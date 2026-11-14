@@ -859,11 +859,15 @@ describe('when the query vector cannot be had', () => {
     expect(embed).toHaveBeenCalledTimes(1)
   })
 
-  it('times each arm that ran, and leaves an arm that did not run null', async () => {
-    const hybrid = await searchWithDiagnostics({ query: 'build', mode: 'hybrid' })
-    expect(hybrid.armMs).toEqual({ semanticMs: expect.any(Number), fullTextMs: expect.any(Number) })
+  it('times each stage that ran, and leaves a stage that did not run null', async () => {
+    const ran = expect.any(Number)
+    const shut = await searchWithDiagnostics({ query: 'build', mode: 'hybrid' })
+    expect(shut.armMs).toEqual({ semanticMs: ran, embedMs: ran, sessionMs: null, chunkMs: null, messageMs: null, fullTextMs: ran })
+    embed.mockResolvedValue({ embeddings: [new Array(1024).fill(0.1)] })
+    const open = await searchWithDiagnostics({ query: 'build', mode: 'hybrid' })
+    expect(open.armMs).toEqual({ semanticMs: ran, embedMs: ran, sessionMs: ran, chunkMs: ran, messageMs: ran, fullTextMs: ran })
     const text = await searchWithDiagnostics({ query: 'build', mode: 'text' })
-    expect(text.armMs).toEqual({ semanticMs: null, fullTextMs: expect.any(Number) })
+    expect(text.armMs).toEqual({ semanticMs: null, embedMs: null, sessionMs: null, chunkMs: null, messageMs: null, fullTextMs: ran })
   })
 
   it('reports nothing degraded when the vector arrives', async () => {

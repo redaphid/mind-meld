@@ -109,7 +109,7 @@ describe.skipIf(!dbAvailable)('search log against Postgres', () => {
     expect(search.request).toEqual({ query: 'zebra crossing', mode: 'text' })
     expect(search.results).toEqual([expect.objectContaining({ s: sessionId, rank: 1, tier: 'message' })])
     expect(search.timings.totalMs).toBeGreaterThan(0)
-    expect(search.timings).toEqual({ totalMs: expect.any(Number), semanticMs: null, fullTextMs: expect.any(Number) })
+    expect(search.timings).toEqual({ totalMs: expect.any(Number), semanticMs: null, embedMs: null, sessionMs: null, chunkMs: null, messageMs: null, fullTextMs: expect.any(Number) })
     expect(open).toMatchObject({ kind: 'open', tool: 'getSession', signal: 'open', session_id: sessionId, rank: 1, list: search.list })
     expect(open.caller).toBe(search.caller)
     expect(open.client).toBe('pg-test/1')
