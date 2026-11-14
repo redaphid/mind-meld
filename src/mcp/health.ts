@@ -1,6 +1,7 @@
 import assert from 'node:assert'
 import { config } from '../config.js'
 import { query } from '../db/postgres.js'
+import { findAutomatedDrift } from '../embeddings/automated-flags.js'
 import { notWarmup } from './title.js'
 import { isRepetitionLoop, LOOP_MIN_CHARS } from '../embeddings/repetition-loop.js'
 import { VERBATIM_TRANSCRIPT_PATTERN } from '../embeddings/verbatim.js'
@@ -65,6 +66,11 @@ export type HealthMetrics = {
   sessionEmbeddingAgeSeconds: number | null
   messageEmbeddingAgeSeconds: number | null
   pendingMessageEmbeddings: number
+  // Live sessions whose stored automated flag disagrees with this process's
+  // classifier (findAutomatedDrift). `unflagged` should be flagged and is not;
+  // sync sets those. `unexplained` is flagged by a rule this process does not
+  // hold; only scripts/backfill-automated.ts clears those, on purpose.
+  automatedFlagDrift: { unflagged: number; unexplained: number }
 }
 
 const gatherCoverage = async () => {
@@ -176,6 +182,7 @@ export const getHealth = async (): Promise<HealthMetrics> => {
   const coverage = await gatherCoverage()
   const bad = await gatherBadSummaries()
   const embeddings = await gatherEmbeddingHealth()
+  const drift = await findAutomatedDrift()
 
   const denominator = coverage.summarized + coverage.nullBacklog
   const coveragePct = denominator === 0 ? 100 : (coverage.summarized / denominator) * 100
@@ -188,6 +195,10 @@ export const getHealth = async (): Promise<HealthMetrics> => {
     badSummaryTotal: bad.total,
     badSummaryByCategory: bad.byCategory,
     ...embeddings,
+    automatedFlagDrift: {
+      unflagged: drift.filter((d) => !d.stored).length,
+      unexplained: drift.filter((d) => d.stored).length,
+    },
   }
 }
 
@@ -222,10 +233,18 @@ ${badBreakdown || '  - (none)'}
 - Last message embedding: ${formatAge(h.messageEmbeddingAgeSeconds)}
 - Pending message embeddings: ${h.pendingMessageEmbeddings}
 
+## Automated Flags: ${h.automatedFlagDrift.unflagged + h.automatedFlagDrift.unexplained === 0 ? 'HEALTHY' : 'UNHEALTHY'} (both should be 0)
+- Should be flagged and is not: ${h.automatedFlagDrift.unflagged}
+- Flagged, and this process's rule does not explain it: ${h.automatedFlagDrift.unexplained}
+
 ---
 
 UNHEALTHY when: coverage drops well below ~95% (summarizer arm degraded);
 NULL backlog grows over time instead of draining; bad-summary total climbs
 (re-summarization regressed); embedding ages exceed the sync interval (sync or
-Ollama stalled); or pending embeddings keep rising (backfill not keeping up.`
+Ollama stalled); or pending embeddings keep rising (backfill not keeping up); or either automated-flag
+count is non-zero: "should be flagged" after a sync run means sync is not
+running or cannot write, and "does not explain" means a flag was set under a
+prefix list this process lacks (check MINDMELD_AUTOMATED_PREFIXES here) or by a
+retired rule (review with scripts/backfill-automated.ts).`
 }

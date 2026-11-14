@@ -1302,6 +1302,33 @@ paths:
                   run:
                     $ref: '#/components/schemas/SyncRun'
 
+  /api/stats:
+    get:
+      tags: [Monitoring]
+      operationId: getUsageStats
+      summary: Search usage over the last 7 and 30 days
+      description: |
+        Aggregates from the search log, the same numbers the `stats` MCP tool
+        prints. No query text, caller or session id. Clients `bench` and
+        `eval` are left out. Rates are over searches that did not throw, and
+        are null when there were none.
+      responses:
+        '200':
+          description: One entry per window, 7 days first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, windows]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  windows:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UsageStats'
+
   /api/semantic:
     get:
       tags: [Monitoring]
@@ -1559,6 +1586,96 @@ components:
         format: uuid
 
   schemas:
+    UsageStats:
+      type: object
+      required: [days, searches, perDay, openedShare, openedRank, noResultRate, degradedRate, latencyMs, stageMs, feedbackPerSearch, vectorParams]
+      properties:
+        days:
+          type: integer
+          example: 7
+        searches:
+          type: integer
+          description: Every search in the window, including ones that threw.
+        perDay:
+          type: array
+          description: Searches per UTC day, by client name (without its version) and mode.
+          items:
+            type: object
+            required: [day, client, mode, searches]
+            properties:
+              day:
+                type: string
+                format: date
+              client:
+                type: string
+              mode:
+                type: string
+                nullable: true
+              searches:
+                type: integer
+        openedShare:
+          type: number
+          nullable: true
+          description: Share of searches with an open of one of their results within 10 minutes.
+        openedRank:
+          type: object
+          description: Rank of the first result opened within 10 minutes of each search, when it was in that search's list.
+          required: [opens, median, mrr]
+          properties:
+            opens:
+              type: integer
+            median:
+              type: number
+              nullable: true
+            mrr:
+              type: number
+              nullable: true
+              description: Mean of 1 / rank.
+        noResultRate:
+          type: number
+          nullable: true
+        degradedRate:
+          type: number
+          nullable: true
+        latencyMs:
+          type: object
+          required: [p50, p90]
+          properties:
+            p50:
+              type: number
+              nullable: true
+            p90:
+              type: number
+              nullable: true
+        stageMs:
+          type: object
+          description: >-
+            p50 and p90 of each search stage, over the searches it ran in. The
+            embed and the three semantic tiers run concurrently with full text,
+            so stages do not sum to latencyMs. semanticMs spans the embed and
+            the tiers.
+          required: [semanticMs, embedMs, sessionMs, chunkMs, messageMs, fullTextMs]
+          additionalProperties:
+            type: object
+            required: [p50, p90]
+            properties:
+              p50:
+                type: number
+                nullable: true
+              p90:
+                type: number
+                nullable: true
+        feedbackPerSearch:
+          type: number
+          nullable: true
+          description: Tag and report calls per search.
+        vectorParams:
+          type: object
+          description: Searches that set each vector-math parameter. REST `not` counts as `negativeQuery`.
+          required: [negativeQuery, likeSession, unlikeSession, likeProject, unlikeProject]
+          additionalProperties:
+            type: integer
+
     ListHandle:
       type: string
       pattern: '^L[2-9a-hjkmnp-z]{6}$'

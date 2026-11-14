@@ -413,6 +413,7 @@ describe('updateAggregateEmbeddings', () => {
         endMessageId: 1,
         summary,
         contentChars: 100,
+        verbatim: false,
       })
       vi.mocked(persistSessionChunks).mockResolvedValueOnce([
         chunk(0, 'Thunderwrench HVAC Co. replaced the blower'),
@@ -423,6 +424,30 @@ describe('updateAggregateEmbeddings', () => {
 
       expect(summarizeMock).not.toHaveBeenCalled()
       expect(storedSummaries()).toEqual(['both jobs, combined'])
+    })
+  })
+
+  describe('when a long session ends in a chunk kept verbatim', () => {
+    it('has the chunk summaries merged rather than joined, so no transcript lines become the session summary', async () => {
+      queued = [session(1)]
+      const chunk = (chunkIndex: number, summary: string, verbatim: boolean) => ({
+        id: chunkIndex,
+        chunkIndex,
+        startMessageId: 1,
+        endMessageId: 1,
+        summary,
+        contentChars: summary.length,
+        verbatim,
+      })
+      vi.mocked(persistSessionChunks).mockResolvedValueOnce([
+        chunk(0, 'Thunderwrench HVAC Co. replaced the blower', false),
+        chunk(1, '[USER]: thanks, that fixed it', true),
+      ])
+      vi.mocked(combineSummaries).mockResolvedValueOnce('both jobs, merged')
+      await updateAggregateEmbeddings(Infinity)
+
+      expect(vi.mocked(combineSummaries)).toHaveBeenCalledWith(expect.any(Array), { joinIfShort: false })
+      expect(storedSummaries()).toEqual(['both jobs, merged'])
     })
   })
 

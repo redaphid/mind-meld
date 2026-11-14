@@ -207,6 +207,25 @@ describe("summarizeConversation when the model echoes its input", () => {
   }, 20000);
 });
 
+describe("combineSummaries when an input is transcript kept verbatim", () => {
+  beforeEach(() => vi.stubGlobal("fetch", vi.fn()));
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("merges short inputs instead of joining them, so the transcript lines are rewritten", async () => {
+    const merged =
+      "The user diagnosed a failing furnace blower, replaced the motor and capacitor, and confirmed in the last exchange that the fix worked.";
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ response: merged, done: true, prompt_eval_count: 100 }),
+    } as unknown as Response);
+    const inputs = ["The blower was replaced. ".repeat(20), "[USER]: thanks, that fixed it"];
+
+    await expect(combineSummaries(inputs, { joinIfShort: false })).resolves.toBe(merged);
+    await expect(combineSummaries(inputs)).resolves.toContain("[USER]:");
+  });
+});
+
 // 117 of 136 looped session summaries on a live index came from the merge,
 // which stored whatever the model returned: 8,192 tokens of one clause.
 describe("repetition loops", () => {

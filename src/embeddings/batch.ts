@@ -565,7 +565,10 @@ export async function updateAggregateEmbeddings(deadline: number): Promise<{
       // build the session-level summary, avoiding a second qwen pass.
       const chunks = await persistSessionChunks(session.id, messages.rows);
       const textForEmbedding = chunks
-        ? await combineSummaries(chunks.map((c) => c.summary))
+        ? await combineSummaries(
+            chunks.map((c) => c.summary),
+            { joinIfShort: !chunks.some((c) => c.verbatim) },
+          )
         : await summarizeConversation(formattedMessages);
       const wasSummarized =
         textForEmbedding.length < formattedMessages.join("").length;
