@@ -1588,7 +1588,7 @@ components:
   schemas:
     UsageStats:
       type: object
-      required: [days, searches, perDay, openedShare, openedRank, noResultRate, degradedRate, latencyMs, feedbackPerSearch, vectorParams]
+      required: [days, searches, perDay, openedShare, openedRank, noResultRate, degradedRate, latencyMs, stageMs, feedbackPerSearch, vectorParams]
       properties:
         days:
           type: integer
@@ -1647,6 +1647,24 @@ components:
             p90:
               type: number
               nullable: true
+        stageMs:
+          type: object
+          description: >-
+            p50 and p90 of each search stage, over the searches it ran in. The
+            embed and the three semantic tiers run concurrently with full text,
+            so stages do not sum to latencyMs. semanticMs spans the embed and
+            the tiers.
+          required: [semanticMs, embedMs, sessionMs, chunkMs, messageMs, fullTextMs]
+          additionalProperties:
+            type: object
+            required: [p50, p90]
+            properties:
+              p50:
+                type: number
+                nullable: true
+              p90:
+                type: number
+                nullable: true
         feedbackPerSearch:
           type: number
           nullable: true

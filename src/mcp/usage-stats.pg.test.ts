@@ -46,6 +46,7 @@ type Seed = {
   error?: string
   degraded?: string
   ms?: number
+  stages?: Record<string, number>
   rank?: number | null
   signal?: string
 }
@@ -58,16 +59,16 @@ const open = (list: string, ago: string, rank: number | null, client?: string): 
 // Relative to now. "+2m" style offsets are written as the search's age minus
 // the gap, so an open lands that many minutes after its search.
 const SEED: Seed[] = [
-  S('L1', '1 day', { ms: 10 }),
+  S('L1', '1 day', { ms: 10, stages: { embedMs: 4, sessionMs: 3, fullTextMs: 2 } }),
   open('L1', '1 day -2 minutes', 2),
   open('L1', '1 day -3 minutes', 1),
   S('L2', '2 days', { mode: 'text', sessions: [], ms: 20 }),
-  S('L3', '3 days', { degraded: 'switched-off', ms: 30, request: { query: 'q', negativeQuery: 'x' } }),
+  S('L3', '3 days', { degraded: 'switched-off', ms: 30, stages: { embedMs: 8, fullTextMs: 6 }, request: { query: 'q', negativeQuery: 'x' } }),
   open('L3', '3 days -15 minutes', 1),
-  S('L4', '1 day', { mode: 'semantic', error: 'Error', ms: 5, request: { query: 'q', likeSession: ['7'] } }),
-  S('L8', '2 days', { sessions: [104], ms: 15 }),
+  S('L4', '1 day', { mode: 'semantic', error: 'Error', ms: 5, stages: { embedMs: 500 }, request: { query: 'q', likeSession: ['7'] } }),
+  S('L8', '2 days', { sessions: [104], ms: 15, stages: { embedMs: 6 } }),
   open('L8', '2 days -1 minute', null),
-  S('L5', '10 days', { client: 'web-ui', ms: 40, request: { q: 'q', not: 'y' } }),
+  S('L5', '10 days', { client: 'web-ui', ms: 40, stages: { embedMs: 20 }, request: { q: 'q', not: 'y' } }),
   open('L5', '10 days -1 minute', 3),
   S('L6', '1 day', { client: 'bench', ms: 900, request: { query: 'q', likeProject: ['1'] } }),
   open('L6', '1 day -1 minute', 1, 'bench'),
@@ -95,6 +96,9 @@ const HAND = {
   degradedRate: `SELECT avg((degraded IS NOT NULL)::int)::float8 AS v FROM search_log WHERE kind = 'search' AND error IS NULL AND ${BASE}`,
   latency: `
     SELECT percentile_cont(ARRAY[0.5, 0.9]) WITHIN GROUP (ORDER BY (timings->>'totalMs')::float8) AS v
+    FROM search_log WHERE kind = 'search' AND error IS NULL AND ${BASE}`,
+  stage: `
+    SELECT percentile_cont(ARRAY[0.5, 0.9]) WITHIN GROUP (ORDER BY (timings->>$2)::float8) AS v
     FROM search_log WHERE kind = 'search' AND error IS NULL AND ${BASE}`,
   feedbackPerSearch: `
     SELECT (SELECT count(*) FROM search_log WHERE kind = 'tag' AND ${BASE})::float8
@@ -138,7 +142,7 @@ describe.skipIf(!dbAvailable)('usage stats against Postgres', () => {
           r.ago, r.client ?? 'claude-code/1.0', r.kind, r.list ?? null, r.request ?? null,
           r.kind === 'search' ? r.mode : null, r.error ? null : results,
           r.kind === 'search' && !r.error ? r.sessions?.length : null,
-          r.degraded ?? null, r.error ?? null, r.ms === undefined ? null : { totalMs: r.ms },
+          r.degraded ?? null, r.error ?? null, r.ms === undefined ? null : { totalMs: r.ms, ...r.stages },
           r.rank ?? null, r.signal ?? null,
         ]
       )
@@ -160,9 +164,11 @@ describe.skipIf(!dbAvailable)('usage stats against Postgres', () => {
   // Worked out by hand from SEED. 7 days: L1 L2 L3 L4 L8 (L4 threw). 30 days adds L5.
   const EXPECTED = {
     7: { searches: 5, openedShare: 2 / 4, median: 2, mrr: 1 / 2, noResult: 1 / 4, degraded: 1 / 4,
-         p50: 17.5, p90: 27, feedback: 2 / 5, negativeQuery: 1, likeSession: 1 },
+         p50: 17.5, p90: 27, feedback: 2 / 5, negativeQuery: 1, likeSession: 1,
+         embed: [6, 7.6], session: [3, 3], fullText: [4, 5.6] },
     30: { searches: 6, openedShare: 3 / 5, median: 2.5, mrr: (1 / 2 + 1 / 3) / 2, noResult: 1 / 5, degraded: 1 / 5,
-          p50: 20, p90: 36, feedback: 2 / 6, negativeQuery: 2, likeSession: 1 },
+          p50: 20, p90: 36, feedback: 2 / 6, negativeQuery: 2, likeSession: 1,
+          embed: [7, 16.4], session: [3, 3], fullText: [4, 5.6] },
   } as const
 
   for (const days of [7, 30] as const) {
@@ -195,6 +201,16 @@ describe.skipIf(!dbAvailable)('usage stats against Postgres', () => {
       expect([s.latencyMs.p50, s.latencyMs.p90]).toEqual([p50, p90])
       expect(s.latencyMs.p50).toBeCloseTo(want.p50, 9)
       expect(s.latencyMs.p90).toBeCloseTo(want.p90, 9)
+
+      for (const stage of mod.stats.STAGES) {
+        const [h50, h90] = (await db.query(HAND.stage, [days, stage])).rows[0].v ?? [null, null]
+        expect([s.stageMs[stage].p50, s.stageMs[stage].p90]).toEqual([h50, h90])
+      }
+      for (const [stage, [p50, p90]] of [['embedMs', want.embed], ['sessionMs', want.session], ['fullTextMs', want.fullText]] as const) {
+        expect(s.stageMs[stage].p50).toBeCloseTo(p50, 9)
+        expect(s.stageMs[stage].p90).toBeCloseTo(p90, 9)
+      }
+      expect(s.stageMs.chunkMs).toEqual({ p50: null, p90: null })
 
       expect(s.feedbackPerSearch).toBeCloseTo(await v(HAND.feedbackPerSearch), 9)
       expect(s.feedbackPerSearch).toBeCloseTo(want.feedback, 9)

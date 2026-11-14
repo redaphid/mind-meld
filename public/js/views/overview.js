@@ -402,6 +402,9 @@ const UsageCard = () => {
     ${line('No results', w => rate(w.noResultRate))}
     ${line('Degraded', w => rate(w.degradedRate))}
     ${line('p90 ms', w => fixed(w.latencyMs.p90, 0))}
+    ${Object.keys(week.stageMs)
+      .filter(s => week.stageMs[s].p50 != null || month.stageMs[s].p50 != null)
+      .map(s => line(`${s.replace(/Ms$/, '')} p50/p90 ms`, w => `${fixed(w.stageMs[s].p50, 0)}/${fixed(w.stageMs[s].p90, 0)}`))}
     ${line('Feedback per search', w => fixed(w.feedbackPerSearch, 2))}
     ${Object.keys(week.vectorParams).map(p => line(p, w => fmtNum(w.vectorParams[p])))}
   <//>`

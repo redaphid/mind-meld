@@ -2,6 +2,7 @@
 // `stats` tool, GET /api/stats and the UI card, so the three cannot disagree.
 // Aggregates only: no query text, caller or session id leaves this module.
 import { query } from '../db/postgres.js'
+import type { ArmMs } from './search.js'
 
 export const STATS_WINDOWS = [7, 30] as const
 
@@ -24,6 +25,15 @@ export const VECTOR_PARAMS = {
 
 type VectorParam = keyof typeof VECTOR_PARAMS
 
+// Every stage search_log.timings carries besides totalMs. A Record rather than a
+// list so a stage added to ArmMs fails to compile until it is named here.
+const STAGE_KEYS = {
+  semanticMs: true, embedMs: true, sessionMs: true, chunkMs: true, messageMs: true, fullTextMs: true,
+} as const satisfies Record<keyof ArmMs, true>
+export const STAGES = Object.keys(STAGE_KEYS) as (keyof ArmMs)[]
+
+type Percentiles = { p50: number | null; p90: number | null }
+
 export type UsageStats = {
   days: number
   searches: number
@@ -35,7 +45,10 @@ export type UsageStats = {
   openedRank: { opens: number; median: number | null; mrr: number | null }
   noResultRate: number | null
   degradedRate: number | null
-  latencyMs: { p50: number | null; p90: number | null }
+  latencyMs: Percentiles
+  // Each stage over the searches it ran in. Stages overlap, so they do not sum
+  // to latencyMs.
+  stageMs: Record<keyof ArmMs, Percentiles>
   // Tag and report calls per search.
   feedbackPerSearch: number | null
   // Searches that set each parameter.
@@ -75,6 +88,10 @@ SELECT
        SELECT 1 FROM jsonb_array_elements_text(p.value) k
        WHERE COALESCE(s.request -> k, 'null'::jsonb) NOT IN ('null'::jsonb, '""'::jsonb, '[]'::jsonb, 'false'::jsonb))))
    FROM jsonb_each($4::jsonb) p) AS vector_params,
+  (SELECT jsonb_object_agg(k, jsonb_build_object(
+     'p50', (SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY (ok.timings->>k)::float8) FROM ok),
+     'p90', (SELECT percentile_cont(0.9) WITHIN GROUP (ORDER BY (ok.timings->>k)::float8) FROM ok)))
+   FROM unnest($5::text[]) k) AS stage_ms,
   (SELECT COALESCE(jsonb_agg(d ORDER BY d.day, d.client, d.mode), '[]'::jsonb) FROM (
      SELECT to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
             split_part(client, '/', 1) AS client, mode, count(*)::int AS searches
@@ -93,6 +110,7 @@ type UsageRow = {
   p90: number | null
   feedback: number
   vector_params: Record<VectorParam, number>
+  stage_ms: Record<keyof ArmMs, Percentiles>
   per_day: UsageStats['perDay']
 }
 
@@ -107,13 +125,14 @@ export const toUsageStats = (days: number, row: UsageRow): UsageStats => ({
   noResultRate: share(row.no_result, row.ok),
   degradedRate: share(row.degraded, row.ok),
   latencyMs: { p50: row.p50, p90: row.p90 },
+  stageMs: row.stage_ms,
   feedbackPerSearch: share(row.feedback, row.searches),
   vectorParams: row.vector_params,
 })
 
 export const usageStats = async (days: number): Promise<UsageStats> => {
   const { rows } = await query<UsageRow>(USAGE_SQL, [
-    days, EXCLUDED_CLIENTS, OPEN_WINDOW_MINUTES, JSON.stringify(VECTOR_PARAMS),
+    days, EXCLUDED_CLIENTS, OPEN_WINDOW_MINUTES, JSON.stringify(VECTOR_PARAMS), STAGES,
   ])
   return toUsageStats(days, rows[0])
 }
@@ -137,6 +156,8 @@ export const formatUsageStats = (windows: UsageStats[]): string => {
     line('Degraded', (w) => pct(w.degradedRate)),
     line('Latency p50 ms', (w) => num(w.latencyMs.p50, 0)),
     line('Latency p90 ms', (w) => num(w.latencyMs.p90, 0)),
+    ...STAGES.map((stage) =>
+      line(`${stage.replace(/Ms$/, '')} p50 / p90 ms`, (w) => `${num(w.stageMs[stage].p50, 0)} / ${num(w.stageMs[stage].p90, 0)}`)),
     line('Feedback per search', (w) => num(w.feedbackPerSearch, 2)),
     ...Object.keys(VECTOR_PARAMS).map((p) =>
       line(`Uses ${p}`, (w) => String(w.vectorParams[p as VectorParam]))),

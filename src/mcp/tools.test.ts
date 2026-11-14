@@ -274,6 +274,7 @@ describe('every advertised tool executes', () => {
         searches, ok: searches, opened: 1, ranked: 1, median_rank: 2, mrr: 0.5, no_result: 0, degraded: 0,
         p50: 12, p90: 40, feedback: 1, per_day: [{ day: '2026-11-12', client: 'claude-code', mode: 'hybrid', searches }],
         vector_params: { negativeQuery: 1, likeSession: 0, unlikeSession: 0, likeProject: 0, unlikeProject: 0 },
+        stage_ms: Object.fromEntries(['semanticMs', 'embedMs', 'sessionMs', 'chunkMs', 'messageMs', 'fullTextMs'].map((k) => [k, { p50: 1, p90: 2 }])),
       }],
       rowCount: 1,
     })
