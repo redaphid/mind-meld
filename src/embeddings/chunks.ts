@@ -24,6 +24,8 @@ export interface PersistedChunk {
   endMessageId: number;
   summary: string;
   contentChars: number;
+  // The chunk's own transcript text was kept instead of a model summary.
+  verbatim: boolean;
 }
 
 // Persist chunk-level summaries + embeddings for a session. Returns the
@@ -127,6 +129,7 @@ export const persistSessionChunks = async (
         endMessageId,
         summary,
         contentChars: chunkText.length,
+        verbatim: summary === chunkText,
       });
       continue;
     }
@@ -169,6 +172,7 @@ export const persistSessionChunks = async (
       endMessageId,
       summary,
       contentChars: chunkText.length,
+      verbatim: summary === chunkText,
     });
   }
 

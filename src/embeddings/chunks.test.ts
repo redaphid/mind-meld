@@ -54,6 +54,7 @@ describe("persistSessionChunks on a long session's small remainder", () => {
     expect(last.length).toBeLessThanOrEqual(CHUNK_VERBATIM_CHARS);
     expect(last).toContain("thanks, that fixed it");
     expect(last).not.toContain("refactored the embedding pipeline");
+    expect(summaries.slice(0, -1)).toEqual([PADDED.trim(), PADDED.trim()]);
     expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
   });
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   chunkMessagesWithIndices,
+  combineSummaries,
   summarizeChunk,
   summarizeConversation,
   TruncationError,
@@ -202,4 +203,22 @@ describe("summarizeConversation when the model echoes its input", () => {
     // The old code called Ollama unboundedly; bounded now that each level shrinks.
     expect(vi.mocked(fetch).mock.calls.length).toBeLessThan(60);
   }, 20000);
+});
+
+describe("combineSummaries when an input is transcript kept verbatim", () => {
+  beforeEach(() => vi.stubGlobal("fetch", vi.fn()));
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("merges short inputs instead of joining them, so the transcript lines are rewritten", async () => {
+    const merged = "The user replaced the blower and confirmed the fix worked in the last exchange.";
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ response: merged, done: true, prompt_eval_count: 100 }),
+    } as unknown as Response);
+    const inputs = ["The blower was replaced. ".repeat(20), "[USER]: thanks, that fixed it"];
+
+    await expect(combineSummaries(inputs, { joinIfShort: false })).resolves.toBe(merged);
+    await expect(combineSummaries(inputs)).resolves.toContain("[USER]:");
+  });
 });

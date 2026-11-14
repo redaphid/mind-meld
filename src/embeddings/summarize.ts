@@ -225,11 +225,18 @@ export async function summarizeSessionChunk(text: string): Promise<string> {
 }
 
 // Combine multiple summaries into one
-export async function combineSummaries(summaries: string[]): Promise<string> {
+// joinIfShort: false when any input is transcript kept verbatim (a small chunk,
+// see summarizeSessionChunk). Joined as-is, its [USER]:/[ASSISTANT]: lines
+// would become the session summary, which every bad-summary audit flags as
+// raw_message_leak or truncated, and a reset would only rebuild it the same.
+export async function combineSummaries(
+  summaries: string[],
+  { joinIfShort = true }: { joinIfShort?: boolean } = {},
+): Promise<string> {
   const combined = summaries.join("\n\n---\n\n");
 
   // If combined summaries are short enough, return as-is
-  if (combined.length <= MAX_CHARS_BEFORE_SUMMARIZE) {
+  if (joinIfShort && combined.length <= MAX_CHARS_BEFORE_SUMMARIZE) {
     console.log(
       `SUMMARY-OF-SUMMARIES (${summaries.length} chunk summaries joined as-is, ${combined.length} chars):\n${combined}`,
     );
