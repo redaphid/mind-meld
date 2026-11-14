@@ -17,10 +17,11 @@ vi.mock('../db/postgres.js', () => ({
 // in the text it hands back to an LLM.
 const doSearch = vi.fn(async () => ({ results: [], degraded: null, projectIds: [] as number[] }))
 const findProjectsByPath = vi.fn(async () => [{ id: 7, name: 'proj' }])
-const formatSearchResults = vi.fn((..._args: unknown[]) => 'SEARCH RESULTS')
+const formatSearchResults = vi.fn((_r: unknown, _p: unknown, _d: unknown, list?: string) => `SEARCH RESULTS${list ? ` ${list}` : ''}`)
 vi.mock('./search.js', () => ({
   searchWithDiagnostics: (...args: unknown[]) => doSearch(...(args as [])),
-  formatSearchResults: (...args: unknown[]) => formatSearchResults(...args),
+  formatSearchResults: (...args: Parameters<typeof formatSearchResults>) => formatSearchResults(...args),
+  DEFAULT_SEARCH_MODE: 'hybrid',
   findProjectsByPath: (...args: unknown[]) => findProjectsByPath(...(args as [])),
 }))
 
@@ -70,6 +71,14 @@ vi.mock('./notes.js', () => ({
   NOTE_TAG: 'note',
 }))
 
+// The log's writer is its own unit (search-log.test.ts); here we assert what
+// each tool hands it.
+const recorded: import('./search-log.js').LogEvent[] = []
+vi.mock('./search-log.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./search-log.js')>()),
+  searchLog: { record: (e: import('./search-log.js').LogEvent) => recorded.push(e) },
+}))
+
 const { createMcpServer } = await import('./tools.js')
 
 // Talk to the server exactly as a real client does, over an in-memory
@@ -77,7 +86,7 @@ const { createMcpServer } = await import('./tools.js')
 const connect = async () => {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   const client = new Client({ name: 'parity-test', version: '0.0.0' })
-  await Promise.all([createMcpServer().connect(serverTransport), client.connect(clientTransport)])
+  await Promise.all([createMcpServer('mcp-http').connect(serverTransport), client.connect(clientTransport)])
   return client
 }
 
@@ -94,6 +103,7 @@ const text = (result: unknown) =>
 // Call history only — the default implementations above must survive.
 beforeEach(() => {
   vi.clearAllMocks()
+  recorded.length = 0
 })
 
 const src = (file: string) =>
@@ -154,7 +164,7 @@ describe('every advertised tool executes', () => {
       name: 'search',
       arguments: { query: 'anything', includeAutomated: true },
     })
-    expect(text(result)).toBe('SEARCH RESULTS')
+    expect(text(result)).toMatch(/^SEARCH RESULTS L/)
     expect(doSearch).toHaveBeenCalledWith(expect.objectContaining({ includeAutomated: true }))
     await client.close()
   })
@@ -186,6 +196,48 @@ describe('every advertised tool executes', () => {
     expect(result.isError).toBe(true)
     expect(text(result)).toContain('No session found matching: nope')
     await client.close()
+  })
+
+  it('logs a search and the open that follows it under one caller, with the handle shown', async () => {
+    const client = await connect()
+    const out = text(await client.callTool({ name: 'search', arguments: { query: 'q', mode: 'text' } }))
+    await client.callTool({ name: 'getSession', arguments: { sessionId: 3 } })
+    await client.callTool({ name: 'getSession', arguments: { sessionId: 4, list: 'Lk3x9qa' } })
+    await client.close()
+
+    const [search, open, named] = recorded
+    expect(search).toMatchObject({ kind: 'search', tool: 'search', mode: 'text', request: { query: 'q', mode: 'text' }, results: [] })
+    if (search.kind !== 'search') throw new Error('first row is the search')
+    expect(out).toBe(`SEARCH RESULTS ${search.list}`)
+    expect(open).toMatchObject({ kind: 'follow-up', tool: 'getSession', target: { sessionId: 3 }, list: null })
+    expect(open.caller.key).toBe(search.caller.key)
+    expect(open.caller.client).toBe('parity-test/0.0.0')
+    expect(named).toMatchObject({ list: 'Lk3x9qa', target: { sessionId: 4 } })
+  })
+
+  it('logs a search that throws, and still reports the error to the caller', async () => {
+    doSearch.mockRejectedValueOnce(new TypeError('boom'))
+    const client = await connect()
+    const result = await client.callTool({ name: 'search', arguments: { query: 'q' } })
+    await client.close()
+    expect((result as { isError?: boolean }).isError).toBe(true)
+    expect(recorded[0]).toMatchObject({ kind: 'search', error: 'TypeError', mode: 'hybrid' })
+  })
+
+  it('logs every follow-up tool with its target and signal-bearing name', async () => {
+    const client = await connect()
+    const calls: [string, Record<string, unknown>, Record<string, unknown>][] = [
+      ['getMessages', { startMessageId: 11, endMessageId: 12 }, { messageId: 11 }],
+      ['getMessage', { id: 13 }, { messageId: 13 }],
+      ['getChunk', { sessionId: 2, chunkIndex: 1 }, { sessionId: 2, chunkIndex: 1 }],
+      ['addTag', { messageId: 14, tag: 'x' }, { messageId: 14 }],
+      ['removeTag', { sessionId: 15, tag: 'x' }, { sessionId: 15 }],
+      ['reportUselessSession', { sessionId: 16 }, { sessionId: 16 }],
+      ['unreportUselessSession', { sessionId: 17 }, { sessionId: 17 }],
+    ]
+    for (const [name, args] of calls) await client.callTool({ name, arguments: args })
+    await client.close()
+    expect(recorded.map((e) => [e.tool, (e as { target: unknown }).target])).toEqual(calls.map(([n, , t]) => [n, t]))
   })
 
   it('runs the remaining read tools', async () => {
@@ -430,7 +482,7 @@ describe('every advertised tool executes', () => {
     })
 
     it('labels results with the projects search resolved', () => {
-      expect(formatSearchResults).toHaveBeenLastCalledWith([], [7071], null)
+      expect(formatSearchResults).toHaveBeenLastCalledWith([], [7071], null, expect.stringMatching(/^L/))
     })
 
     it('does not resolve the cwd a second time', () => {
