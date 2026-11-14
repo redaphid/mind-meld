@@ -11,10 +11,12 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { exec } from 'node:child_process'
 import { promisify } from 'node:util'
 import { readdir } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
 import pg from 'pg'
+import { applyMigration } from './migrations.js'
+import { withMigrationLock } from '../__tests__/pg-migration-lock.js'
 
 const execAsync = promisify(exec)
 const INIT_DB = resolve(dirname(fileURLToPath(import.meta.url)), '../../init-db')
@@ -56,17 +58,9 @@ const hasPsqlBinary = async (): Promise<boolean> => {
 
 const dbAvailable = (await canReachPostgres()) && (await hasPsqlBinary())
 
-// No ON_ERROR_STOP flag here — src/db/migrations.ts does not pass one either,
-// and the historical chain only applies under that leniency (001's
-// search_messages has a syntax error that 003 repairs). 019 protects itself:
-// the file starts with `\set ON_ERROR_STOP on`, so ITS failures abort psql
-// with a nonzero exit wherever it runs.
-const psqlFile = async (database: string, file: string) => {
-  await execAsync(
-    `psql -h ${PG.host} -p ${PG.port} -U ${PG.user} -d ${database} -f "${file}"`,
-    { env: { ...process.env, PGPASSWORD: PG.password } }
-  )
-}
+// Applied through the runner's own psql invocation, so these tests exercise
+// exactly what mcp runs at startup: ON_ERROR_STOP, one transaction per file.
+const psqlFile = (database: string, file: string) => applyMigration({ ...PG, database }, INIT_DB, basename(file))
 
 let admin: pg.Client
 let db: pg.Client
@@ -103,7 +97,9 @@ beforeAll(async () => {
   // The real migration chain, exactly as src/db/migrations.ts applies it —
   // everything before 019, so fixtures exist in the world 019 will meet.
   const files = (await readdir(INIT_DB)).filter((f) => f.endsWith('.sql') && f < '019').sort()
-  for (const f of files) await psqlFile(SCRATCH_DB, join(INIT_DB, f))
+  await withMigrationLock(PG, async () => {
+    for (const f of files) await psqlFile(SCRATCH_DB, join(INIT_DB, f))
+  })
 
   db = new pg.Client({ ...PG, database: SCRATCH_DB })
   await db.connect()
@@ -401,7 +397,9 @@ describe.skipIf(!dbAvailable)('migration 019 refuses to merge across machines', 
     await crossAdmin.connect()
     await crossAdmin.query(`CREATE DATABASE ${CROSS_DB}`)
     const files = (await readdir(INIT_DB)).filter((f) => f.endsWith('.sql') && f < '019').sort()
-    for (const f of files) await psqlFile(CROSS_DB, join(INIT_DB, f))
+    await withMigrationLock(PG, async () => {
+      for (const f of files) await psqlFile(CROSS_DB, join(INIT_DB, f))
+    })
 
     crossDb = new pg.Client({ ...PG, database: CROSS_DB })
     await crossDb.connect()

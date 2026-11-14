@@ -50,6 +50,17 @@ const apply = (score: number, adjustment: Adjustment) =>
 
 export const scoreOf = (base: number, adjustments: Adjustment[]) => adjustments.reduce(apply, base)
 
+// What each adjustment moved the score by, given those applied before it.
+export const deltasOf = (base: number, adjustments: Adjustment[]): number[] => {
+  let score = base
+  return adjustments.map((adjustment) => {
+    const next = apply(score, adjustment)
+    const delta = next - score
+    score = next
+    return delta
+  })
+}
+
 const ARM_LABEL: Record<Arm, string> = { session: 'session', chunk: 'chunk', message: 'message', lexical: 'text' }
 
 // The compact form for MCP text, which every agent pays for on every search:

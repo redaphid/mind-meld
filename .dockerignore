@@ -4,8 +4,8 @@
 # has no business carrying docs, compose files, CI config or agent notes.
 #
 # This list applies to every Dockerfile in the context, so note two keeps:
-# init-db/ stays (Dockerfile.postgres copies it, and src/db/migrations.ts reads
-# it at runtime), and public/ stays (the ui and mcp services serve it).
+# init-db/ stays (src/db/migrations.ts reads it at runtime, in mcp and in the
+# local compose `migrate` service), and public/ stays (the ui and mcp services serve it).
 
 # Build output and installed dependencies — reinstalled inside the image.
 node_modules
@@ -48,11 +48,13 @@ quality
 vitest.config.ts
 knip.jsonc
 
-# Operator-side helper scripts. One of them IS a container entrypoint - the
+# Operator-side helper scripts. Two of them ARE container entrypoints - the
 # centroids image runs `pnpm compute:centroids`, which excluding this
-# directory left crash-looping forever on ERR_MODULE_NOT_FOUND (task 274).
+# directory left crash-looping forever on ERR_MODULE_NOT_FOUND (task 274), and
+# the local compose `migrate` service runs scripts/migrate.ts.
 scripts
 !scripts/compute-centroids.ts
+!scripts/migrate.ts
 *.sh
 
 # Logs

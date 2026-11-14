@@ -269,7 +269,15 @@ paths:
 
         By default only `coding`-class data is searched (see `dataClass`);
         naming a `source` explicitly bypasses that default.
+
+        Every search is recorded in the search log, and the response carries
+        its `list` handle. Pass that handle as `?list=` when you open a hit
+        (`/api/sessions/{id}`, its messages, or `/api/messages/{id}`) so the
+        open is tied to the list it came from. The log is readable only from
+        the database; no route returns its rows.
       parameters:
+        - $ref: '#/components/parameters/MindmeldCaller'
+        - $ref: '#/components/parameters/MindmeldClient'
         - name: q
           in: query
           required: true
@@ -373,15 +381,18 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [status, query, mode, count, projectIds, results]
+                required: [status, query, list, mode, count, projectIds, results]
                 properties:
                   status:
                     type: string
                     const: ok
                   query:
                     type: string
+                  list:
+                    $ref: '#/components/schemas/ListHandle'
                   mode:
                     type: string
+                    description: The mode that ran. An unrecognised `mode` runs, and reports, `hybrid`.
                     enum: [hybrid, semantic, text]
                   count:
                     type: integer
@@ -582,6 +593,9 @@ paths:
 
         No raw messages are returned here, however large the session.
       parameters:
+        - $ref: '#/components/parameters/ListParam'
+        - $ref: '#/components/parameters/MindmeldCaller'
+        - $ref: '#/components/parameters/MindmeldClient'
         - name: id
           in: path
           required: true
@@ -641,6 +655,9 @@ paths:
         `nextOffset` / `nextStartMessageId` carry the cursor for the next page;
         both `null` means the read is complete.
       parameters:
+        - $ref: '#/components/parameters/ListParam'
+        - $ref: '#/components/parameters/MindmeldCaller'
+        - $ref: '#/components/parameters/MindmeldClient'
         - name: id
           in: path
           required: true
@@ -699,6 +716,9 @@ paths:
         `truncated: true` — reaching a 271K-character message takes this
         deliberate call and can never happen by accident through a page read.
       parameters:
+        - $ref: '#/components/parameters/ListParam'
+        - $ref: '#/components/parameters/MindmeldCaller'
+        - $ref: '#/components/parameters/MindmeldClient'
         - name: id
           in: path
           required: true
@@ -1488,6 +1508,39 @@ paths:
 
 components:
   parameters:
+    ListParam:
+      name: list
+      in: query
+      required: false
+      description: |
+        The `list` handle of the search this hit came from. Records the open in
+        the search log against that list. Optional; an unknown handle is not an error.
+      schema:
+        $ref: '#/components/schemas/ListHandle'
+
+    MindmeldCaller:
+      name: X-Mindmeld-Caller
+      in: header
+      required: false
+      description: |
+        A stable id for one caller (the web UI sends one per tab), up to 64 of
+        `[A-Za-z0-9_.:-]`. The search log links a caller's opens to its latest
+        search within 30 minutes. Absent or malformed, the caller is `anon`.
+      schema:
+        type: string
+        example: ui:k3x9qa
+
+    MindmeldClient:
+      name: X-Mindmeld-Client
+      in: header
+      required: false
+      description: |
+        What is calling (`web-ui`, `bench`, `eval`), same character rules as
+        `X-Mindmeld-Caller`. Usage stats group by it. Absent, `rest`.
+      schema:
+        type: string
+        example: web-ui
+
     McpSessionIdOptional:
       name: Mcp-Session-Id
       in: header
@@ -1507,6 +1560,12 @@ components:
         format: uuid
 
   schemas:
+    ListHandle:
+      type: string
+      pattern: '^L[2-9a-hjkmnp-z]{6}$'
+      description: A search's result-list handle, minted per search.
+      example: Lk3x9qa
+
     Health:
       type: object
       required: [status, name, version]
@@ -1589,6 +1648,33 @@ components:
           description: |
             Records sync could not process, kept for replay in
             `/api/quarantine`. Non-zero means data is waiting, not lost.
+        searchLog:
+          type: object
+          description: |
+            The search log writer in this process. Rows are written off the
+            response path; `failed` and `dropped` count rows lost, so non-zero
+            means usage stats undercount.
+          required: [enabled, written, failed, dropped, queued, lastFailureAt, lastFailureCode]
+          properties:
+            enabled:
+              type: boolean
+            written:
+              type: integer
+            failed:
+              type: integer
+            dropped:
+              type: integer
+              description: Rows refused because the write queue was full.
+            queued:
+              type: integer
+            lastFailureAt:
+              type: string
+              format: date-time
+              nullable: true
+            lastFailureCode:
+              type: string
+              nullable: true
+              description: The Postgres SQLSTATE of the last failed write. Never the message, which can quote the row.
         chroma:
           type: object
           required: [collections]

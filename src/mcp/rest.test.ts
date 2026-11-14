@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { toSearchHit, toDigest, toMessages, toMessage , parseSearchShape } from './rest.js'
+import { toSearchHit, toSearchResponse, toDigest, toMessages, toMessage, parseSearchShape } from './rest.js'
 import type { SearchResult } from './search.js'
 import type { SessionDigest, MessagesResult, SessionMessage } from './session.js'
 
@@ -79,6 +79,16 @@ describe('toSearchHit', () => {
   it('nulls an unparseable date rather than emitting one', () => {
     const dto = toSearchHit(hit({ date: new Date('nonsense') }))
     expect(dto.date).toBeNull()
+  })
+})
+
+describe('toSearchResponse', () => {
+  it('carries the list handle beside the results, whatever was found', () => {
+    const full = toSearchResponse({ query: 'q', list: 'Lk3x9qa', mode: 'hybrid', outcome: { results: [hit()], degraded: null, projectIds: [], armMs: { semanticMs: null, embedMs: null, sessionMs: null, chunkMs: null, messageMs: null, fullTextMs: null } } })
+    expect(full).toMatchObject({ status: 'ok', list: 'Lk3x9qa', mode: 'hybrid', count: 1 })
+    expect(full.results[0].sessionId).toBe(42)
+    const empty = toSearchResponse({ query: 'q', list: 'Lm2m2m2', mode: 'text', outcome: { results: [], degraded: null, projectIds: [], armMs: { semanticMs: null, embedMs: null, sessionMs: null, chunkMs: null, messageMs: null, fullTextMs: null } } })
+    expect(empty).toMatchObject({ list: 'Lm2m2m2', count: 0, results: [] })
   })
 })
 

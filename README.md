@@ -217,6 +217,13 @@ Migrations in `init-db/` are applied automatically when the `mcp` container
 starts (`src/db/migrations.ts`) — **never** by the sync CLI. Keep the host on the
 newest version so a remote machine can't write rows its schema lacks.
 
+Each file runs in one transaction with `ON_ERROR_STOP`, together with the
+`schema_migrations` row that records it. A file that fails is rolled back and
+left unrecorded, no later file runs, and `mcp` exits with the psql error in its
+log. A migration therefore cannot open its own transaction or use
+`CREATE INDEX CONCURRENTLY`. The Postgres image does not pre-apply `init-db/`,
+so the runner is the only thing that applies a migration.
+
 ### Deploying
 
 Releases are semver-driven: bump `version` in `package.json` and push to `main`.
