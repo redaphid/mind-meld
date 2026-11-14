@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { scoreSteering, type SteeringItem } from './steering-score.js'
+import { reportSteering, scoreSteering, type SteeringItem } from './steering-score.js'
 import type { Grade } from './types.js'
 
 const item: SteeringItem = {
@@ -53,5 +53,24 @@ describe('scoreSteering', () => {
   it('does not credit a toward example coming back as recall', () => {
     const score = scoreSteering({ ...item, gold: [1, 10] }, { base: [10], toward: [1, 10], away: [] }, grades)
     expect(score.recallGain20).toBe(0)
+  })
+})
+
+describe('reportSteering', () => {
+  const names = { base: 'hybrid', toward: 'hybrid-toward', away: 'hybrid-away' }
+
+  // An item with no off-target result in its base list has nothing to remove;
+  // counting it as 0 would drag the mean down for something the examples never faced.
+  it('averages each metric over the items that have it', () => {
+    const report = reportSteering(names, [
+      { itemId: 'a', recallGain20: 0.5, ndcgGain10: 0.2, offTargetRemoved: 1, collateral: null },
+      { itemId: 'b', recallGain20: 0, ndcgGain10: null, offTargetRemoved: null, collateral: null },
+    ])
+    expect(report.system).toEqual(names)
+    expect(report.n).toBe(2)
+    expect(report.recallGain20!.mean).toBe(0.25)
+    expect(report.ndcgGain10!.mean).toBe(0.2)
+    expect(report.offTargetRemoved!.mean).toBe(1)
+    expect(report.collateral).toBeNull()
   })
 })
