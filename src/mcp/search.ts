@@ -1,4 +1,5 @@
 import assert from 'node:assert'
+import type pg from 'pg'
 import { query } from '../db/postgres.js'
 import { querySimilar } from '../db/chroma.js'
 import { sessionIdFromVectorId } from '../db/vector-ids.js'
@@ -169,6 +170,9 @@ type Hit = {
   headline: string | null
 }
 
+// One semantic tier's hits in its own rank order, before any are claimed.
+type ArmHits = { ranked: RankedList; claims: Omit<Hit, 'headline'>[] }
+
 const parseWeightedIds = (params: string[]): WeightedId[] =>
   params
     .map((item) => {
@@ -319,18 +323,32 @@ const SESSION_QUERY = `
   JOIN sources src ON p.source_id = src.id
   WHERE s.deleted_at IS NULL`
 
-const getSessionById = async (sessionId: number, includeAutomated: boolean) => {
-  const result = await query<SessionRow>(
-    `${SESSION_QUERY} AND ${AUTOMATED_FILTER} AND s.id = $1`,
-    [sessionId, includeAutomated]
-  )
-  return result.rows[0] ?? null
+// One query per tier for every hit Chroma returned, keyed by the hit's id so
+// the caller can walk the hits in distance order. Keys are strings because pg
+// returns BIGINT ids as strings; the rows themselves are passed through as-is.
+const hydrate = async <R extends pg.QueryResultRow>(
+  sql: string,
+  ids: number[],
+  includeAutomated: boolean,
+  idOf: (row: R) => number | string
+): Promise<Map<string, R>> => {
+  if (ids.length === 0) return new Map()
+  const result = await query<R>(sql, [ids, includeAutomated])
+  return new Map(result.rows.map((row) => [String(idOf(row)), row]))
 }
+
+const getSessionsByIds = (sessionIds: number[], includeAutomated: boolean) =>
+  hydrate<SessionRow>(
+    `${SESSION_QUERY} AND ${AUTOMATED_FILTER} AND s.id = ANY($1::int[])`,
+    sessionIds,
+    includeAutomated,
+    (row) => row.id
+  )
 
 type MessageAnchoredRow = SessionRow & { message_id: number; content_text: string | null }
 
-const getSessionByMessageId = async (messageId: number, includeAutomated: boolean) => {
-  const result = await query<MessageAnchoredRow>(
+const getSessionsByMessageIds = (messageIds: number[], includeAutomated: boolean) =>
+  hydrate<MessageAnchoredRow>(
     `SELECT s.id, s.title, s.summary, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
             src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
             s.started_at, s.ended_at, s.message_count, p.id as project_id,
@@ -339,29 +357,29 @@ const getSessionByMessageId = async (messageId: number, includeAutomated: boolea
      JOIN sessions s ON m.session_id = s.id
      JOIN projects p ON s.project_id = p.id
      JOIN sources src ON p.source_id = src.id
-     WHERE m.id = $1 AND s.deleted_at IS NULL AND ${AUTOMATED_FILTER}`,
-    [messageId, includeAutomated]
+     WHERE m.id = ANY($1::bigint[]) AND s.deleted_at IS NULL AND ${AUTOMATED_FILTER}`,
+    messageIds,
+    includeAutomated,
+    (row) => row.message_id
   )
-  return result.rows[0] ?? null
-}
 
-type ChunkAnchoredRow = SessionRow & { chunk_index: number; chunk_summary: string }
+type ChunkAnchoredRow = SessionRow & { chunk_id: number; chunk_index: number; chunk_summary: string }
 
-const getSessionByChunkId = async (chunkId: number, includeAutomated: boolean) => {
-  const result = await query<ChunkAnchoredRow>(
+const getSessionsByChunkIds = (chunkIds: number[], includeAutomated: boolean) =>
+  hydrate<ChunkAnchoredRow>(
     `SELECT s.id, s.title, s.summary, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
             src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
             s.started_at, s.ended_at, s.message_count, p.id as project_id,
-            c.chunk_index, c.summary as chunk_summary
+            c.id as chunk_id, c.chunk_index, c.summary as chunk_summary
      FROM session_chunks c
      JOIN sessions s ON c.session_id = s.id
      JOIN projects p ON s.project_id = p.id
      JOIN sources src ON p.source_id = src.id
-     WHERE c.id = $1 AND s.deleted_at IS NULL AND ${AUTOMATED_FILTER}`,
-    [chunkId, includeAutomated]
+     WHERE c.id = ANY($1::bigint[]) AND s.deleted_at IS NULL AND ${AUTOMATED_FILTER}`,
+    chunkIds,
+    includeAutomated,
+    (row) => row.chunk_id
   )
-  return result.rows[0] ?? null
-}
 
 const resolveCentroids = async (table: 'sessions' | 'projects', weightedIds: WeightedId[]) => {
   if (weightedIds.length === 0) return []
@@ -453,6 +471,9 @@ const SWITCHED_OFF: SearchDegradation = {
 export type SearchOutcome = {
   results: SearchResult[]
   degraded: SearchDegradation | null
+  // The projects the cwd resolved to (empty without one), so a caller labelling
+  // results by project does not resolve the cwd a second time.
+  projectIds: number[]
 }
 
 // Every hit is scored by its session's summary vector, whichever arm found it,
@@ -526,8 +547,10 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
   const rankedLists: RankedList[] = []
   let degraded: SearchDegradation | null = null
 
-  // First arm to claim a session wins its tier/cursor/snippet source. Arms run
-  // session → chunk → message → fts; later, fusion across all arms decides rank.
+  // First arm to claim a session wins its tier/cursor/snippet source, and arms
+  // claim in a fixed order -- session → chunk → message → fts -- whichever
+  // finished first, so the answer never depends on timing. Fusion across all
+  // arms decides rank afterwards.
   const record = (
     result: SearchResult,
     projectId: number,
@@ -539,8 +562,75 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       hitBySession.set(result.session_id, { result, projectId, rawSnippet, headline })
   }
 
-  if ((mode === 'semantic' || mode === 'hybrid') && !vectorsOn) degraded = SWITCHED_OFF
-  else if (mode === 'semantic' || mode === 'hybrid') {
+  // Each tier reads only its own hits and returns what it would claim, so the
+  // three run at once and are claimed afterwards.
+  const sessionTier = async (embedding: number[]): Promise<ArmHits | null> => {
+    const hits = await querySimilar(config.chroma.collections.sessions, embedding, limit * (overFetch ?? 2))
+    if (!hits.ids[0]) return null
+    const arm: ArmHits = { ranked: [], claims: [] }
+    const sessionIds = hits.ids[0].map(sessionIdFromVectorId)
+    const sessions = await getSessionsByIds(sessionIds, includeAutomated)
+    for (let i = 0; i < sessionIds.length; i++) {
+      const score = 1 - (hits.distances?.[0]?.[i] ?? 1)
+      const session = sessions.get(String(sessionIds[i]))
+      if (!session) continue
+      if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
+      arm.claims.push({ result: baseResult(session, score, 'session'), projectId: session.project_id, rawSnippet: session.summary })
+      arm.ranked.push(session.id)
+    }
+    return arm
+  }
+
+  const chunkTier = async (embedding: number[]): Promise<ArmHits | null> => {
+    const hits = await querySimilar(config.chroma.collections.chunks, embedding, limit * (overFetch ?? 3))
+    if (!hits.ids[0]) return null
+    const arm: ArmHits = { ranked: [], claims: [] }
+    const seen = new Set<number>()
+    const chunkIds = hits.ids[0].map((id) => parseInt(id.replace('chunk-', '')))
+    const chunks = await getSessionsByChunkIds(chunkIds, includeAutomated)
+    for (let i = 0; i < chunkIds.length; i++) {
+      const score = 1 - (hits.distances?.[0]?.[i] ?? 1)
+      const session = chunks.get(String(chunkIds[i]))
+      if (!session) continue
+      if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
+      if (seen.has(session.id)) continue
+      seen.add(session.id)
+      const result = baseResult(session, score, 'chunk')
+      result.cursor = { chunk_index: session.chunk_index }
+      arm.claims.push({ result, projectId: session.project_id, rawSnippet: session.chunk_summary })
+      arm.ranked.push(session.id)
+    }
+    return arm
+  }
+
+  const messageTier = async (embedding: number[]): Promise<ArmHits | null> => {
+    const hits = await querySimilar(config.chroma.collections.messages, embedding, limit * (overFetch ?? 3))
+    if (!hits.ids[0]) return null
+    // Chroma returns messages in distance order; first appearance of a
+    // session is its best-ranked message, so dedup preserves rank order.
+    const arm: ArmHits = { ranked: [], claims: [] }
+    const seen = new Set<number>()
+    const messageIds = hits.ids[0].map((id) => parseInt(id.replace('msg-', '')))
+    const messages = await getSessionsByMessageIds(messageIds, includeAutomated)
+    for (let i = 0; i < messageIds.length; i++) {
+      const score = 1 - (hits.distances?.[0]?.[i] ?? 1)
+      const session = messages.get(String(messageIds[i]))
+      if (!session) continue
+      if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter, session.message_id))
+        continue
+      if (seen.has(session.id)) continue
+      seen.add(session.id)
+      const result = baseResult(session, score, 'message')
+      result.cursor = { message_id: session.message_id }
+      arm.claims.push({ result, projectId: session.project_id, rawSnippet: session.content_text })
+      arm.ranked.push(session.id)
+    }
+    return arm
+  }
+
+  // Settled in claim order. A failed embedding is the one entry, since no tier
+  // can run without the vector; this never rejects.
+  const semanticArms = async (): Promise<PromiseSettledResult<ArmHits | null>[]> => {
     try {
       const embedding = await composeQueryVector(
         params.query,
@@ -550,92 +640,13 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
         likeProjectCentroids,
         unlikeProjectCentroids
       )
-
-      const sessionHits = await querySimilar(
-        config.chroma.collections.sessions,
-        embedding,
-        limit * (overFetch ?? 2)
-      )
-      if (sessionHits.ids[0]) {
-        const sessionRanked: RankedList = []
-        for (let i = 0; i < sessionHits.ids[0].length; i++) {
-          const sessionId = sessionIdFromVectorId(sessionHits.ids[0][i])
-          const score = 1 - (sessionHits.distances?.[0]?.[i] ?? 1)
-          const session = await getSessionById(sessionId, includeAutomated)
-          if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
-          record(
-            baseResult(session, score, 'session'),
-            session.project_id,
-            session.summary,
-            null
-          )
-          sessionRanked.push(session.id)
-        }
-        rankedLists.push(sessionRanked)
-      }
-
-      const chunkHits = await querySimilar(
-        config.chroma.collections.chunks,
-        embedding,
-        limit * (overFetch ?? 3)
-      )
-      if (chunkHits.ids[0]) {
-        const chunkRanked: RankedList = []
-        const seen = new Set<number>()
-        for (let i = 0; i < chunkHits.ids[0].length; i++) {
-          const chunkId = parseInt(chunkHits.ids[0][i].replace('chunk-', ''))
-          const score = 1 - (chunkHits.distances?.[0]?.[i] ?? 1)
-          const session = await getSessionByChunkId(chunkId, includeAutomated)
-          if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
-          if (seen.has(session.id)) continue
-          seen.add(session.id)
-          const result = baseResult(session, score, 'chunk')
-          result.cursor = { chunk_index: session.chunk_index }
-          record(result, session.project_id, session.chunk_summary, null)
-          chunkRanked.push(session.id)
-        }
-        rankedLists.push(chunkRanked)
-      }
-
-      const messageHits = await querySimilar(
-        config.chroma.collections.messages,
-        embedding,
-        limit * (overFetch ?? 3)
-      )
-      if (messageHits.ids[0]) {
-        // Chroma returns messages in distance order; first appearance of a
-        // session is its best-ranked message, so dedup preserves rank order.
-        const messageRanked: RankedList = []
-        const seen = new Set<number>()
-        for (let i = 0; i < messageHits.ids[0].length; i++) {
-          const messageId = parseInt(messageHits.ids[0][i].replace('msg-', ''))
-          const score = 1 - (messageHits.distances?.[0]?.[i] ?? 1)
-          const session = await getSessionByMessageId(messageId, includeAutomated)
-          if (!session) continue
-          if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter, session.message_id))
-            continue
-          if (seen.has(session.id)) continue
-          seen.add(session.id)
-          const result = baseResult(session, score, 'message')
-          result.cursor = { message_id: session.message_id }
-          record(result, session.project_id, session.content_text, null)
-          messageRanked.push(session.id)
-        }
-        rankedLists.push(messageRanked)
-      }
-    } catch (e) {
-      // Reached in seconds now rather than after ~120s of retrying a shut gate:
-      // getQueryEmbedding uses the interactive client, which does not wait one
-      // out. The reason travels with the results instead of only to the log.
-      const reason = e instanceof Error ? e.message : String(e)
-      console.error('Semantic search failed, returning full-text results only:', reason)
-      degraded = { semantic: false, cause: 'unavailable', reason }
+      return await Promise.allSettled([sessionTier(embedding), chunkTier(embedding), messageTier(embedding)])
+    } catch (reason) {
+      return [{ status: 'rejected', reason }]
     }
   }
 
-  if ((mode === 'text' || mode === 'hybrid') && params.query) {
+  const fullTextRows = async () => {
     const conditions = [
       `to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $1)`,
       `s.deleted_at IS NULL`,
@@ -684,7 +695,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     values.push(limit * 2)
     const limitParam = `$${nextParam}`
 
-    const ftsResult = await query<{
+    const result = await query<{
       session_id: number
       message_id: number
       title: string | null
@@ -729,10 +740,37 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       LIMIT ${limitParam}`,
       values
     )
+    return result.rows
+  }
 
+  const wantsSemantic = mode === 'semantic' || mode === 'hybrid'
+  if (wantsSemantic && !vectorsOn) degraded = SWITCHED_OFF
+  const [semantic, ftsRows] = await Promise.all([
+    wantsSemantic && vectorsOn ? semanticArms() : [],
+    (mode === 'text' || mode === 'hybrid') && params.query ? fullTextRows() : null,
+  ])
+
+  // A failed tier ends the semantic block there and keeps the tiers before
+  // it, as when they ran one after another.
+  for (const arm of semantic) {
+    if (arm.status === 'rejected') {
+      // Reached in seconds now rather than after ~120s of retrying a shut gate:
+      // getQueryEmbedding uses the interactive client, which does not wait one
+      // out. The reason travels with the results instead of only to the log.
+      const reason = arm.reason instanceof Error ? arm.reason.message : String(arm.reason)
+      console.error('Semantic search failed, returning full-text results only:', reason)
+      degraded = { semantic: false, cause: 'unavailable', reason }
+      break
+    }
+    if (!arm.value) continue
+    for (const claim of arm.value.claims) record(claim.result, claim.projectId, claim.rawSnippet, null)
+    rankedLists.push(arm.value.ranked)
+  }
+
+  if (ftsRows) {
     // Rows already ordered by rank DESC — their order is the FTS ranking.
     const ftsRanked: RankedList = []
-    for (const row of ftsResult.rows) {
+    for (const row of ftsRows) {
       const result: SearchResult = {
         session_id: row.session_id,
         project_name: row.project_name,
@@ -788,7 +826,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     if (tags && tags.length > 0) result.tags = tags
   }
 
-  return { results: page, degraded }
+  return { results: page, degraded, projectIds }
 }
 
 // The plain form, for callers that have nothing useful to do with the
