@@ -49,7 +49,7 @@ export type UsageStats = {
   // Each stage over the searches it ran in. Stages overlap, so they do not sum
   // to latencyMs.
   stageMs: Record<keyof ArmMs, Percentiles>
-  // Tag and report calls per search.
+  // Tag and report calls per search that did not throw.
   feedbackPerSearch: number | null
   // Searches that set each parameter.
   vectorParams: Record<VectorParam, number>
@@ -65,11 +65,16 @@ WITH w AS (
 ), ok AS (
   SELECT * FROM s WHERE error IS NULL
 ), first_open AS (
-  SELECT DISTINCT ON (s.id) s.id, o.rank
-  FROM ok s
-  JOIN w o ON o.kind = 'open' AND o.list = s.list
-          AND o.at >= s.at AND o.at <= s.at + make_interval(mins => $3)
-  ORDER BY s.id, o.at, o.id
+  -- One index probe per search on search_log_list_idx. A join over the window
+  -- CTE planned as a nested loop and took 30 s on 100k rows.
+  SELECT s.id, o.rank FROM ok s
+  CROSS JOIN LATERAL (
+    SELECT o.rank FROM search_log o
+    WHERE o.list = s.list AND o.kind = 'open'
+      AND o.at >= s.at AND o.at <= s.at + make_interval(mins => $3)
+      AND o.at >= now() - make_interval(days => $1)
+      AND split_part(o.client, '/', 1) <> ALL ($2::text[])
+    ORDER BY o.at, o.id LIMIT 1) o
 )
 SELECT
   (SELECT count(*) FROM s)::int AS searches,
@@ -126,7 +131,7 @@ export const toUsageStats = (days: number, row: UsageRow): UsageStats => ({
   degradedRate: share(row.degraded, row.ok),
   latencyMs: { p50: row.p50, p90: row.p90 },
   stageMs: row.stage_ms,
-  feedbackPerSearch: share(row.feedback, row.searches),
+  feedbackPerSearch: share(row.feedback, row.ok),
   vectorParams: row.vector_params,
 })
 

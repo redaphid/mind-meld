@@ -23,7 +23,7 @@ describe('usage stats', () => {
     const s = toUsageStats(7, row() as never)
     expect(s).toMatchObject({
       days: 7, searches: 10, openedShare: 0.5, noResultRate: 0.25, degradedRate: 0.125,
-      feedbackPerSearch: 0.3, openedRank: { opens: 3, median: 2, mrr: 0.611 }, latencyMs: { p50: 14.2, p90: 51.7 },
+      feedbackPerSearch: 0.375, openedRank: { opens: 3, median: 2, mrr: 0.611 }, latencyMs: { p50: 14.2, p90: 51.7 },
     })
   })
 

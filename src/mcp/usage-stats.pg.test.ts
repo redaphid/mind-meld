@@ -102,7 +102,7 @@ const HAND = {
     FROM search_log WHERE kind = 'search' AND error IS NULL AND ${BASE}`,
   feedbackPerSearch: `
     SELECT (SELECT count(*) FROM search_log WHERE kind = 'tag' AND ${BASE})::float8
-         / (SELECT count(*) FROM search_log WHERE kind = 'search' AND ${BASE}) AS v`,
+         / (SELECT count(*) FROM search_log WHERE kind = 'search' AND error IS NULL AND ${BASE}) AS v`,
   negativeQuery: `
     SELECT count(*)::int AS v FROM search_log
     WHERE kind = 'search' AND ${BASE} AND COALESCE(NULLIF(request->>'negativeQuery', ''), NULLIF(request->>'not', '')) IS NOT NULL`,
@@ -164,10 +164,10 @@ describe.skipIf(!dbAvailable)('usage stats against Postgres', () => {
   // Worked out by hand from SEED. 7 days: L1 L2 L3 L4 L8 (L4 threw). 30 days adds L5.
   const EXPECTED = {
     7: { searches: 5, openedShare: 2 / 4, median: 2, mrr: 1 / 2, noResult: 1 / 4, degraded: 1 / 4,
-         p50: 17.5, p90: 27, feedback: 2 / 5, negativeQuery: 1, likeSession: 1,
+         p50: 17.5, p90: 27, feedback: 2 / 4, negativeQuery: 1, likeSession: 1,
          embed: [6, 7.6], session: [3, 3], fullText: [4, 5.6] },
     30: { searches: 6, openedShare: 3 / 5, median: 2.5, mrr: (1 / 2 + 1 / 3) / 2, noResult: 1 / 5, degraded: 1 / 5,
-          p50: 20, p90: 36, feedback: 2 / 6, negativeQuery: 2, likeSession: 1,
+          p50: 20, p90: 36, feedback: 2 / 5, negativeQuery: 2, likeSession: 1,
           embed: [7, 16.4], session: [3, 3], fullText: [4, 5.6] },
   } as const
 
@@ -239,4 +239,25 @@ describe.skipIf(!dbAvailable)('usage stats against Postgres', () => {
     expect(out).toContain('| Uses negativeQuery | 1 | 2 |')
     await client.close()
   })
+
+  // Last: it adds 50k rows the tests above do not expect.
+  it('answers over a large log in seconds, not minutes', async () => {
+    await db.query(
+      `INSERT INTO search_log (at, caller, transport, client, kind, tool, list, results, result_count, timings)
+       SELECT now() - (g % 40) * interval '1 day' - interval '1 hour', 'mcp:load', 'mcp-http', 'claude-code/1',
+              'search', 'search', 'P' || g, '[{"s":1,"rank":1}]', 1, '{"totalMs":10}'
+       FROM generate_series(1, 25000) g`
+    )
+    await db.query(
+      `INSERT INTO search_log (at, caller, transport, client, kind, tool, list, rank, signal)
+       SELECT now() - (g % 40) * interval '1 day' - interval '59 minutes', 'mcp:load', 'mcp-http', 'claude-code/1',
+              'open', 'getSession', 'P' || g, 1, 'open'
+       FROM generate_series(1, 25000) g`
+    )
+    await db.query('ANALYZE search_log')
+    const started = performance.now()
+    const s = await mod.stats.usageStats(30)
+    expect(performance.now() - started).toBeLessThan(5000)
+    expect(s.openedRank.opens).toBeGreaterThan(18000)
+  }, 60_000)
 })
