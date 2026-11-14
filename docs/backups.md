@@ -79,8 +79,7 @@ nothing noticed. So each run refuses to promote anything it has not checked:
   for the whole copy, so Chroma's writes wait or fail for that window, about 45 s
   on a quiet disk. Mindmeld writes Chroma before it records the embedding in
   Postgres, so a failed write stays queued and is recomputed on a later pass.
-  `BACKUP_SQLITE_TIMEOUT_SECONDS` (900) bounds the
-  window.
+  `BACKUP_SQLITE_TIMEOUT_SECONDS` (900) bounds the window.
 
 Everything is built in `.staging/`, then renamed into `generations/` in one
 step. A run killed halfway leaves only staging debris, which the next run
