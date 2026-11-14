@@ -70,9 +70,12 @@ push() {
 # is pushed once per ALERT_REPEAT_HOURS, not once per retry: a stuck fault must not
 # flood the phone, and the repeat lines carry no error text for the alerter to match.
 alert() {
+	record_run FAIL "$1"
 	msg="ERROR: mindmeld-backup: $1"
 	mkdir -p "$STATE"
-	f="$STATE/alert-$(printf '%s' "$msg" | cksum | cut -d' ' -f1)"
+	# Keyed without digits: "messages fell from 812 to 3" is the same fault on
+	# every retry even when the numbers move.
+	f="$STATE/alert-$(printf '%s' "$msg" | tr -d '0-9' | cksum | cut -d' ' -f1)"
 	now=$(date +%s)
 	last=$(cat "$f" 2>/dev/null || echo 0)
 	if [ $((now - last)) -ge $((ALERT_REPEAT_HOURS * 3600)) ]; then
@@ -83,6 +86,11 @@ alert() {
 		emit "mindmeld-backup: same failure as the alert sent at $(date -u -d "@$last" +%FT%TZ); not re-sent"
 	fi
 }
+
+# One line per finished run, kept beside the generations. Only BACKUP_KEEP
+# generations survive and container logs go with the container, so this is the
+# record that answers "how many nights in a row did it work?".
+record_run() { printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$1" "$2" >>"$BACKUP_DIR/history.tsv" 2>/dev/null || true; }
 
 clear_alerts() {
 	if ls "$STATE"/alert-* >/dev/null 2>&1; then
@@ -102,23 +110,6 @@ file_bytes() { stat -c %s "$1"; }
 # so a large drop means the dump or snapshot came from the wrong or an empty source.
 ratio_ok() { [ -z "${2:-}" ] || [ "$2" -eq 0 ] || [ $(($1 * 100)) -ge $(($2 * BACKUP_MIN_RATIO_PCT)) ]; }
 
-# Chroma keeps each HNSW segment's replay point (max_seq_id) in sqlite and the
-# index in files. On start it replays the queue past that point into the index.
-# If the copied sqlite's point is ahead of the copied files, the gap is never
-# replayed: counts still match, but those vectors cannot be found by search
-# (proven on a restored copy). So the index's element count (hnswlib header,
-# u64 at byte 20) plus the queue left to replay must cover every metadata row.
-# Prints one line per collection that falls short.
-hnsw_gaps() {
-	sqlite3 "$1/chroma.sqlite3" "select v.id, v.collection,
-		(select count(*) from embeddings e where e.segment_id = m.id),
-		(select count(*) from embeddings_queue q where q.topic like '%/' || v.collection
-			and q.seq_id > coalesce((select x.seq_id from max_seq_id x where x.segment_id = v.id), 0))
-		from segments v join segments m on m.collection = v.collection and m.scope = 'METADATA'
-		where v.scope = 'VECTOR'" |
-		while IFS='|' read -r seg col rows pending; do
-			indexed=0
-			[ ! -f "$1/$seg/header.bin" ] || indexed=$(od -A n -t u8 -j 20 -N 8 "$1/$seg/header.bin" | tr -d ' ')
-			[ $((indexed + pending)) -ge "$rows" ] || echo "collection $col: index $indexed + queue $pending < $rows rows"
-		done
-}
+# Prints one line per collection whose copied HNSW index replay cannot complete;
+# nothing when the copy is whole. The reasoning is in chroma-gaps.py.
+hnsw_gaps() { python3 -I "$(dirname "$0")/chroma-gaps.py" "$1"; }

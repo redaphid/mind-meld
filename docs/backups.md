@@ -33,6 +33,7 @@ generations/<UTC stamp>/
   SHA256SUMS
 latest.json              copy of the newest MANIFEST.json
 restore-test.json        result of the last restore drill
+history.tsv              one line per finished backup, drill or failure (UTC time, ok/FAIL, what)
 .staging/                work area, excluded from sync (.stignore: /.staging)
 ```
 
@@ -71,9 +72,15 @@ nothing noticed. So each run refuses to promote anything it has not checked:
 - **Chroma replayable.** Chroma records each index's replay point
   (`max_seq_id`) in sqlite and keeps the index in files; on start it replays the
   queue past that point. A copy whose sqlite point is ahead of its index files
-  restores with correct counts and vectors that search can never find. So the
-  index's element count (hnswlib header) plus the queue left to replay must
-  cover every metadata row, or the copy is retried.
+  restores with correct counts and vectors that search can never find. So every
+  id in the metadata must be in the index file's id map or in a queued add or
+  upsert past the replay point (`chroma-gaps.py`), or the copy is retried.
+- **Chroma's writers wait.** The sqlite shell's `.backup` holds its read lock
+  for the whole copy, so Chroma's writes wait or fail for that window, about 45 s
+  on a quiet disk. Mindmeld writes Chroma before it records the embedding in
+  Postgres, so a failed write stays queued and is recomputed on a later pass.
+  `BACKUP_SQLITE_TIMEOUT_SECONDS` (900) bounds the
+  window.
 
 Everything is built in `.staging/`, then renamed into `generations/` in one
 step. A run killed halfway leaves only staging debris, which the next run

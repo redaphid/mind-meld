@@ -8,9 +8,9 @@
 # the next run deletes.
 #
 # Usage: backup-once.sh [--use-dump FILE]
-#   --use-dump verifies FILE in place of a fresh pg_dump. It exists to prove the
-#   verifier and the alert path reject bad input; nothing it produces is promoted
-#   unless FILE passes every check a real dump must pass.
+#   --use-dump verifies FILE in place of a fresh pg_dump and stops there. It exists
+#   to prove the verifier and the alert path reject bad input; it never promotes,
+#   because its manifest counts would describe the live database, not FILE.
 . "$(dirname "$0")/lib.sh"
 
 use_dump=
@@ -41,7 +41,10 @@ die() {
 	exit 1
 }
 
-case $BACKUP_KEEP in '' | *[!0-9]* | 0) die "BACKUP_KEEP must be a whole number of at least 1, not '$BACKUP_KEEP'" ;; esac
+# Leading zeros stripped: "00" is zero, and "08" is not valid octal to $(( )).
+keep=$(printf '%s' "$BACKUP_KEEP" | sed 's/^0*//')
+case $keep in '' | *[!0-9]*) die "BACKUP_KEEP must be a whole number of at least 1, not '$BACKUP_KEEP'" ;; esac
+BACKUP_KEEP=$keep
 
 # A bind mount that resolves to the wrong place is silently writable: this is how
 # dumps once landed in a VM-internal directory nobody synced. Refuse to run
@@ -109,11 +112,18 @@ ratio_ok "$(count messages)" "$(prev_get pg_messages)" || die "messages fell fro
 reason=$("$(dirname "$0")/verify-pgdump.sh" "$work/conversations.pgdump" "$(prev_get pg_dump_bytes)") || die "$reason"
 verify_done=$(date +%s)
 log "postgres dump verified: $(file_bytes "$work/conversations.pgdump") bytes, dump $((pg_done - started))s, verify $((verify_done - pg_done))s"
+if [ -n "$use_dump" ]; then
+	log "--use-dump: $use_dump passed verification; nothing is promoted"
+	exit 0
+fi
 
 # --- chroma -------------------------------------------------------------------
-# chroma.sqlite3 runs in rollback-journal mode. sqlite's online backup copies it
-# in small steps and releases the lock between them, so chroma's writers are not
-# stalled for the whole copy; the busy timeout waits out a writer holding the lock.
+# chroma.sqlite3 runs in rollback-journal mode. The sqlite3 shell's .backup holds
+# its read lock for the whole copy, so chroma's writers wait, or fail once their
+# busy timeout passes, until it ends: 43 s for a 2.8 GB file on a quiet disk,
+# measured on a copy with a writer committing every few seconds. The shell's
+# .timeout waits out a writer that holds the lock first; timeout bounds the
+# window when the disk is slow, and the run then fails and alerts.
 # The HNSW segment files are plain files rewritten when chroma persists an
 # index. Their (name, size, mtime to the nanosecond) is recorded before and after
 # the copy, and the copy is retried if any changed: data_level0.bin keeps its
@@ -126,7 +136,7 @@ while :; do
 	attempt=$((attempt + 1))
 	rm -rf "$snapdir" && mkdir -p "$snapdir"
 	before=$(segments_signature)
-	sqlite3 "file:$CHROMA_DATA/chroma.sqlite3?mode=ro" ".timeout 600000" ".backup $snapdir/chroma.sqlite3" 2>>"$runlog" ||
+	timeout "${BACKUP_SQLITE_TIMEOUT_SECONDS:-900}" sqlite3 "file:$CHROMA_DATA/chroma.sqlite3?mode=ro" ".timeout 600000" ".backup $snapdir/chroma.sqlite3" 2>>"$runlog" ||
 		die "chroma sqlite backup failed ($(tail -1 "$runlog"))"
 	for d in "$CHROMA_DATA"/*/; do
 		[ -d "$d" ] && cp -a "$d" "$snapdir/"
@@ -188,4 +198,5 @@ ls -1d "$GENERATIONS"/2* | sort -r | tail -n +$((BACKUP_KEEP + 1)) | while read 
 done
 
 log "backup $stamp complete in $((finished - started))s"
+record_run ok "backup $stamp"
 clear_alerts

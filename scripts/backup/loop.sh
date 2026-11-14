@@ -10,6 +10,17 @@ RESTORE_TEST_EVERY_DAYS=${RESTORE_TEST_EVERY_DAYS:-7}
 STARTUP_DELAY_SECONDS=${BACKUP_STARTUP_DELAY_SECONDS:-600}
 here=$(dirname "$0")
 
+# PID 1 exiting restarts the container, so no backup is lost, but it must not
+# happen in silence: every restart costs the startup delay, and a fault that
+# repeats would leave only the staleness alert, a day and a half later.
+trap 'rc=$?; [ "$rc" -eq 0 ] || alert "backup loop exited (exit $rc); the container will restart it"' EXIT
+
+# A slot busybox date cannot parse would kill the loop at its first sleep.
+if ! date -u -d "$(date -u +%F) $BACKUP_AT_UTC" +%s >/dev/null 2>&1; then
+	alert "BACKUP_AT_UTC '$BACKUP_AT_UTC' is not a HH:MM time; using 03:17"
+	BACKUP_AT_UTC=03:17
+fi
+
 age_seconds() { [ -f "$1" ] && echo $(($(date +%s) - $(stat -c %Y "$1"))) || echo 999999999; }
 
 seconds_until_slot() {

@@ -100,3 +100,4 @@ mv "$out" "$BACKUP_DIR/restore-test.json"
 
 [ "$ok" = true ] || die "restored rows differ from the dump's own counts:$mismatches"
 log "restore drill of $(basename "$gen") passed in $((finished - started))s (restore $((restored_at - started))s)"
+record_run ok "drill $(basename "$gen")"
