@@ -131,7 +131,7 @@ export type SummaryStyle = {
   mergePrompt: (combined: string) => string;
 };
 
-export const CODING_STYLE: SummaryStyle = {
+const CODING_STYLE: SummaryStyle = {
   verbatimAtOrBelowChars: 8000,
   chunkPrompt: (text, isChunkOfMany) => {
     const contextNote = isChunkOfMany
@@ -181,7 +181,7 @@ MERGED SUMMARY:`,
 // The model's answer was produced but is not a summary. Distinct from a
 // transport failure: retrying the same prompt can succeed, and the caller may
 // hold an honest fallback text.
-export class SummaryRejectedError extends Error {
+class SummaryRejectedError extends Error {
   constructor(
     readonly kind: "control-marker" | "too-short" | "loop",
     message: string,
