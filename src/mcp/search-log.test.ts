@@ -116,16 +116,25 @@ describe('caller keys', () => {
 })
 
 describe('logged results', () => {
-  it('ranks from 1 and keeps tier, damping and cursor', () => {
+  it('ranks from 1 and keeps tier, damping, cursor and the evidence', () => {
     const base = { project_name: 'p', project_path: '/p', source: 's', data_class: 'coding', title: null, title_source: 'none' as const, date: new Date(), snippet: null }
     expect(
       toLoggedHits([
-        { ...base, session_id: 9, score: 0.03, matched_tier: 'message', noise_damping: 0.9, cursor: { message_id: 5 } },
-        { ...base, session_id: 4, score: 0.02, matched_tier: 'session' },
+        {
+          ...base, session_id: 9, score: 0.525, matched_tier: 'message', noise_damping: 0.5, cursor: { message_id: 5 },
+          evidence: [{ arm: 'message', rank: 1, cosine: 0.7, messageId: 5 }, { arm: 'lexical', rank: 3, tsRank: 0.06, messageId: 6 }],
+          base: 0.05,
+          adjustments: [{ kind: 'noise', similarity: 0.8, factor: 0.5 }, { kind: 'project', boost: 0.5 }],
+        },
+        { ...base, session_id: 4, score: 0.02, matched_tier: 'session', noise_damping: null, evidence: [{ arm: 'session', rank: 2, cosine: 0.6 }], base: 0.02, adjustments: [] },
       ])
     ).toEqual([
-      { s: 9, rank: 1, score: 0.03, tier: 'message', damping: 0.9, cursor: { message_id: 5 } },
-      { s: 4, rank: 2, score: 0.02, tier: 'session', damping: null },
+      {
+        s: 9, rank: 1, score: 0.525, tier: 'message', damping: 0.5, cursor: { message_id: 5 }, base: 0.05,
+        ev: [{ arm: 'message', rank: 1, cosine: 0.7 }, { arm: 'lexical', rank: 3, tsRank: 0.06 }],
+        adj: [{ kind: 'noise', delta: -0.025 }, { kind: 'project', delta: 0.5 }],
+      },
+      { s: 4, rank: 2, score: 0.02, tier: 'session', damping: null, base: 0.02, ev: [{ arm: 'session', rank: 2, cosine: 0.6 }], adj: [] },
     ])
   })
 

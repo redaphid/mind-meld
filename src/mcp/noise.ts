@@ -339,11 +339,13 @@ export const noiseDamping = (
   vector: number[] | null | undefined,
   { centroids: clusters, floor }: NoiseModel,
   weight = config.noise.penaltyWeight
-): number => {
-  if (!vector || vector.length === 0 || clusters.length === 0 || weight <= 0) return 1
+): number =>
+  !vector || vector.length === 0 || clusters.length === 0 ? 1 : dampingAt(nearestSimilarity(vector, clusters), floor, weight)
 
-  const nearest = nearestSimilarity(vector, clusters)
-  if (!Number.isFinite(nearest) || nearest <= floor) return 1
+// The same multiplier from an already-measured similarity to the nearest
+// cluster, for a caller that reports the similarity too.
+export const dampingAt = (nearest: number, floor: number, weight = config.noise.penaltyWeight): number => {
+  if (weight <= 0 || !Number.isFinite(nearest) || nearest <= floor) return 1
   const headroom = 1 - floor
   const excess = headroom > 0 ? (nearest - floor) / headroom : 1
   return Math.max(0, 1 - weight * Math.min(1, excess))

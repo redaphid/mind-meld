@@ -8,13 +8,25 @@ import { getInteractiveOllamaClient } from '../embeddings/ollama.js'
 import { semanticEnabled } from '../sync/sync-control.js'
 import { subtractVectors, normalizeVector, addVectors, scaleVector } from '../utils/vector-math.js'
 import { projectPathVariants, isWindowsBackedPath } from '../utils/project-path.js'
-import { fuseRanks, type RankedList } from './rrf.js'
+import { fuseRanks } from './rrf.js'
 import { buildSnippet, ts_headline_options } from './snippet.js'
 import { resolveTitle, type TitleSource } from './title.js'
 import { parseSinceDate } from './since.js'
 import { resolveTagFilter, passesTagFilter, getSessionTags, type TagFilter } from './tags.js'
-import { getNoiseModel, noiseDamping, sessionVectors, NO_NOISE, USELESS_TAG, type NoiseModel } from './noise.js'
+import { getNoiseModel, dampingAt, nearestSimilarity, sessionVectors, NO_NOISE, USELESS_TAG, type NoiseModel } from './noise.js'
 import { LAST_ACTIVITY_SQL, lastActivity } from './last-activity.js'
+import {
+  byStrength,
+  formatBreakdown,
+  formatEvidence,
+  scoreOf,
+  type Adjustment,
+  type Arm,
+  type Evidence,
+  type EvidenceList,
+  type Scored,
+} from './evidence.js'
+import { DEFAULT_SEARCH_MODE, type SearchMode } from './search-mode.js'
 
 const PROJECT_BOOST = 0.5
 
@@ -28,7 +40,7 @@ export type SearchParams = {
   negativeQuery?: string
   excludeTerms?: string
   cwd?: string
-  mode?: 'semantic' | 'text' | 'hybrid'
+  mode?: SearchMode
   limit?: number
   source?: string
   since?: string
@@ -131,11 +143,11 @@ const assertKnownDataClasses = async (dataClasses: string[]) => {
 
 export type MatchedTier = 'session' | 'chunk' | 'message'
 
-export const DEFAULT_SEARCH_MODE = 'hybrid' satisfies SearchParams['mode']
-
 export type SearchCursor = { chunk_index?: number; message_id?: number }
 
-export type SearchResult = {
+// A result is its Scored breakdown plus what it is displayed with. Every field
+// after `snippet` up to `tags` is read off the breakdown, never set beside it.
+export type SearchResult = Omit<Scored, 'sessionId'> & {
   session_id: number
   project_name: string
   project_path: string
@@ -147,7 +159,6 @@ export type SearchResult = {
   title: string | null
   title_source: TitleSource
   date: Date
-  score: number
   matched_tier: MatchedTier
   snippet: string | null
   cursor?: SearchCursor
@@ -159,21 +170,38 @@ export type SearchResult = {
   // was off (includeNoise, includeAutomated, or tags:["useless"]), nothing
   // counts as noise, or the session has no summary vector yet -- which is a
   // different answer from "scored and found clean".
-  noise_damping?: number | null
+  noise_damping: number | null
 }
 
-// A session can be hit by several arms; we keep the first (best-ranked) hit's
-// tier + cursor + the raw text its snippet is built from, plus an optional
-// ts_headline window when query terms ran in the text arm.
-type Hit = {
-  result: SearchResult
-  projectId: number
-  rawSnippet: string | null
+// The session columns a result is displayed from. Every arm's row carries
+// them, and they are the same whichever arm a session came from.
+type SessionFields = {
+  id: number
+  title: string | null
+  summary: string | null
+  project_name: string
+  project_path: string
+  source_name: string
+  data_class: string
+  started_at: Date
+  ended_at: Date | null
+  project_id: number
+}
+
+// One session as one arm found it, in that arm's rank order. `text` is what a
+// snippet is cut from when this hit is the credited one; `headline` is the
+// full-text arm's query-highlighted window.
+type ArmHit = { session: SessionFields; evidence: Evidence; text: string | null; headline: string | null }
+
+type ArmRun = { arm: Arm; hits: ArmHit[] }
+
+// Everything the arms found about one session, before scoring.
+type Candidate = {
+  session: SessionFields
+  evidence: EvidenceList
+  texts: Partial<Record<Arm, string | null>>
   headline: string | null
 }
-
-// One semantic tier's hits in its own rank order, before any are claimed.
-type ArmHits = { ranked: RankedList; claims: Omit<Hit, 'headline'>[] }
 
 const parseWeightedIds = (params: string[]): WeightedId[] =>
   params
@@ -192,8 +220,8 @@ const parseWeightedIds = (params: string[]): WeightedId[] =>
 // interactive client: one attempt, seconds not minutes, and no waiting out a
 // GPU-gate cooldown. When that fails the semantic arms are skipped and the
 // caller is told the results are full-text only — see `degraded` below.
-const getQueryEmbedding = async (text: string) => {
-  const response = await getInteractiveOllamaClient().embed({
+const getQueryEmbedding = async (text: string, signal: AbortSignal) => {
+  const response = await getInteractiveOllamaClient(signal).embed({
     model: config.embeddings.model,
     input: text,
   })
@@ -201,6 +229,7 @@ const getQueryEmbedding = async (text: string) => {
 }
 
 const composeQueryVector = async (
+  signal: AbortSignal,
   queryText: string | undefined,
   negativeQuery: string | undefined,
   likeSessionCentroids: ResolvedCentroid[] = [],
@@ -208,9 +237,9 @@ const composeQueryVector = async (
   likeProjectCentroids: ResolvedCentroid[] = [],
   unlikeProjectCentroids: ResolvedCentroid[] = []
 ) => {
-  let vec = queryText ? await getQueryEmbedding(queryText) : new Array(1024).fill(0)
+  let vec = queryText ? await getQueryEmbedding(queryText, signal) : new Array(1024).fill(0)
 
-  if (negativeQuery) vec = subtractVectors(vec, await getQueryEmbedding(negativeQuery))
+  if (negativeQuery) vec = subtractVectors(vec, await getQueryEmbedding(negativeQuery, signal))
 
   for (const { centroid, weight } of likeSessionCentroids)
     vec = addVectors(vec, scaleVector(centroid, weight))
@@ -298,19 +327,9 @@ export const findProjectsByPath = async (cwd: string) => {
 
 const CURRENT_SNAPSHOT = 'EXISTS (SELECT 1 FROM ingest_heads ih WHERE ih.current_session_id = s.id)'
 
-type SessionRow = {
+type SessionRow = SessionFields & {
   is_current_snapshot?: boolean
-  id: number
-  title: string | null
-  summary: string | null
-  project_name: string
-  project_path: string
-  source_name: string
-  data_class: string
-  started_at: Date
-  ended_at: Date | null
   message_count: number
-  project_id: number
 }
 
 // Automated sessions are excluded unless explicitly opted in via includeAutomated.
@@ -383,6 +402,88 @@ const getSessionsByChunkIds = (chunkIds: number[], includeAutomated: boolean) =>
     (row) => row.chunk_id
   )
 
+// How each vector tier names its hits, finds their rows, and reads evidence
+// and snippet text off a row.
+type VectorTier<R extends SessionRow> = {
+  arm: Exclude<Arm, 'lexical'>
+  collection: () => string
+  idOf: (vectorId: string) => number
+  hydrate: (ids: number[], includeAutomated: boolean) => Promise<Map<string, R>>
+  evidence: (row: R, rank: number, cosine: number) => Evidence
+  text: (row: R) => string | null
+  // The tag filter can hide one message without hiding its session.
+  messageIdOf?: (row: R) => number
+}
+
+const SESSION_TIER: VectorTier<SessionRow> = {
+  arm: 'session',
+  collection: () => config.chroma.collections.sessions,
+  idOf: sessionIdFromVectorId,
+  hydrate: getSessionsByIds,
+  evidence: (_row, rank, cosine) => ({ arm: 'session', rank, cosine }),
+  text: (row) => row.summary,
+}
+
+const CHUNK_TIER: VectorTier<ChunkAnchoredRow> = {
+  arm: 'chunk',
+  collection: () => config.chroma.collections.chunks,
+  idOf: (id) => parseInt(id.replace('chunk-', '')),
+  hydrate: getSessionsByChunkIds,
+  evidence: (row, rank, cosine) => ({ arm: 'chunk', rank, cosine, chunkIndex: row.chunk_index }),
+  text: (row) => row.chunk_summary,
+}
+
+const MESSAGE_TIER: VectorTier<MessageAnchoredRow> = {
+  arm: 'message',
+  collection: () => config.chroma.collections.messages,
+  idOf: (id) => parseInt(id.replace('msg-', '')),
+  hydrate: getSessionsByMessageIds,
+  evidence: (row, rank, cosine) => ({ arm: 'message', rank, cosine, messageId: row.message_id }),
+  text: (row) => row.content_text,
+  messageIdOf: (row) => row.message_id,
+}
+
+type FullTextRow = Omit<SessionFields, 'id'> & {
+  session_id: number
+  message_id: number
+  message_count: number
+  rank: number
+  headline: string
+}
+
+// How many hits each arm asks for. Chroma knows nothing about data classes, so
+// an active class filter can starve the semantic arms (~70% of sessions may be
+// filtered out after the fetch); the limit-relative pools over-fetch harder
+// when a filter is on.
+const candidatePool = (arm: Arm, limit: number, classFiltered: boolean) => {
+  if (arm === 'lexical') return limit * 2
+  return limit * (classFiltered ? 5 : arm === 'session' ? 2 : 3)
+}
+
+// One candidate per session, in order of first appearance across the arms in
+// ARMS order. That order is the tie-break among equal scores, as it has always
+// been, so it must not depend on which arm finished first.
+const collect = (runs: ArmRun[]): Map<number, Candidate> => {
+  const candidates = new Map<number, Candidate>()
+  for (const run of runs)
+    for (const hit of run.hits) {
+      const known = candidates.get(hit.session.id)
+      if (!known) {
+        candidates.set(hit.session.id, {
+          session: hit.session,
+          evidence: [hit.evidence],
+          texts: { [run.arm]: hit.text },
+          headline: hit.headline,
+        })
+        continue
+      }
+      known.evidence.push(hit.evidence)
+      known.texts[run.arm] = hit.text
+      known.headline ??= hit.headline
+    }
+  return candidates
+}
+
 const resolveCentroids = async (table: 'sessions' | 'projects', weightedIds: WeightedId[]) => {
   if (weightedIds.length === 0) return []
   const resolved: ResolvedCentroid[] = []
@@ -409,18 +510,37 @@ const resolveTitleFields = (row: { title: string | null; summary: string | null 
   return { title, title_source: titleSource }
 }
 
-const baseResult = (s: SessionRow, score: number, tier: MatchedTier): SearchResult => ({
-  session_id: s.id,
-  project_name: s.project_name,
-  project_path: s.project_path,
-  source: s.source_name,
-  data_class: s.data_class,
-  ...resolveTitleFields(s),
-  date: lastActivity(s),
-  score,
-  matched_tier: tier,
-  snippet: null,
-})
+// The credited evidence decides where a result points: its tier and cursor,
+// and which arm's text the snippet is cut from. A full-text match is a message.
+const TIER: Record<Arm, MatchedTier> = { session: 'session', chunk: 'chunk', message: 'message', lexical: 'message' }
+
+const cursorOf = (evidence: Evidence): SearchCursor | undefined => {
+  if (evidence.arm === 'chunk') return { chunk_index: evidence.chunkIndex }
+  if (evidence.arm === 'message' || evidence.arm === 'lexical') return { message_id: evidence.messageId }
+  return undefined
+}
+
+const toSearchResult = ({ session, texts, headline }: Candidate, { sessionId: _, ...scored }: Scored): SearchResult => {
+  const [credited] = scored.evidence
+  const cursor = cursorOf(credited)
+  const noise = scored.adjustments.find((a) => a.kind === 'noise')
+  return {
+    session_id: session.id,
+    project_name: session.project_name,
+    project_path: session.project_path,
+    source: session.source_name,
+    data_class: session.data_class,
+    ...resolveTitleFields(session),
+    date: lastActivity(session),
+    matched_tier: TIER[credited.arm],
+    // The full-text headline wins whenever that arm matched, because it is the
+    // window that shows the query's words.
+    snippet: buildSnippet(texts[credited.arm] ?? null, headline),
+    ...(cursor ? { cursor } : {}),
+    noise_damping: noise?.kind === 'noise' ? noise.factor : null,
+    ...scored,
+  }
+}
 
 // `messageId` is the message this hit is anchored to, when there is one. It
 // only matters to the tag filter, which can hide an individual message without
@@ -544,10 +664,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
   const wantsNoisePenalty =
     vectorsOn &&
     params.includeNoise !== true && !tagFilter.includeTags.includes(USELESS_TAG) && !includeAutomated
-  // Chroma knows nothing about data classes, so an active class filter can
-  // starve the semantic arms (~70% of sessions may be filtered out after the
-  // fetch). Over-fetch harder when a filter is on to compensate.
-  const overFetch = dataClasses ? 5 : null
+  const poolFor = (arm: Arm) => candidatePool(arm, limit, dataClasses !== null)
 
   const [likeSessionCentroids, unlikeSessionCentroids, likeProjectCentroids, unlikeProjectCentroids] =
     await Promise.all([
@@ -557,90 +674,33 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       resolveCentroids('projects', params.unlikeProject ? parseWeightedIds(params.unlikeProject) : []),
     ])
 
-  const hitBySession = new Map<number, Hit>()
-  const inProject = new Set<number>()
-  const rankedLists: RankedList[] = []
   let degraded: SearchDegradation | null = null
+  // A failed full-text arm fails the whole search at once, so the semantic
+  // arms still running are abandoned: the query embedding gives up its Ollama
+  // slot, and a tier whose Chroma answer arrives afterwards skips hydration.
+  const abandon = new AbortController()
 
-  // First arm to claim a session wins its tier/cursor/snippet source, and arms
-  // claim in a fixed order -- session → chunk → message → fts -- whichever
-  // finished first, so the answer never depends on timing. Fusion across all
-  // arms decides rank afterwards.
-  const record = (
-    result: SearchResult,
-    projectId: number,
-    rawSnippet: string | null,
-    headline: string | null
-  ) => {
-    if (projectIds.includes(projectId)) inProject.add(result.session_id)
-    if (!hitBySession.has(result.session_id))
-      hitBySession.set(result.session_id, { result, projectId, rawSnippet, headline })
-  }
-
-  // Each tier reads only its own hits and returns what it would claim, so the
-  // three run at once and are claimed afterwards.
-  const sessionTier = async (embedding: number[]): Promise<ArmHits | null> => {
-    const hits = await querySimilar(config.chroma.collections.sessions, embedding, limit * (overFetch ?? 2))
-    if (!hits.ids[0]) return null
-    const arm: ArmHits = { ranked: [], claims: [] }
-    const sessionIds = hits.ids[0].map(sessionIdFromVectorId)
-    const sessions = await getSessionsByIds(sessionIds, includeAutomated)
-    for (let i = 0; i < sessionIds.length; i++) {
-      const score = 1 - (hits.distances?.[0]?.[i] ?? 1)
-      const session = sessions.get(String(sessionIds[i]))
-      if (!session) continue
-      if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
-      arm.claims.push({ result: baseResult(session, score, 'session'), projectId: session.project_id, rawSnippet: session.summary })
-      arm.ranked.push(session.id)
-    }
-    return arm
-  }
-
-  const chunkTier = async (embedding: number[]): Promise<ArmHits | null> => {
-    const hits = await querySimilar(config.chroma.collections.chunks, embedding, limit * (overFetch ?? 3))
-    if (!hits.ids[0]) return null
-    const arm: ArmHits = { ranked: [], claims: [] }
+  // Each tier reads only its own hits, so the three run at once.
+  const vectorTier = async <R extends SessionRow>(tier: VectorTier<R>, embedding: number[]): Promise<ArmRun | null> => {
+    const found = await querySimilar(tier.collection(), embedding, poolFor(tier.arm))
+    abandon.signal.throwIfAborted()
+    if (!found.ids[0]) return null
+    const ids = found.ids[0].map(tier.idOf)
+    const rows = await tier.hydrate(ids, includeAutomated)
+    // Chroma answers nearest first, so a session's first appearance is its
+    // best hit in this tier.
     const seen = new Set<number>()
-    const chunkIds = hits.ids[0].map((id) => parseInt(id.replace('chunk-', '')))
-    const chunks = await getSessionsByChunkIds(chunkIds, includeAutomated)
-    for (let i = 0; i < chunkIds.length; i++) {
-      const score = 1 - (hits.distances?.[0]?.[i] ?? 1)
-      const session = chunks.get(String(chunkIds[i]))
-      if (!session) continue
-      if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter)) continue
-      if (seen.has(session.id)) continue
-      seen.add(session.id)
-      const result = baseResult(session, score, 'chunk')
-      result.cursor = { chunk_index: session.chunk_index }
-      arm.claims.push({ result, projectId: session.project_id, rawSnippet: session.chunk_summary })
-      arm.ranked.push(session.id)
+    const hits: ArmHit[] = []
+    for (let i = 0; i < ids.length; i++) {
+      const row = rows.get(String(ids[i]))
+      if (!row) continue
+      if (!passesFilters(row, params, sinceDate, projectIds, dataClasses, tagFilter, tier.messageIdOf?.(row))) continue
+      if (seen.has(row.id)) continue
+      seen.add(row.id)
+      const cosine = 1 - (found.distances?.[0]?.[i] ?? 1)
+      hits.push({ session: row, evidence: tier.evidence(row, hits.length + 1, cosine), text: tier.text(row), headline: null })
     }
-    return arm
-  }
-
-  const messageTier = async (embedding: number[]): Promise<ArmHits | null> => {
-    const hits = await querySimilar(config.chroma.collections.messages, embedding, limit * (overFetch ?? 3))
-    if (!hits.ids[0]) return null
-    // Chroma returns messages in distance order; first appearance of a
-    // session is its best-ranked message, so dedup preserves rank order.
-    const arm: ArmHits = { ranked: [], claims: [] }
-    const seen = new Set<number>()
-    const messageIds = hits.ids[0].map((id) => parseInt(id.replace('msg-', '')))
-    const messages = await getSessionsByMessageIds(messageIds, includeAutomated)
-    for (let i = 0; i < messageIds.length; i++) {
-      const score = 1 - (hits.distances?.[0]?.[i] ?? 1)
-      const session = messages.get(String(messageIds[i]))
-      if (!session) continue
-      if (!passesFilters(session, params, sinceDate, projectIds, dataClasses, tagFilter, session.message_id))
-        continue
-      if (seen.has(session.id)) continue
-      seen.add(session.id)
-      const result = baseResult(session, score, 'message')
-      result.cursor = { message_id: session.message_id }
-      arm.claims.push({ result, projectId: session.project_id, rawSnippet: session.content_text })
-      arm.ranked.push(session.id)
-    }
-    return arm
+    return { arm: tier.arm, hits }
   }
 
   const armMs: ArmMs = { semanticMs: null, embedMs: null, sessionMs: null, chunkMs: null, messageMs: null, fullTextMs: null }
@@ -653,11 +713,12 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     }
   }
 
-  // Settled in claim order. A failed embedding is the one entry, since no tier
+  // Settled in arm order. A failed embedding is the one entry, since no tier
   // can run without the vector; this never rejects.
-  const semanticArms = async (): Promise<PromiseSettledResult<ArmHits | null>[]> => {
+  const semanticArms = async (): Promise<PromiseSettledResult<ArmRun | null>[]> => {
     try {
       const embedding = await timed('embedMs', () => composeQueryVector(
+        abandon.signal,
         params.query,
         params.negativeQuery,
         likeSessionCentroids,
@@ -666,16 +727,16 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
         unlikeProjectCentroids
       ))
       return await Promise.allSettled([
-        timed('sessionMs', () => sessionTier(embedding)),
-        timed('chunkMs', () => chunkTier(embedding)),
-        timed('messageMs', () => messageTier(embedding)),
+        timed('sessionMs', () => vectorTier(SESSION_TIER, embedding)),
+        timed('chunkMs', () => vectorTier(CHUNK_TIER, embedding)),
+        timed('messageMs', () => vectorTier(MESSAGE_TIER, embedding)),
       ])
     } catch (reason) {
       return [{ status: 'rejected', reason }]
     }
   }
 
-  const fullTextRows = async () => {
+  const fullTextRows = async (): Promise<ArmRun> => {
     const conditions = [
       `to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $1)`,
       `s.deleted_at IS NULL`,
@@ -721,25 +782,10 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       values.push([...tagFilter.excludedMessages])
     }
 
-    values.push(limit * 2)
+    values.push(poolFor('lexical'))
     const limitParam = `$${nextParam}`
 
-    const result = await query<{
-      session_id: number
-      message_id: number
-      title: string | null
-      summary: string | null
-      project_name: string
-      project_path: string
-      source_name: string
-      data_class: string
-      started_at: Date
-      ended_at: Date | null
-      message_count: number
-      rank: number
-      project_id: number
-      headline: string
-    }>(
+    const result = await query<FullTextRow>(
       `WITH ranked_messages AS (
         SELECT DISTINCT ON (m.session_id)
           m.session_id,
@@ -751,7 +797,9 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
         JOIN projects p ON s.project_id = p.id
         JOIN sources src ON p.source_id = src.id
         WHERE ${conditions.join('\n          AND ')}
-        ORDER BY m.session_id, rank DESC
+        -- A tie inside a session would otherwise let the plan pick which
+        -- message the cursor and snippet point at. The earliest one wins.
+        ORDER BY m.session_id, rank DESC, m.id
       )
       SELECT rm.session_id, rm.message_id, s.title, s.summary, p.name as project_name, p.path as project_path,
              src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
@@ -769,18 +817,33 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       LIMIT ${limitParam}`,
       values
     )
-    return result.rows
+    // Rows arrive one per session, best first: their order is this arm's ranking.
+    const hits = result.rows.map(
+      (row, i): ArmHit => ({
+        session: { ...row, id: row.session_id },
+        evidence: { arm: 'lexical', rank: i + 1, tsRank: row.rank, messageId: row.message_id },
+        text: null,
+        headline: row.headline,
+      })
+    )
+    return { arm: 'lexical', hits }
   }
 
   const wantsSemantic = mode === 'semantic' || mode === 'hybrid'
   if (wantsSemantic && !vectorsOn) degraded = SWITCHED_OFF
-  const [semantic, ftsRows] = await Promise.all([
+  const [semantic, fullText] = await Promise.all([
     wantsSemantic && vectorsOn ? timed('semanticMs', semanticArms) : [],
-    (mode === 'text' || mode === 'hybrid') && params.query ? timed('fullTextMs', fullTextRows) : null,
+    (mode === 'text' || mode === 'hybrid') && params.query
+      ? timed('fullTextMs', fullTextRows).catch((error: unknown) => {
+          abandon.abort(error)
+          throw error
+        })
+      : null,
   ])
 
   // A failed tier ends the semantic block there and keeps the tiers before
   // it, as when they ran one after another.
+  const runs: ArmRun[] = []
   for (const arm of semantic) {
     if (arm.status === 'rejected') {
       // Reached in seconds now rather than after ~120s of retrying a shut gate:
@@ -791,58 +854,41 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       degraded = { semantic: false, cause: 'unavailable', reason }
       break
     }
-    if (!arm.value) continue
-    for (const claim of arm.value.claims) record(claim.result, claim.projectId, claim.rawSnippet, null)
-    rankedLists.push(arm.value.ranked)
+    if (arm.value) runs.push(arm.value)
   }
+  if (fullText) runs.push(fullText)
 
-  if (ftsRows) {
-    // Rows already ordered by rank DESC — their order is the FTS ranking.
-    const ftsRanked: RankedList = []
-    for (const row of ftsRows) {
-      const result: SearchResult = {
-        session_id: row.session_id,
-        project_name: row.project_name,
-        project_path: row.project_path,
-        source: row.source_name,
-        data_class: row.data_class,
-        ...resolveTitleFields(row),
-        date: lastActivity(row),
-        score: row.rank,
-        matched_tier: 'message',
-        snippet: null,
-        cursor: { message_id: row.message_id },
-      }
-      // FTS arm has a real ts_headline window; if this session was already
-      // claimed by a semantic arm, upgrade its snippet to the highlighted one.
-      const existing = hitBySession.get(row.session_id)
-      if (existing) existing.headline = row.headline
-      record(result, row.project_id, null, row.headline)
-      ftsRanked.push(row.session_id)
-    }
-    rankedLists.push(ftsRanked)
-  }
-
-  const fused = fuseRanks(rankedLists)
+  const candidates = collect(runs)
+  const fused = fuseRanks(runs.map((run) => run.hits.map((hit) => hit.session.id)))
 
   // Fetched once per search, not once per hit: building the model re-reads
   // the whole noise corpus, and it is cached in noise.ts across searches. An
   // empty model (nothing counts as noise yet, or the corpus is unreadable)
   // damps nothing, so this whole block is a no-op on a corpus nobody judged.
   const noise: NoiseModel = wantsNoisePenalty ? await getNoiseModel() : NO_NOISE
-  const hitVectors = noise.centroids.length > 0 ? await scoringVectors([...hitBySession.keys()]) : new Map()
+  const hitVectors = noise.centroids.length > 0 ? await scoringVectors([...candidates.keys()]) : new Map()
 
-  const results = Array.from(hitBySession.values()).map((hit) => {
-    const fusedScore = fused.get(hit.result.session_id) ?? 0
-    // Damping is applied to the retrieval score BEFORE the project boost is
-    // added. A hit in the current project stays surfaced even if it looks a
-    // little like noise -- "in the project I am standing in" is evidence the
-    // penalty has no business overruling -- while noise from elsewhere is
-    // pushed down by the full factor.
-    const vector = hitVectors.get(hit.result.session_id)
-    const damping = vector ? noiseDamping(vector, noise) : null
-    const score = fusedScore * (damping ?? 1) + (inProject.has(hit.result.session_id) ? PROJECT_BOOST : 0)
-    return { ...hit.result, score, noise_damping: damping, snippet: buildSnippet(hit.rawSnippet, hit.headline) }
+  const results = [...candidates.values()].map((candidate) => {
+    const sessionId = candidate.session.id
+    const vector = hitVectors.get(sessionId)
+    const similarity = vector ? nearestSimilarity(vector, noise.centroids) : null
+    // Damping comes before the project boost. A hit in the current project
+    // stays surfaced even if it looks a little like noise -- "in the project I
+    // am standing in" is evidence the penalty has no business overruling --
+    // while noise from elsewhere is pushed down by the full factor.
+    const adjustments: Adjustment[] = [
+      ...(similarity === null ? [] : [{ kind: 'noise' as const, similarity, factor: dampingAt(similarity, noise.floor) }]),
+      ...(projectIds.includes(candidate.session.project_id) ? [{ kind: 'project' as const, boost: PROJECT_BOOST }] : []),
+    ]
+    const base = fused.get(sessionId) ?? 0
+    const [best, ...rest] = [...candidate.evidence].sort(byStrength)
+    return toSearchResult(candidate, {
+      sessionId,
+      evidence: [best, ...rest],
+      base,
+      adjustments,
+      score: scoreOf(base, adjustments),
+    })
   })
   results.sort((a, b) => b.score - a.score)
 
@@ -850,12 +896,12 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
   // one small query rather than one per discarded hit.
   const page = results.slice(0, limit)
   const tagsBySession = await getSessionTags(page.map((r) => r.session_id))
-  for (const result of page) {
+  const tagged = page.map((result) => {
     const tags = tagsBySession.get(result.session_id)
-    if (tags && tags.length > 0) result.tags = tags
-  }
+    return tags && tags.length > 0 ? { ...result, tags } : result
+  })
 
-  return { results: page, degraded, projectIds, armMs }
+  return { results: tagged, degraded, projectIds, armMs }
 }
 
 // The plain form, for callers that have nothing useful to do with the
@@ -888,17 +934,24 @@ const noiseNote = (results: SearchResult[]) => {
 NEVER report a session just because it is off-topic for this query: a report teaches search that sessions like it are noise and demotes real work that resembles it.`
 }
 
+export type FormatOptions = {
+  degraded?: SearchDegradation | null
+  // The search's list handle, shown on the first line so a follow-up can pass it.
+  list?: string | null
+  // Append each result's score breakdown: the fused base, every adjustment,
+  // and the full-text rank value.
+  explain?: boolean
+}
+
 export const formatSearchResults = (
   results: SearchResult[],
-  projectIds: number[] = [],
-  degraded: SearchDegradation | null = null,
-  list: string | null = null
+  { degraded = null, list = null, explain = false }: FormatOptions = {}
 ) => {
   if (results.length === 0) return `No matching conversations found.${degradedNote(degraded)}`
 
   const output = results
     .map((r, i) => {
-      const projectLabel = projectIds.includes(r.session_id) ? ' [CURRENT PROJECT]' : ''
+      const projectLabel = r.adjustments.some((a) => a.kind === 'project') ? ' [CURRENT PROJECT]' : ''
       assert(r.date, `Missing date for session ${r.session_id}`)
       const cursor = r.cursor?.chunk_index != null
         ? `\n   Cursor: chunk ${r.cursor.chunk_index}`
@@ -913,11 +966,12 @@ export const formatSearchResults = (
       // it did before tags existed.
       const tags = r.tags?.length ? `\n   Tags: ${r.tags.join(', ')}` : ''
       const noise = r.noise_damping != null && r.noise_damping < 1 ? `\n   Noise: ×${r.noise_damping.toFixed(3)}` : ''
+      const breakdown = explain ? `\n   Why: ${formatBreakdown(r)}` : ''
       return `${i + 1}. **${heading}**${projectLabel}
    Session ID: ${r.session_id}
    Project: ${r.project_name} (${r.source}, ${r.data_class})
    Date: ${r.date.toISOString().split('T')[0]}
-   Score: ${r.score.toFixed(3)} | Matched: ${r.matched_tier}${cursor}${tags}${noise}
+   Score: ${r.score.toFixed(3)} | Matched: ${r.matched_tier} (${formatEvidence(r.evidence)})${cursor}${tags}${noise}${breakdown}
    ${r.snippet ?? '(no snippet)'}`
     })
     .join('\n\n')

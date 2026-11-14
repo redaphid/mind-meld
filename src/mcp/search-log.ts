@@ -10,6 +10,7 @@ import { createHash, randomInt } from 'node:crypto'
 import { query } from '../db/postgres.js'
 import { config } from '../config.js'
 import type { ArmMs, SearchDegradation, SearchResult } from './search.js'
+import { deltasOf, type Adjustment, type Arm, type Evidence } from './evidence.js'
 
 export type Transport = 'mcp-http' | 'mcp-stdio' | 'rest'
 export type Caller = { key: string; transport: Transport; client: string }
@@ -72,6 +73,11 @@ export type FollowUpEvent = {
 
 export type LogEvent = SearchEvent | FollowUpEvent
 
+// Evidence is kept short and without text: `ev` is each arm's rank and raw
+// similarity, best first, `adj` what each adjustment moved the score by. With
+// `base` that is enough to replay fusion and relevance experiments offline.
+type LoggedEvidence = { arm: Exclude<Arm, 'lexical'>; rank: number; cosine: number } | { arm: 'lexical'; rank: number; tsRank: number }
+
 export type LoggedHit = {
   s: number
   rank: number
@@ -79,17 +85,29 @@ export type LoggedHit = {
   tier: SearchResult['matched_tier']
   damping: number | null
   cursor?: SearchResult['cursor']
+  base: number
+  ev: LoggedEvidence[]
+  adj: { kind: Adjustment['kind']; delta: number }[]
 }
 
+const loggedEvidence = (e: Evidence): LoggedEvidence =>
+  e.arm === 'lexical' ? { arm: e.arm, rank: e.rank, tsRank: e.tsRank } : { arm: e.arm, rank: e.rank, cosine: e.cosine }
+
 export const toLoggedHits = (results: SearchResult[]): LoggedHit[] =>
-  results.map((r, i) => ({
-    s: r.session_id,
-    rank: i + 1,
-    score: r.score,
-    tier: r.matched_tier,
-    damping: r.noise_damping ?? null,
-    ...(r.cursor ? { cursor: r.cursor } : {}),
-  }))
+  results.map((r, i) => {
+    const deltas = deltasOf(r.base, r.adjustments)
+    return {
+      s: r.session_id,
+      rank: i + 1,
+      score: r.score,
+      tier: r.matched_tier,
+      damping: r.noise_damping ?? null,
+      ...(r.cursor ? { cursor: r.cursor } : {}),
+      base: r.base,
+      ev: r.evidence.map(loggedEvidence),
+      adj: r.adjustments.map((a, j) => ({ kind: a.kind, delta: deltas[j] })),
+    }
+  })
 
 const stableJson = (value: unknown): string =>
   JSON.stringify(value, (_k, v) =>

@@ -31,14 +31,14 @@ afterEach(() => {
 describe("the GPU gate override", () => {
   it("is sent by the interactive client on a query embedding", async () => {
     stubOllama();
-    await getInteractiveOllamaClient().embed({ model: "bge-m3", input: "q" });
+    await getInteractiveOllamaClient(new AbortController().signal).embed({ model: "bge-m3", input: "q" });
     expect(sentHeaders).toHaveLength(1);
     expect(sentHeaders[0].get(GATE_OVERRIDE_HEADER)).toBe("interactive");
   });
 
   it("keeps the headers the Ollama client set itself", async () => {
     stubOllama();
-    await getInteractiveOllamaClient().embed({ model: "bge-m3", input: "q" });
+    await getInteractiveOllamaClient(new AbortController().signal).embed({ model: "bge-m3", input: "q" });
     expect(sentHeaders[0].get("content-type")).toBe("application/json");
   });
 
@@ -122,7 +122,7 @@ describe("a 503 from the gate", () => {
   it("fails the interactive client at once, without a retry", async () => {
     stubRefusingOnce();
     await expect(
-      getInteractiveOllamaClient().embed({ model: "bge-m3", input: "q" }),
+      getInteractiveOllamaClient(new AbortController().signal).embed({ model: "bge-m3", input: "q" }),
     ).rejects.toThrow();
     expect(calls).toBe(1);
   });
