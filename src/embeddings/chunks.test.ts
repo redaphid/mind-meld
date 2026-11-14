@@ -80,3 +80,54 @@ describe("persistSessionChunks on a long session's small remainder", () => {
     expect(last).not.toContain("refactored the embedding pipeline");
   });
 });
+
+describe("persistSessionChunks bookkeeping", () => {
+  const big = "x".repeat(CHUNK_SIZE_CHARS - 50);
+  const longSession = [
+    { id: 1, role: "user", content_text: big },
+    { id: 2, role: "assistant", content_text: big },
+  ];
+  const ok = (response: string) =>
+    ({ ok: true, status: 200, json: async () => ({ response, done: true, prompt_eval_count: 100 }) }) as unknown as Response;
+
+  beforeEach(() => {
+    query.mockReset();
+    query.mockImplementation(async (sql: string) =>
+      String(sql).includes("RETURNING id") ? { rows: [{ id: 7 }] } : { rows: [] },
+    );
+    vi.stubGlobal("fetch", vi.fn(async () => ok("A real summary of what this chunk did. ".repeat(5))));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("builds no middle layer for a session that fits one chunk", async () => {
+    expect(await persistSessionChunks(1, [])).toBeNull();
+    expect(await persistSessionChunks(1, [{ id: 1, role: "user", content_text: "short" }])).toBeNull();
+    expect(await persistSessionChunks(1, [{ id: 1, role: "user", content_text: "z".repeat(20000) }])).toBeNull();
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("replaces a session's earlier chunks in Chroma and Postgres", async () => {
+    const { deleteByIds } = await import("../db/chroma.js");
+    query.mockImplementation(async (sql: string) => {
+      if (String(sql).startsWith("SELECT id FROM session_chunks")) return { rows: [{ id: 3 }, { id: 4 }] };
+      return String(sql).includes("RETURNING id") ? { rows: [{ id: 7 }] } : { rows: [] };
+    });
+    await persistSessionChunks(5, longSession);
+    expect(vi.mocked(deleteByIds)).toHaveBeenCalledWith(expect.any(String), ["chunk-3", "chunk-4"]);
+    expect(query.mock.calls.some(([sql]) => String(sql).startsWith("DELETE FROM session_chunks"))).toBe(true);
+  });
+
+  it("keeps the row but records no vector when embedding fails", async () => {
+    const { generateEmbeddings } = await import("./ollama.js");
+    vi.mocked(generateEmbeddings).mockResolvedValue([null]);
+    const persisted = await persistSessionChunks(6, longSession);
+    expect(persisted).toHaveLength(2);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO embeddings"))).toBe(false);
+  });
+
+  it("skips a chunk whose summary fails instead of storing anything for it", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(ok("<done>COMPLETE</done>"));
+    const persisted = await persistSessionChunks(8, longSession);
+    expect(persisted).toHaveLength(1);
+  });
+});
