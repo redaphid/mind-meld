@@ -589,7 +589,35 @@ push; and a tag pushed by `release.yml` using `GITHUB_TOKEN` cannot trigger
 another workflow. That is why GHCR has no version tag newer than `1.19.0`
 despite four releases. `latest` and `main` are unaffected and are what compose
 pulls.
-4. On the host: `docker compose pull && docker compose up -d`. Migrations auto-apply on `mcp` startup (`src/db/migrations.ts`).
+4. On the host: `scripts/host-autoupdate.sh run`, from a scheduler every few
+   minutes. Migrations auto-apply on `mcp` startup (`src/db/migrations.ts`).
+   `scripts/host-autoupdate.sh status` answers "what commit is this host
+   running, and is it the latest main".
+
+### The host updater (`scripts/host-autoupdate.sh`)
+
+Each run fast-forwards the checkout (only when no tracked file is modified),
+pulls the app images, and lets compose's dry run name the containers whose
+image or config changed; nothing else is touched, and it never runs `down` or
+removes a volume. Three rules are deliberate:
+
+- **Only a complete set deploys.** A publish pushes each image when its own job
+  finishes, so a pull can land mid-publish. The run waits until every app image
+  carries the same revision label, and refuses one older than what runs.
+- **A busy container cannot veto its own replacement.** It waits for idle CPU
+  at most `AUTOUPDATE_IDLE_WAIT_SECONDS`, then replaces anyway. An idle gate
+  that a fault can hold shut keeps a broken container on its old image forever.
+- **Staleness is the alarm, not the run's exit code.** When main has been ahead
+  of the running revision longer than `AUTOUPDATE_STALE_AFTER_MINUTES` (time
+  measured from when the change landed on main), it pushes to ntfy, whatever
+  the cause: a failed publish, a dirty checkout, a paused updater. A failed
+  update or health check is pushed on its own, since it can leave the host on
+  main's revision and still broken.
+
+To roll back: `scripts/host-autoupdate.sh pause`, then
+`docker tag <image>:prev <image>:latest` and `docker compose up -d --no-deps
+<service>` (each replaced image is tagged `:prev` first). `resume` when main is
+fixed; until then the staleness alert keeps saying the host is behind.
 
 `/deploy` (`.claude/commands/deploy.md`) automates the push → tag → CI-watch → pull → restart, but it reads the existing version and does **not** bump it — edit `package.json` first.
 
