@@ -27,12 +27,20 @@ Each query belongs to one stratum:
 label it `biasedAgainst: "text"`, and the `headline` group (natural, keyword,
 crossclass, real) leaves it out.
 
+`steering` runs each item three times, 20 deep: plain, with the toward
+examples, and with the away examples. It reports the gold recall@20 and
+nDCG@10 the toward examples add, the share of off-target results the away
+examples remove, and collateral: the share of relevant base results (grade 2
+or 3) the away search loses. Examples are removed from every list first.
+
 Per stratum, with 95% percentile-bootstrap intervals over queries:
 nDCG@10, gold MRR, gold recall@10, mean grade of the top 5, junk@5 (share of
 the top 5 graded 0), no-answer false-positive rate (any result on a
-`noanswer` query), and latency p50/p90 over non-degraded runs. The `headline`
-group is also split by whether the gold session's summary is a generated one
-or raw transcript text. `bench:compare` reports b minus a for every metric as
+`noanswer` query), and latency p50/p90 over non-degraded runs. Every stratum and the `headline`
+group are also split by the gold session's stored summary: raw transcript
+text, a generated summary, or a generated summary that degenerated into a
+repetition loop. Loops are measured outside the harness; list their session
+ids, one per line, in `<bench>/looped-session-ids.txt`. `bench:compare` reports b minus a for every metric as
 a paired bootstrap (10,000 resamples, fixed seed) and whether its interval
 excludes 0.
 
@@ -45,6 +53,8 @@ told which system returned which or which is gold. Judgments are an
 append-only cache keyed by (query, session, prompt version): a pair is judged
 once, so a new system only costs the pairs it newly puts in a top ten. A
 result nobody judged counts as grade 0, and reports say how many there were.
+If the judge model refuses a batch, its pairs are judged one at a time, and a
+pair it still refuses stays unjudged rather than ending the run.
 
 Judge calls go through `claude -p` with no session persistence, no settings,
 hooks, plugins, MCP servers or tools, a replacement system prompt and an empty
