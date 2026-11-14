@@ -6,6 +6,7 @@ import { generatePendingEmbeddings, updateAggregateEmbeddings, AGGREGATE_BATCH_S
 import { ensureEmbeddingModel } from '../embeddings/ollama.js';
 import { ensureSummarizeModel } from '../embeddings/summarize.js';
 import { query } from '../db/postgres.js';
+import { flagAutomated } from '../embeddings/automated-flags.js';
 import { aiHold, AI_HOLD_NOTICE, type AiHold } from './sync-control.js';
 
 const MAX_AGGREGATE_DRAIN_MS = 50 * 60 * 1000;
@@ -45,6 +46,9 @@ export interface FullSyncResult {
     drained: number;
     quarantined: number;
   };
+  // Sessions the classifier marks automated that were not flagged yet. Non-zero
+  // after a pattern is added; flags are never cleared here (#177).
+  automatedFlagsSet: number;
   embeddings: {
     messagesEmbedded: number;
     sessionsUpdated: number;
@@ -87,6 +91,7 @@ export async function runFullSync(options?: {
     history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
     memories: emptyMemoryStats(),
     spool: { configured: false, drained: 0, quarantined: 0 },
+    automatedFlagsSet: 0,
     embeddings: { messagesEmbedded: 0, sessionsUpdated: 0 },
     held: null,
     errors: [],
@@ -187,6 +192,22 @@ export async function runFullSync(options?: {
     }
   } catch (e) {
     const error = `Ingest spool drain failed: ${e}`;
+    console.error(error);
+    errors.push(error);
+  }
+
+  // Writers flag the sessions they write, but a pattern configured since never
+  // reaches sessions whose files are done changing (#177). This only sets
+  // flags, so a worker missing MINDMELD_AUTOMATED_PREFIXES cannot undo what a
+  // configured one set. Before the embedding phase, so a session flagged here
+  // is not summarized by this run.
+  try {
+    result.automatedFlagsSet = await flagAutomated();
+    if (result.automatedFlagsSet > 0)
+      console.log(`
+--- Flagged ${result.automatedFlagsSet} sessions automated ---`);
+  } catch (e) {
+    const error = `Automated flag check failed: ${e}`;
     console.error(error);
     errors.push(error);
   }

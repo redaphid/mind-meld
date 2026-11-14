@@ -43,6 +43,7 @@ export function buildRunReport(result: FullSyncResult): RunReport {
       `${result.memories.versionsInserted} new version(s) ` +
       `(${result.memories.unchanged} unchanged, ${result.memories.skipped} skipped)`
   );
+  lines.push(`  Automated flags set: ${result.automatedFlagsSet}`);
   lines.push(`  Embeddings: ${result.embeddings.messagesEmbedded} embedded`);
   if (result.spool.configured) {
     lines.push(
