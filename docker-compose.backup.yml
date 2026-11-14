@@ -2,8 +2,9 @@
 #
 # Its own compose project on purpose: starting it never creates, recreates or
 # restarts the database containers, whichever project name they were created
-# under. It reaches them by container name and borrows chroma's data volume
-# read-only from the running container.
+# under. It reaches postgres by container name and mounts chroma's data volume
+# read-only by name. (`volumes_from: container:...:ro` looks equivalent, but
+# compose drops the :ro and the volume is mounted writable.)
 #
 #   docker compose -p mindmeld-db-backup -f docker-compose.backup.yml up -d --build
 #
@@ -42,12 +43,18 @@ services:
       NTFY_TOPIC: ${BACKUP_NTFY_TOPIC:-}
       NTFY_USER: ${BACKUP_NTFY_USER:-}
       NTFY_PASS: ${BACKUP_NTFY_PASS:-}
-    volumes_from:
-      - container:${BACKUP_CHROMA_CONTAINER:-mindmeld-chroma}:ro
     volumes:
+      - chroma-data:/data:ro
       - ${MINDMELD_BACKUP_DIR:?set MINDMELD_BACKUP_DIR in .env}:/backup
       # The checkout holding .env and the compose override, read-only.
       - ${MINDMELD_HOST_CONFIG_DIR:-.}:/host-config:ro
+
+volumes:
+  chroma-data:
+    external: true
+    # <compose project of the main stack>_mindmeld-chroma. Set it when that
+    # project is not named `mindmeld` (COMPOSE_PROJECT_NAME in .env).
+    name: ${BACKUP_CHROMA_VOLUME:-mindmeld_mindmeld-chroma}
 
 networks:
   default:

@@ -9,6 +9,7 @@ rebuilding it is expensive (see below).
 # .env
 MINDMELD_BACKUP_DIR=/path/to/synced/mindmeld-backup   # must contain .stfolder (or set BACKUP_REQUIRE_MARKER)
 MINDMELD_HOST_CONFIG_DIR=/path/to/this/checkout        # default: the directory you run compose from
+BACKUP_CHROMA_VOLUME=<project>_mindmeld-chroma         # default: mindmeld_mindmeld-chroma
 
 docker compose -p mindmeld-db-backup -f docker-compose.backup.yml up -d --build
 ```
@@ -19,7 +20,7 @@ the file's `name:`, and without `-p` the sidecar joins the main project, where a
 
 Starting it never touches the database containers: it is its own project, it
 reaches Postgres by container name over `mindmeld-network`, and it mounts
-Chroma's volume read-only from the running `mindmeld-chroma` container.
+Chroma's data volume read-only by name.
 
 ## What a generation holds
 
