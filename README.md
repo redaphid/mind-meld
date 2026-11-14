@@ -179,6 +179,7 @@ the containers.
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `mindmeld` / `mindmeld` / `conversations` | Must match across every machine feeding one index |
 | `CHROMA_HOST` / `CHROMA_PORT` | `localhost` / `8001` | |
 | `MCP_HTTP_PORT` | `3847` | Host port published for the `mcp` container |
+| `MCP_TRANSPORT_IDLE_MINUTES` | `30` | Close MCP HTTP sessions that have sent no request for this many minutes |
 | `MINDMELD_SEMANTIC` | `on` | `off` starts in full-text-only mode: no Ollama/GPU work and no vectors, while ingestion into Postgres continues. A startup state; the dashboard switch (`/api/semantic`) can turn it back on |
 | `OLLAMA_URL` | `http://localhost:11434` | Serves both vectorization (`bge-m3`) and generation (`qwen3`). Flash attention must be off |
 | `OLLAMA_MAX_CONCURRENCY` | `1` | Over an SSH tunnel, concurrent requests each balloon to ~30s. Raise only when Ollama is local |
