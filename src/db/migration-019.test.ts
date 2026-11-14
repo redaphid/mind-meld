@@ -2,67 +2,15 @@
 // live survey found (issue #33), plus proof that the runtime write path needs
 // no caller-side normalization at all.
 //
-// Needs a reachable Postgres (the local dev stack on :5433). It builds a
+// Needs a reachable Postgres: see src/__tests__/scratch-database.ts. It builds a
 // scratch database, applies the real init-db chain, seeds fixtures, runs 019
-// through psql exactly as src/db/migrations.ts does, and asserts. In CI there
-// is no database, so the whole suite skips — the pure normalization logic is
-// covered by src/utils/project-path.test.ts either way.
+// through the migration runner exactly as mcp does at startup, and asserts.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { exec } from 'node:child_process'
-import { promisify } from 'node:util'
-import { readdir } from 'node:fs/promises'
-import { basename, dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { randomBytes } from 'node:crypto'
+import { join } from 'node:path'
 import pg from 'pg'
-import { applyMigration } from './migrations.js'
-import { withMigrationLock } from '../__tests__/pg-migration-lock.js'
-
-const execAsync = promisify(exec)
-const INIT_DB = resolve(dirname(fileURLToPath(import.meta.url)), '../../init-db')
-
-const PG = {
-  host: process.env.POSTGRES_HOST ?? 'localhost',
-  port: parseInt(process.env.POSTGRES_PORT ?? '5433', 10),
-  user: process.env.POSTGRES_USER ?? 'mindmeld',
-  password: process.env.POSTGRES_PASSWORD ?? 'mindmeld',
-}
-const SCRATCH_DB = `mm_test_019_${randomBytes(4).toString('hex')}`
-
-const canReachPostgres = async (): Promise<boolean> => {
-  const client = new pg.Client({ ...PG, database: 'conversations', connectionTimeoutMillis: 1500 })
-  try {
-    await client.connect()
-    return true
-  } catch {
-    return false
-  } finally {
-    await client.end().catch(() => {})
-  }
-}
-
-// A reachable server is not enough: these tests apply SQL through the `psql`
-// BINARY, exactly as src/db/migrations.ts does. Where the database is up but
-// psql is not installed (a Windows dev box, for one), probing only
-// connectivity made the suite hard-fail with `'psql' is not recognized`
-// instead of skipping — which is why "all green" used to be
-// environment-dependent. Probe for both.
-const hasPsqlBinary = async (): Promise<boolean> => {
-  try {
-    await execAsync('psql --version')
-    return true
-  } catch {
-    return false
-  }
-}
-
-const dbAvailable = (await canReachPostgres()) && (await hasPsqlBinary())
-
-// Applied through the runner's own psql invocation, so these tests exercise
-// exactly what mcp runs at startup: ON_ERROR_STOP, one transaction per file.
-const psqlFile = (database: string, file: string) => applyMigration({ ...PG, database }, INIT_DB, basename(file))
-
-let admin: pg.Client
+import { INIT_DB, PG, applyInitDb, createScratchDatabase, dbAvailable, psqlFile } from '../__tests__/scratch-database.js'
+let scratch: Awaited<ReturnType<typeof createScratchDatabase>>
+let SCRATCH_DB: string
 let db: pg.Client
 let sourceId: number
 
@@ -90,16 +38,12 @@ const pathOf = async (externalId: string) => {
 
 beforeAll(async () => {
   if (!dbAvailable) return
-  admin = new pg.Client({ ...PG, database: 'conversations' })
-  await admin.connect()
-  await admin.query(`CREATE DATABASE ${SCRATCH_DB}`)
+  scratch = await createScratchDatabase('mm_test_019')
+  SCRATCH_DB = scratch.name
 
   // The real migration chain, exactly as src/db/migrations.ts applies it —
   // everything before 019, so fixtures exist in the world 019 will meet.
-  const files = (await readdir(INIT_DB)).filter((f) => f.endsWith('.sql') && f < '019').sort()
-  await withMigrationLock(PG, async () => {
-    for (const f of files) await psqlFile(SCRATCH_DB, join(INIT_DB, f))
-  })
+  await applyInitDb(SCRATCH_DB, (f) => f < '019')
 
   db = new pg.Client({ ...PG, database: SCRATCH_DB })
   await db.connect()
@@ -189,16 +133,12 @@ beforeAll(async () => {
 
   // Everything after 019, so the runtime write path below meets the same
   // schema production does (020 adds the os column upsertProject stamps).
-  const rest = (await readdir(INIT_DB)).filter((f) => f.endsWith('.sql') && f > '019z').sort()
-  for (const f of rest) await psqlFile(SCRATCH_DB, join(INIT_DB, f))
+  await applyInitDb(SCRATCH_DB, (f) => f > '019z')
 }, 120_000)
 
 afterAll(async () => {
   await db?.end().catch(() => {})
-  if (admin) {
-    await admin.query(`DROP DATABASE IF EXISTS ${SCRATCH_DB} WITH (FORCE)`).catch(() => {})
-    await admin.end().catch(() => {})
-  }
+  await scratch?.drop()
 })
 
 describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
@@ -254,7 +194,7 @@ describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
       `SELECT p.external_id, count(s.id)::int AS sessions
        FROM projects p LEFT JOIN sessions s ON s.project_id = p.id
        WHERE p.external_id IN ('-home-u-app', '-home-u-App')
-       GROUP BY p.external_id ORDER BY p.external_id`
+       GROUP BY p.external_id ORDER BY p.external_id COLLATE "C"`
     )
     expect(rows.rows).toEqual([
       { external_id: '-home-u-App', sessions: 1 },
@@ -271,7 +211,7 @@ describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
       `SELECT p.external_id, p.path, count(s.id)::int AS sessions
        FROM projects p LEFT JOIN sessions s ON s.project_id = p.id
        WHERE p.external_id IN ('-mnt-d-data', '-mnt-d-Data')
-       GROUP BY p.external_id, p.path ORDER BY p.external_id`
+       GROUP BY p.external_id, p.path ORDER BY p.external_id COLLATE "C"`
     )
     expect(rows.rows).toEqual([
       { external_id: '-mnt-d-Data', path: '/mnt/d/Data', sessions: 1 },
@@ -283,7 +223,7 @@ describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
   // husk rows, so without this the only copy of the original state lived in
   // CSV files outside the database.
   it('leaves a pre-migration snapshot of projects inside the database', async () => {
-    const backup = await db.query('SELECT external_id, path FROM projects_pre_019 ORDER BY external_id')
+    const backup = await db.query('SELECT external_id, path FROM projects_pre_019 ORDER BY external_id COLLATE "C"')
     // Every fixture row, with the paths as they were before 019 ran.
     expect(backup.rows).toContainEqual({ external_id: '-mnt-d-tools-comfy', path: '/mnt/d/tools/comfy' })
     expect(backup.rows).toContainEqual({
@@ -308,7 +248,7 @@ describe.skipIf(!dbAvailable)('migration 019 (scratch database)', () => {
     const rows = await db.query(
       `SELECT external_id, os FROM projects
        WHERE external_id IN ('D--tools-comfy', '-mnt-d-Data', '-home-alice-Projects-app')
-       ORDER BY external_id`
+       ORDER BY external_id COLLATE "C"`
     )
     expect(rows.rows).toEqual([
       { external_id: '-home-alice-Projects-app', os: null },
@@ -388,18 +328,14 @@ describe.skipIf(!dbAvailable)('upsertProject normalizes and adopts automatically
 // same "refuse rather than guess" rule as the session external_id collision.
 // This needs its own scratch database because a correct run aborts.
 describe.skipIf(!dbAvailable)('migration 019 refuses to merge across machines', () => {
-  const CROSS_DB = `mm_test_019x_${randomBytes(4).toString('hex')}`
-  let crossAdmin: pg.Client
+  let cross: Awaited<ReturnType<typeof createScratchDatabase>>
+  let CROSS_DB: string
   let crossDb: pg.Client
 
   beforeAll(async () => {
-    crossAdmin = new pg.Client({ ...PG, database: 'conversations' })
-    await crossAdmin.connect()
-    await crossAdmin.query(`CREATE DATABASE ${CROSS_DB}`)
-    const files = (await readdir(INIT_DB)).filter((f) => f.endsWith('.sql') && f < '019').sort()
-    await withMigrationLock(PG, async () => {
-      for (const f of files) await psqlFile(CROSS_DB, join(INIT_DB, f))
-    })
+    cross = await createScratchDatabase('mm_test_019x')
+    CROSS_DB = cross.name
+    await applyInitDb(CROSS_DB, (f) => f < '019')
 
     crossDb = new pg.Client({ ...PG, database: CROSS_DB })
     await crossDb.connect()
@@ -418,17 +354,14 @@ describe.skipIf(!dbAvailable)('migration 019 refuses to merge across machines', 
 
   afterAll(async () => {
     await crossDb?.end().catch(() => {})
-    if (crossAdmin) {
-      await crossAdmin.query(`DROP DATABASE IF EXISTS ${CROSS_DB} WITH (FORCE)`).catch(() => {})
-      await crossAdmin.end().catch(() => {})
-    }
+    await cross?.drop()
   })
 
   it('aborts instead of collapsing two hosts into one project', async () => {
     await expect(psqlFile(CROSS_DB, join(INIT_DB, '019-canonical-project-paths.sql'))).rejects.toThrow(
       /different machines/
     )
-    const rows = await crossDb.query('SELECT external_id FROM projects ORDER BY external_id')
+    const rows = await crossDb.query('SELECT external_id FROM projects ORDER BY external_id COLLATE "C"')
     expect(rows.rows.map((r) => r.external_id)).toEqual(['shared-a', 'shared-b'])
   })
 })

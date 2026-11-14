@@ -82,3 +82,17 @@ describe('when the effective project class differs', () => {
     expect(error).toHaveProperty('message', 'Snapshot dataClass must match the stored project class')
   })
 })
+
+// Every other writer classified what it wrote; this one stored false (#177).
+// It now classifies inside its own transaction, where the new rows are visible.
+describe('when a snapshot thread opens like an automated run', () => {
+  it('flags it automated in the same transaction', async () => {
+    const base = query.getMockImplementation()!
+    query.mockImplementation(async (sql: string, params: unknown[]) =>
+      sql.includes('AS opening')
+        ? { rows: [{ id: 71, source: 'source-roaming-squid', machine: null, stored: false, opening: 'Huddle in #lair: lantern standup' }] }
+        : base(sql, params))
+    await ingestSnapshot(7, payload())
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('SET is_automated = true'), [[71]])
+  })
+})
