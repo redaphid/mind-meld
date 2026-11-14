@@ -454,10 +454,8 @@ type FullTextRow = Omit<SessionFields, 'id'> & {
 // How many hits each arm asks for. Chroma knows nothing about data classes, so
 // an active class filter can starve the semantic arms (~70% of sessions may be
 // filtered out after the fetch); the limit-relative pools over-fetch harder
-// when a filter is on. See config.search.candidatePool for the fixed form.
+// when a filter is on.
 const candidatePool = (arm: Arm, limit: number, classFiltered: boolean) => {
-  const fixed = config.search.candidatePool
-  if (fixed !== null) return fixed
   if (arm === 'lexical') return limit * 2
   return limit * (classFiltered ? 5 : arm === 'session' ? 2 : 3)
 }

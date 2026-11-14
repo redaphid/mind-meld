@@ -653,29 +653,7 @@ describe('evidence', () => {
     })
   })
 
-  describe('with a fixed candidate pool', () => {
-    const searchConfig = config.search as { candidatePool: number | null }
-    beforeEach(() => {
-      searchConfig.candidatePool = 37
-    })
-    afterEach(() => {
-      searchConfig.candidatePool = null
-    })
-
-    it.each([1, 8, 100])('asks every arm for the pool size at limit %i', async (limit) => {
-      serve({})
-      await search({ query: 'q', mode: 'hybrid', limit })
-      expect(querySimilar.mock.calls.map(([collection, , n]) => [collection, n]).sort()).toEqual([
-        ['convo-chunks', 37],
-        ['convo-messages', 37],
-        ['convo-sessions', 37],
-      ])
-      const fullText = query.mock.calls.find(([sql]) => String(sql).includes('ranked_messages'))!
-      expect((fullText[1] as unknown[]).at(-1)).toBe(37)
-    })
-  })
-
-  it('asks for limit-relative pools when none is fixed', async () => {
+  it('asks each arm for a pool relative to the limit', async () => {
     serve({})
     await search({ query: 'q', mode: 'hybrid', limit: 4, dataClass: ['*'] })
     expect(querySimilar.mock.calls.map(([collection, , n]) => [collection, n]).sort()).toEqual([
