@@ -1,9 +1,11 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   isRecoverableEmbedError,
   isOversizeEmbedError,
   isNaNEmbedError,
   retryAfterMs,
+  getInteractiveOllamaClient,
+  getOllamaClient,
 } from "./ollama.js";
 import { config } from "../config.js";
 
@@ -158,5 +160,90 @@ describe("retryAfterMs", () => {
       expect(retryAfterMs("")).toBe(retryDelayMs);
       expect(retryAfterMs("soon")).toBe(retryDelayMs);
     });
+  });
+});
+
+// A search that gave up must not keep the one Ollama slot busy embedding a
+// query nobody will read.
+describe("the interactive client", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("cancels the request in flight when its caller aborts", async () => {
+    let seen: AbortSignal | undefined;
+    vi.stubGlobal("fetch", (_input: unknown, init: RequestInit) => {
+      seen = init.signal ?? undefined;
+      return new Promise((_resolve, reject) =>
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason)),
+      );
+    });
+    const caller = new AbortController();
+    const embedding = getInteractiveOllamaClient(caller.signal).embed({ model: "m", input: "q" });
+    await vi.waitFor(() => expect(seen).toBeDefined());
+    caller.abort(new Error("search-abandoned-heron"));
+    await expect(embedding).rejects.toThrow("search-abandoned-heron");
+  });
+
+  // ollama-js aborts every request of a client at once, so a shared client
+  // would let one abandoned search cancel queued background work too.
+  it("frees the slot for background work, and cancels nothing else, when its caller aborts", async () => {
+    let calls = 0;
+    vi.stubGlobal("fetch", (_input: unknown, init: RequestInit) => {
+      calls += 1;
+      if (calls === 1)
+        return new Promise((_resolve, reject) =>
+          init.signal?.addEventListener("abort", () => reject(init.signal?.reason)),
+        );
+      return Promise.resolve(Response.json({ model: "m", embeddings: [[0.5]] }));
+    });
+    const caller = new AbortController();
+    const search = getInteractiveOllamaClient(caller.signal).embed({ model: "m", input: "q" });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    const background = getOllamaClient().embed({ model: "m", input: "summary" });
+    caller.abort(new Error("search-abandoned-wren"));
+    await expect(search).rejects.toThrow("search-abandoned-wren");
+    await expect(background).resolves.toMatchObject({ embeddings: [[0.5]] });
+  });
+});
+
+// The GPU gate answers 503 while a game holds the card. Background work must
+// wait it out rather than fail and be relaunched straight back into the gate.
+describe("the background client", () => {
+  const ollama = config.ollama as { retryDelayMs: number; retryMaxDelayMs: number; maxRetries: number };
+  const saved = { ...ollama };
+  const ok = () => Promise.resolve(Response.json({ model: "m", embeddings: [[0.5]] }));
+  const shut = () => Promise.resolve(new Response("gate-shut-plover: a game holds the GPU", { status: 503, headers: { "retry-after": "1" } }));
+  beforeEach(() => {
+    Object.assign(ollama, { retryDelayMs: 1, retryMaxDelayMs: 1, maxRetries: 3 });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    Object.assign(ollama, saved);
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("waits out a shut gate and retries", async () => {
+    const responses = [shut, ok];
+    const fetch = vi.fn(() => responses.shift()!());
+    vi.stubGlobal("fetch", fetch);
+    await expect(getOllamaClient().embed({ model: "m", input: "summary" })).resolves.toMatchObject({ embeddings: [[0.5]] });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("passes the gate's own explanation through once its retries are spent", async () => {
+    const fetch = vi.fn(shut);
+    vi.stubGlobal("fetch", fetch);
+    await expect(getOllamaClient().embed({ model: "m", input: "summary" })).rejects.toThrow("gate-shut-plover");
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries a dropped connection", async () => {
+    const responses = [() => Promise.reject(new TypeError("fetch failed")), ok];
+    const fetch = vi.fn(() => responses.shift()!());
+    vi.stubGlobal("fetch", fetch);
+    await expect(getOllamaClient().embed({ model: "m", input: "summary" })).resolves.toMatchObject({ embeddings: [[0.5]] });
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

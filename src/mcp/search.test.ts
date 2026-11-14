@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 const query = vi.fn()
 vi.mock('../db/postgres.js', () => ({ query: (...args: unknown[]) => query(...args) }))
@@ -17,8 +17,13 @@ vi.mock('../db/chroma.js', () => ({
 // make the query vector unavailable, which is what a shut GPU gate looks like
 // from here.
 const embed = vi.fn(async () => ({ embeddings: [new Array(1024).fill(0.1)] }))
+// The signal each search hands the client, so a test can see it abandoned.
+const embedSignals: AbortSignal[] = []
 vi.mock('../embeddings/ollama.js', () => ({
-  getInteractiveOllamaClient: () => ({ embed: (...args: unknown[]) => embed(...(args as [])) }),
+  getInteractiveOllamaClient: (signal: AbortSignal) => {
+    embedSignals.push(signal)
+    return { embed: (...args: unknown[]) => embed(...(args as [])) }
+  },
 }))
 
 // The semantic switch (src/sync/sync-control.ts) is a row in Postgres; on
@@ -29,6 +34,7 @@ vi.mock('../sync/sync-control.js', () => ({ semanticEnabled: () => semanticOn() 
 const { search, searchWithDiagnostics, resolveDataClasses, formatSearchResults, findProjectsByPath, NOISE_CHECK, FULL_TEXT_ONLY } =
   await import('./search.js')
 const { config } = await import('../config.js')
+import type { Adjustment, EvidenceList } from './evidence.js'
 
 type Row = Record<string, unknown>
 const rows = (...r: Row[]) => ({ rows: r })
@@ -517,6 +523,209 @@ describe('when the arms finish out of order', () => {
   })
 })
 
+describe('evidence', () => {
+  // Session 3 joins the two fixtures, so a tier can rank sessions against each other.
+  const sessions: Record<number, Row> = { ...fixtures, 3: sessionRow({ id: 3, title: 'Another coding session' }) }
+  const messages: Record<number, Row> = {
+    10: { ...sessions[2], message_id: 10, content_text: 'message-text-nearest-heron' },
+    11: { ...sessions[2], message_id: 11, content_text: 'message-text-farther-heron' },
+    20: { ...sessions[3], message_id: 20, content_text: 'message-text-session-three' },
+  }
+  const chunks: Record<number, Row> = {
+    5: { ...sessions[2], chunk_id: 5, chunk_index: 1, chunk_summary: 'chunk-text-nearest' },
+    6: { ...sessions[2], chunk_id: 6, chunk_index: 4, chunk_summary: 'chunk-text-farther' },
+  }
+  const ftsRow = (sessionId: number, messageId: number): Row => ({
+    ...sessions[sessionId],
+    session_id: sessionId,
+    message_id: messageId,
+    rank: 0.25,
+    headline: `headline-${messageId}`,
+  })
+  type Hits = Partial<Record<'convo-sessions' | 'convo-chunks' | 'convo-messages', [string, number][]>>
+  // Hydration answers in REVERSE of the order it was asked for, so a tier that
+  // walked rows in database order instead of Chroma's order would be caught.
+  const serve = (hits: Hits, fullText: Row[] = []) => {
+    querySimilar.mockImplementation(async (collection: keyof Hits) => {
+      const list = hits[collection] ?? []
+      return { ids: [list.map(([id]) => id)], distances: [list.map(([, d]) => d)] }
+    })
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      const reversed = (lookup: Record<number, Row>) =>
+        rows(...[...(params?.[0] as number[])].reverse().flatMap((id) => (lookup[id] ? [lookup[id]] : [])))
+      if (sql.includes('ranked_messages')) return rows(...fullText)
+      if (sql.includes('FROM messages m') && sql.includes('m.id = ANY($1')) return reversed(messages)
+      if (sql.includes('FROM session_chunks c')) return reversed(chunks)
+      if (sql.includes(SESSIONS_BY_ID)) return reversed(sessions)
+      return rows()
+    })
+  }
+
+  it('ranks a tier in Chroma order, not the order hydration returned rows', async () => {
+    serve({ 'convo-messages': [['msg-10', 0.1], ['msg-20', 0.2]] })
+    const results = await search({ query: 'q', mode: 'semantic' })
+    expect(results.map((r) => [r.session_id, r.evidence])).toEqual([
+      [2, [{ arm: 'message', rank: 1, cosine: 0.9, messageId: 10 }]],
+      [3, [{ arm: 'message', rank: 2, cosine: 0.8, messageId: 20 }]],
+    ])
+  })
+
+  it('keeps the nearest message of a session, not a later one', async () => {
+    serve({ 'convo-messages': [['msg-10', 0.1], ['msg-11', 0.3]] })
+    const [hit] = await search({ query: 'q', mode: 'semantic' })
+    expect(hit.evidence).toEqual([{ arm: 'message', rank: 1, cosine: 0.9, messageId: 10 }])
+    expect(hit.cursor).toEqual({ message_id: 10 })
+    expect(hit.snippet).toBe('message-text-nearest-heron')
+  })
+
+  it('keeps the nearest chunk of a session, not a later one', async () => {
+    serve({ 'convo-chunks': [['chunk-5', 0.1], ['chunk-6', 0.3]] })
+    const [hit] = await search({ query: 'q', mode: 'semantic' })
+    expect(hit.evidence).toEqual([{ arm: 'chunk', rank: 1, cosine: 0.9, chunkIndex: 1 }])
+    expect(hit.cursor).toEqual({ chunk_index: 1 })
+  })
+
+  it('credits a session to the arm that ranked it best and points there', async () => {
+    serve({ 'convo-sessions': [['session-3', 0.1], ['session-2', 0.2]], 'convo-messages': [['msg-10', 0.15]] })
+    const results = await search({ query: 'q', mode: 'semantic' })
+    const two = results.find((r) => r.session_id === 2)!
+    expect(two.evidence.map((e) => [e.arm, e.rank])).toEqual([['message', 1], ['session', 2]])
+    expect([two.matched_tier, two.cursor, two.snippet]).toEqual(['message', { message_id: 10 }, 'message-text-nearest-heron'])
+  })
+
+  it('breaks an equal rank in arm order: session, chunk, message, then full text', async () => {
+    serve({ 'convo-messages': [['msg-10', 0.1]], 'convo-chunks': [['chunk-5', 0.1]] }, [ftsRow(2, 11)])
+    const [hit] = await search({ query: 'q', mode: 'hybrid' })
+    expect(hit.evidence.map((e) => e.arm)).toEqual(['chunk', 'message', 'lexical'])
+    expect(hit.matched_tier).toBe('chunk')
+    expect(hit.snippet).toBe('headline-11')
+  })
+
+  it('credits full text when it ranked the session best', async () => {
+    serve({ 'convo-sessions': [['session-3', 0.1], ['session-2', 0.2]] }, [ftsRow(2, 11)])
+    const two = (await search({ query: 'q', mode: 'hybrid' })).find((r) => r.session_id === 2)!
+    expect(two.evidence[0]).toEqual({ arm: 'lexical', rank: 1, tsRank: 0.25, messageId: 11 })
+    expect([two.matched_tier, two.cursor]).toEqual(['message', { message_id: 11 }])
+  })
+
+  // Crediting moves where a result points, never where it ranks.
+  it('scores a result by reciprocal rank fusion of every arm, whichever is credited', async () => {
+    serve({ 'convo-sessions': [['session-3', 0.1], ['session-2', 0.2]], 'convo-messages': [['msg-10', 0.15]] })
+    const results = await search({ query: 'q', mode: 'semantic' })
+    expect(results.map((r) => [r.session_id, r.base, r.score])).toEqual([
+      [2, 1 / 62 + 1 / 61, 1 / 62 + 1 / 61],
+      [3, 1 / 61, 1 / 61],
+    ])
+  })
+
+  it('records the project boost as an adjustment the score includes', async () => {
+    serve({ 'convo-sessions': [['session-2', 0.1], ['session-3', 0.2]] })
+    const served = query.getMockImplementation()!
+    query.mockImplementation(async (sql: string, params?: unknown[]) =>
+      sql.includes('FROM projects p') && sql.includes('LIKE ANY')
+        ? rows({ id: 7, path: '/p/proj', name: 'proj', source_name: 'claude_code' })
+        : served(sql, params)
+    )
+    sessions[3] = { ...sessions[3], project_id: 8 }
+    const results = await search({ query: 'q', mode: 'semantic', cwd: '/p/proj' })
+    sessions[3] = { ...sessions[3], project_id: 7 }
+    expect(results.map((r) => [r.session_id, r.adjustments])).toEqual([
+      [2, [{ kind: 'project', boost: 0.5 }]],
+      [3, []],
+    ])
+    expect(results[0].score).toBe(results[0].base + 0.5)
+  })
+
+  // The mock applies the one predicate Postgres would: a deleted session is
+  // returned unless the query excludes it.
+  describe.each([
+    ['session', 'convo-sessions', 'session-2'],
+    ['chunk', 'convo-chunks', 'chunk-5'],
+    ['message', 'convo-messages', 'msg-10'],
+  ] as const)('the %s tier', (_tier, collection, id) => {
+    it('never returns a deleted session', async () => {
+      serve({ [collection]: [[id, 0.1]] })
+      const served = query.getMockImplementation()!
+      query.mockImplementation(async (sql: string, params?: unknown[]) =>
+        sql.includes('s.deleted_at IS NULL') ? served(sql, params) : rows()
+      )
+      expect((await search({ query: 'q', mode: 'semantic' })).map((r) => r.session_id)).toEqual([2])
+    })
+  })
+
+  it('asks each arm for a pool relative to the limit', async () => {
+    serve({})
+    await search({ query: 'q', mode: 'hybrid', limit: 4, dataClass: ['*'] })
+    expect(querySimilar.mock.calls.map(([collection, , n]) => [collection, n]).sort()).toEqual([
+      ['convo-chunks', 12],
+      ['convo-messages', 12],
+      ['convo-sessions', 8],
+    ])
+    const fullText = query.mock.calls.find(([sql]) => String(sql).includes('ranked_messages'))!
+    expect((fullText[1] as unknown[]).at(-1)).toBe(8)
+  })
+
+  it('over-fetches every vector arm fivefold under a data-class filter, and full text not at all', async () => {
+    serve({})
+    await search({ query: 'q', mode: 'hybrid', limit: 4 })
+    expect(querySimilar.mock.calls.map(([, , n]) => n)).toEqual([20, 20, 20])
+    const fullText = query.mock.calls.find(([sql]) => String(sql).includes('ranked_messages'))!
+    expect((fullText[1] as unknown[]).at(-1)).toBe(8)
+  })
+})
+
+describe('when full text fails', () => {
+  const failFullText = () =>
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (sql.includes('ranked_messages')) throw new Error('error-fts-sulking-heron')
+      if (sql.includes(SESSIONS_BY_ID)) return rowsForIds(params, (id) => fixtures[id])
+      return rows()
+    })
+
+  beforeEach(() => {
+    embedSignals.length = 0
+  })
+
+  it('abandons the query embedding it was waiting on', async () => {
+    failFullText()
+    embed.mockImplementation(() => new Promise(() => {}))
+    await expect(search({ query: 'q', mode: 'hybrid' })).rejects.toThrow('error-fts-sulking-heron')
+    expect(embedSignals.at(-1)?.aborted).toBe(true)
+  })
+
+  it('does not hydrate a Chroma answer that arrives afterwards', async () => {
+    failFullText()
+    let answer!: () => void
+    const answered = new Promise<void>((resolve) => (answer = resolve))
+    querySimilar.mockImplementation(async () => {
+      await answered
+      return { ids: [['session-2']], distances: [[0.1]] }
+    })
+    await expect(search({ query: 'q', mode: 'hybrid' })).rejects.toThrow('error-fts-sulking-heron')
+    answer()
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(query.mock.calls.filter(([sql]) => String(sql).includes(SESSIONS_BY_ID))).toEqual([])
+  })
+})
+
+describe('when the session tier fails and the later tiers succeed', () => {
+  it('keeps none of the later tiers, and says why', async () => {
+    querySimilar.mockImplementation(async (collection: string) => {
+      if (collection === 'convo-sessions') throw new Error('error-chroma-sessions-gone')
+      if (collection === 'convo-chunks') return { ids: [['chunk-5']], distances: [[0.1]] }
+      return { ids: [['msg-10']], distances: [[0.1]] }
+    })
+    query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM session_chunks c')) return rows({ ...fixtures[2], chunk_id: 5, chunk_index: 1, chunk_summary: 'c' })
+      if (sql.includes('FROM messages m') && sql.includes('m.id = ANY($1')) return rows({ ...fixtures[2], message_id: 10, content_text: 'm' })
+      return rows()
+    })
+    const outcome = await searchWithDiagnostics({ query: 'q', mode: 'semantic' })
+    expect(outcome.results).toEqual([])
+    expect(outcome.degraded?.reason).toBe('error-chroma-sessions-gone')
+  })
+})
+
 describe('dataClass validation', () => {
   const withKnownClasses = () => {
     query.mockImplementation(async (sql: string, params?: unknown[]) => {
@@ -624,6 +833,10 @@ describe('formatSearchResults', () => {
     score: 0.7,
     matched_tier: 'session' as const,
     snippet: 'we fixed it',
+    noise_damping: null,
+    evidence: [{ arm: 'session', rank: 1, cosine: 0.7 }] as EvidenceList,
+    base: 0.7,
+    adjustments: [] as Adjustment[],
     ...over,
   })
 
@@ -632,10 +845,10 @@ describe('formatSearchResults', () => {
   })
 
   it('names the list handle on the first line, and only when there are results', () => {
-    expect(formatSearchResults([result()], [], null, 'Lk3x9qa').split('\n')[0]).toBe(
+    expect(formatSearchResults([result()], { list: 'Lk3x9qa' }).split('\n')[0]).toBe(
       'Found 1 relevant conversations (list Lk3x9qa):'
     )
-    expect(formatSearchResults([], [], null, 'Lk3x9qa')).not.toContain('Lk3x9qa')
+    expect(formatSearchResults([], { list: 'Lk3x9qa' })).not.toContain('Lk3x9qa')
   })
 
   it('renders source and data class together', () => {
@@ -645,18 +858,42 @@ describe('formatSearchResults', () => {
     expect(text).toContain('we fixed it')
   })
 
-  it('marks current-project hits and renders cursors', () => {
-    const text = formatSearchResults(
-      [
-        result({ session_id: 2, cursor: { chunk_index: 3 } }),
-        result({ session_id: 3, matched_tier: 'message' as const, cursor: { message_id: 900 }, snippet: null }),
-      ],
-      [2]
-    )
-    expect(text).toContain('[CURRENT PROJECT]')
+  // The label used to compare project ids with session ids, so it marked
+  // whichever result's session id happened to equal a current project's id.
+  it('marks exactly the results the project boost was applied to', () => {
+    const text = formatSearchResults([
+      result({ session_id: 7, cursor: { chunk_index: 3 } }),
+      result({ session_id: 3, adjustments: [{ kind: 'project', boost: 0.5 }], matched_tier: 'message' as const, cursor: { message_id: 900 }, snippet: null }),
+    ])
+    const [first, second] = text.split(/\n\n2\. /)
+    expect(first).not.toContain('[CURRENT PROJECT]')
+    expect(second).toContain('[CURRENT PROJECT]')
     expect(text).toContain('Cursor: chunk 3')
     expect(text).toContain('Cursor: message 900')
     expect(text).toContain('(no snippet)')
+  })
+
+  it('shows each arm compactly, and the score breakdown only when explain is asked for', () => {
+    const scored = result({
+      score: 0.5139,
+      base: 0.0323,
+      matched_tier: 'message' as const,
+      evidence: [
+        { arm: 'message', rank: 1, cosine: 0.612, messageId: 9 },
+        { arm: 'lexical', rank: 2, tsRank: 0.0607, messageId: 9 },
+        { arm: 'chunk', rank: 4, cosine: 0.5, chunkIndex: 0 },
+      ] as EvidenceList,
+      adjustments: [
+        { kind: 'noise', similarity: 0.71, factor: 0.43 },
+        { kind: 'project', boost: 0.5 },
+      ] as Adjustment[],
+    })
+    const plain = formatSearchResults([scored])
+    expect(plain).toContain('Score: 0.514 | Matched: message (message #1 0.61, text #2, chunk #4 0.50)')
+    expect(plain).not.toContain('Why:')
+    expect(formatSearchResults([scored], { explain: true })).toContain(
+      'Why: base 0.0323 | noise ×0.430 (sim 0.71) | project +0.5 | text #2 ts_rank 0.0607'
+    )
   })
 
   describe('noise', () => {
@@ -753,6 +990,10 @@ describe('search title resolution (#95)', () => {
         score: 0.5,
         matched_tier: 'message',
         snippet: 'a matching excerpt',
+        noise_damping: null,
+        evidence: [{ arm: 'lexical', rank: 1, tsRank: 0.5, messageId: 1 }],
+        base: 0.5,
+        adjustments: [],
       },
     ])
     expect(formatted).toContain('Session 4268')
@@ -880,7 +1121,7 @@ describe('when the query vector cannot be had', () => {
   // An LLM reading the rendered text cannot see the server log, and will treat
   // an empty result as proof the conversation does not exist.
   it('warns in the rendered text, including when nothing matched', () => {
-    const note = formatSearchResults([], [], { semantic: false, cause: 'unavailable', reason: 'gate shut' })
+    const note = formatSearchResults([], { degraded: { semantic: false, cause: 'unavailable', reason: 'gate shut' } })
     expect(note).toContain(FULL_TEXT_ONLY)
     expect(note).toContain('gate shut')
     expect(note).toContain('Retry shortly')
@@ -911,7 +1152,7 @@ describe('with the semantic switch off', () => {
   it('says it was switched off, not that it failed', async () => {
     const { degraded } = await searchWithDiagnostics({ query: 'build', mode: 'semantic' })
     expect(degraded?.cause).toBe('switched-off')
-    const note = formatSearchResults([], [], degraded)
+    const note = formatSearchResults([], { degraded })
     expect(note).toContain('switched off')
     expect(note).not.toContain('Retry shortly')
   })
