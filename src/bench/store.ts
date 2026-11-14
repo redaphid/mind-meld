@@ -33,7 +33,20 @@ export const benchFiles = (dir: string) => ({
   run: (name: string) => path.join(dir, 'runs', `${name}.jsonl`),
   runMeta: (name: string) => path.join(dir, 'runs', `${name}.meta.json`),
   build: path.join(dir, 'build'),
+  // One session id per line; optional.
+  loopedSessionIds: path.join(dir, 'looped-session-ids.txt'),
 })
+
+export type BenchFiles = ReturnType<typeof benchFiles>
+
+export const readIdList = (file: string): number[] =>
+  existsSync(file)
+    ? readFileSync(file, 'utf8')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map(Number)
+    : []
 
 export const sha256Of = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex')
 
@@ -42,10 +55,10 @@ export const loadBench = (dir: string) => {
   const manifest = readJson<Manifest>(files.manifest)
   if (manifest.queriesSha256 && sha256Of(files.queries) !== manifest.queriesSha256)
     throw new Error(`queries.jsonl in ${dir} no longer matches its frozen hash; the benchmark has been edited`)
-  return {
-    files,
-    manifest,
-    queries: readJsonl<BenchQuery>(files.queries),
-    judgments: readJsonl<Judgment>(files.judgments),
-  }
+  const queries = readJsonl<BenchQuery>(files.queries)
+  const ids = new Set(queries.map((q) => q.id))
+  // The cache also holds grades for queries dropped before the freeze and for
+  // steering items, which live in their own file and read the cache directly.
+  const judgments = readJsonl<Judgment>(files.judgments).filter((j) => ids.has(j.queryId))
+  return { files, manifest, queries, judgments }
 }
