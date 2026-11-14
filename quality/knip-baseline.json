@@ -17,7 +17,6 @@
     "types:src/config.ts:Config",
     "types:src/logging/db-sink.ts:PendingLog",
     "types:src/mcp/rest.ts:ChunkDto",
-    "types:src/mcp/search.ts:MatchedTier",
     "types:src/mcp/search.ts:SearchCursor",
     "types:src/mcp/session.ts:SessionMetadata",
     "types:src/parsers/claude-messages.ts:AssistantContent",
