@@ -8,7 +8,8 @@ import {
 } from "../db/chroma.js";
 import { sessionVectorId } from "../db/vector-ids.js";
 import { generateEmbeddings, ensureEmbeddingModel } from "./ollama.js";
-import { summarizeConversation, ensureSummarizeModel, combineSummaries } from "./summarize.js";
+import { summarizeConversation, ensureSummarizeModel, combineSummaries, generateTitle } from "./summarize.js";
+import { isVerbatimTranscript } from "./verbatim.js";
 import { persistSessionChunks, SessionMessage } from "./chunks.js";
 import { embeddableMessages, embeddableSessions } from "./pending.js";
 import { classifyNoise } from "./classify.js";
@@ -608,10 +609,18 @@ export async function updateAggregateEmbeddings(deadline: number): Promise<{
         ],
       });
 
+      // A source title outranks a generated one (title.ts), so only an untitled
+      // session is worth the call. A session that has outgrown its verbatim
+      // transcript gets NULL, so a stale generated title never outlives it.
+      const generatedTitle =
+        isVerbatimTranscript(textForEmbedding) && !session.title?.trim()
+          ? await generateTitle(textForEmbedding)
+          : null;
+
       // Store summary in Postgres for FTS (always update - summary improves over time)
       await query(
-        `UPDATE sessions SET summary = $1, content_chars = $2 WHERE id = $3`,
-        [textForEmbedding, actualContentChars, session.id],
+        `UPDATE sessions SET summary = $1, content_chars = $2, generated_title = $4 WHERE id = $3`,
+        [textForEmbedding, actualContentChars, session.id, generatedTitle],
       );
 
       // Record/update in PostgreSQL with content_chars_at_embed

@@ -6,7 +6,8 @@ import { describe, it, expect, beforeEach, onTestFinished, vi } from 'vitest'
 // about the loop's stopping conditions only, so Postgres, Chroma, the GPU and
 // the clock are all stubbed; what is real is the control flow.
 
-const { queryMock, generateEmbeddingsMock, summarizeMock, aiHoldMock } = vi.hoisted(() => ({
+const { queryMock, generateEmbeddingsMock, summarizeMock, aiHoldMock, generateTitleMock } = vi.hoisted(() => ({
+  generateTitleMock: vi.fn(),
   queryMock: vi.fn(),
   generateEmbeddingsMock: vi.fn(),
   summarizeMock: vi.fn(),
@@ -28,6 +29,7 @@ vi.mock('./summarize.js', () => ({
   summarizeConversation: summarizeMock,
   ensureSummarizeModel: vi.fn(),
   combineSummaries: vi.fn(),
+  generateTitle: generateTitleMock,
 }))
 vi.mock('./chunks.js', () => ({ persistSessionChunks: vi.fn() }))
 vi.mock('./classify.js', () => ({ classifyNoise: () => null }))
@@ -218,7 +220,7 @@ describe('updateAggregateEmbeddings', () => {
   const session = (id: number, existing_content_chars: number | null = null) => ({
     id,
     external_id: `session-${id}`,
-    title: 'The Rusty Conquistador furnace',
+    title: 'The Rusty Conquistador furnace' as string | null,
     project_path: '/projects/example',
     source_name: 'claude_code',
     message_count: 1,
@@ -252,6 +254,38 @@ describe('updateAggregateEmbeddings', () => {
       if (sql.includes('SELECT s.id, s.external_id')) return { rows: queued }
       if (sql.includes('SELECT id, content_text, role FROM messages')) return { rows: sessionMessages }
       return { rows: [], rowCount: 0 }
+    })
+  })
+
+  describe('when a summary is the session transcript itself', () => {
+    const storedTitles = () =>
+      queryMock.mock.calls
+        .filter(([sql]) => String(sql).startsWith('UPDATE sessions SET summary'))
+        .map(([, params]) => params[3])
+
+    beforeEach(() => {
+      queued = [{ ...session(1), title: null }]
+      generateTitleMock.mockResolvedValue('Furnace blower replaced and confirmed working')
+    })
+
+    it('stores a generated title for it', async () => {
+      summarizeMock.mockResolvedValue('[USER]: Thunderwrench HVAC Co. fixed it')
+      await updateAggregateEmbeddings(Number.POSITIVE_INFINITY)
+      expect(storedTitles()).toEqual(['Furnace blower replaced and confirmed working'])
+    })
+
+    it('does not ask the model when the source already titled the session', async () => {
+      queued = [session(1)]
+      summarizeMock.mockResolvedValue('[USER]: Thunderwrench HVAC Co. fixed it')
+      await updateAggregateEmbeddings(Number.POSITIVE_INFINITY)
+      expect(storedTitles()).toEqual([null])
+      expect(generateTitleMock).not.toHaveBeenCalled()
+    })
+
+    it('clears the generated title, without asking the model, once the summary is real', async () => {
+      await updateAggregateEmbeddings(Number.POSITIVE_INFINITY)
+      expect(storedTitles()).toEqual([null])
+      expect(generateTitleMock).not.toHaveBeenCalled()
     })
   })
 

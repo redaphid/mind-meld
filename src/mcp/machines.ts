@@ -110,6 +110,7 @@ type SessionRow = {
   id: number
   title: string | null
   summary: string | null
+  generated_title: string | null
   project: string | null
   message_count: string | null
   started_at: string | null
@@ -124,7 +125,7 @@ export const getMachineSessions = async (
   offset: number
 ): Promise<MachineSession[]> => {
   const result = await query<SessionRow>(
-    `SELECT s.id, s.title, s.summary, p.name AS project, s.message_count,
+    `SELECT s.id, s.title, s.summary, s.generated_title, p.name AS project, s.message_count,
             s.started_at, s.last_synced_at
      FROM sessions s
      JOIN projects p ON p.id = s.project_id
