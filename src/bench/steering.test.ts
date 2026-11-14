@@ -15,6 +15,7 @@ const groupOf = (id: number) => ['alpha', 'beta', 'gamma'][Math.floor(id / 10)]
 
 const fake = vi.hoisted(() => ({ prompts: [] as string[], grade: (_id: number) => 0 as number, refused: new Set<number>() }))
 
+vi.mock('../db/chroma.js', () => ({}))
 vi.mock('../db/postgres.js', () => ({
   query: async (sql: string, params: unknown[]) => {
     if (sql.includes('array_agg')) return { rows: GROUPS }

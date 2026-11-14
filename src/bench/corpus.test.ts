@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const db = vi.hoisted(() => ({ query: vi.fn() }))
 vi.mock('../db/postgres.js', () => ({ query: db.query }))
+vi.mock('../db/chroma.js', () => ({}))
 
 const { appearsVerbatim, automatedLike, candidateSessions, corpusStats, realSearches, sessionCard, sessionIdsMatchingPaths, startedAtOf } =
   await import('./corpus.js')

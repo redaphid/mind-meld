@@ -4,6 +4,7 @@ import path from 'node:path'
 import { describe, it, expect, vi } from 'vitest'
 
 vi.mock('../db/postgres.js', () => ({ query: vi.fn() }))
+vi.mock('../db/chroma.js', () => ({}))
 
 const { judgePairs, parseGrades, renderCard } = await import('./judge.js')
 const { ModelRefusal } = await import('./claude.js')
