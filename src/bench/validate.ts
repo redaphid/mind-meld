@@ -45,7 +45,13 @@ export const retest = async (dir: string, log = console.error): Promise<Agreemen
   log(`retesting ${todo.length} of ${sample.length} sampled pairs`)
   const fresh = await judgePairs(
     todo.map((j) => ({ query: byId.get(j.queryId)!, sessionId: j.sessionId, snippets: [] })),
-    { model: manifest.judgeModel, cwd: files.judgeCwd, out: files.judgments, repeat: 1 }
+    {
+      model: manifest.judgeModel,
+      cwd: files.judgeCwd,
+      out: files.judgments,
+      repeat: 1,
+      onRefused: (p) => log(`judge refused ${p.query.id}:${p.sessionId}; left out of the retest`),
+    }
   )
   for (const j of fresh) done.set(key(j), j.grade)
   const paired = sample.filter((j) => done.has(key(j)))

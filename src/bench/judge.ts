@@ -1,4 +1,4 @@
-import { callClaude, extractJson, pool, withRetries } from './claude.js'
+import { callClaude, extractJson, ModelRefusal, pool, withRetries } from './claude.js'
 import { sessionCard, type SessionCard } from './corpus.js'
 import { shuffled } from './metrics.js'
 import { appendJsonl } from './store.js'
@@ -53,42 +53,58 @@ export type JudgeOptions = {
   batchSize?: number
   concurrency?: number
   onBatch?: (done: number, total: number) => void
+  // A pair the judge model refuses to grade even on its own is skipped and
+  // stays unjudged; scoring counts it as grade 0 and reports it as unjudged.
+  onRefused?: (pair: Pair) => void
+  // Injectable for tests; default to the hermetic CLI call and the live card.
+  call?: typeof callClaude
+  card?: typeof sessionCard
 }
 
 // Pairs are grouped by query and shuffled with a seed naming the repeat, so a
 // retest sees each candidate in a different place among different neighbours.
 export const judgePairs = async (pairs: Pair[], options: JudgeOptions): Promise<Judgment[]> => {
-  const { model, cwd, out, repeat = 0, batchSize = 6, concurrency = 6, onBatch } = options
+  const { model, cwd, out, repeat = 0, batchSize = 6, concurrency = 6, onBatch, onRefused, call = callClaude, card: cardOf = sessionCard } = options
   const byQuery = new Map<string, Pair[]>()
   for (const p of pairs) byQuery.set(p.query.id, [...(byQuery.get(p.query.id) ?? []), p])
   const batches = [...byQuery.values()].flatMap((group) => {
     const order = shuffled(group, `${JUDGE_PROMPT_VERSION}:${group[0].query.id}:${repeat}`)
     return Array.from({ length: Math.ceil(order.length / batchSize) }, (_, i) => order.slice(i * batchSize, (i + 1) * batchSize))
   })
-  let done = 0
-  const judged = await pool(batches, concurrency, async (batch) => {
+  const judgeBatch = async (batch: Pair[]): Promise<Judgment[]> => {
     const labels = batch.map((_, i) => `C${i + 1}`)
     const cards = await Promise.all(
       batch.map(async (p, i) => {
-        const card = await sessionCard(p.sessionId, { messages: 4, chars: 300 })
+        const card = await cardOf(p.sessionId, { messages: 4, chars: 300 })
         if (!card) throw new Error(`session ${p.sessionId} vanished`)
         return renderCard(labels[i], card, p.snippets)
       })
     )
-    const grades = await withRetries(3, async () =>
-      parseGrades(
-        await callClaude({ model, cwd, system: JUDGE_SYSTEM, prompt: renderJudgePrompt(batch[0].query.text, cards) }),
-        labels
+    try {
+      const grades = await withRetries(3, async () =>
+        parseGrades(await call({ model, cwd, system: JUDGE_SYSTEM, prompt: renderJudgePrompt(batch[0].query.text, cards) }), labels)
       )
-    )
-    const rows: Judgment[] = batch.map((p, i) => ({
-      queryId: p.query.id,
-      sessionId: p.sessionId,
-      grade: grades.get(labels[i])!,
-      judgeModel: model,
-      promptVersion: JUDGE_PROMPT_VERSION,
-      repeat,
-    }))
+      return batch.map((p, i) => ({
+        queryId: p.query.id,
+        sessionId: p.sessionId,
+        grade: grades.get(labels[i])!,
+        judgeModel: model,
+        promptVersion: JUDGE_PROMPT_VERSION,
+        repeat,
+      }))
+    } catch (e) {
+      if (!(e instanceof ModelRefusal)) throw e
+      // One card tripped the refusal; judge the rest without it.
+      if (batch.length === 1) {
+        onRefused?.(batch[0])
+        return []
+      }
+      return (await Promise.all(batch.map((p) => judgeBatch([p])))).flat()
+    }
+  }
+  let done = 0
+  const judged = await pool(batches, concurrency, async (batch) => {
+    const rows = await judgeBatch(batch)
     appendJsonl(out, rows)
     onBatch?.(++done, batches.length)
     return rows

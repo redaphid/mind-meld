@@ -113,6 +113,7 @@ export const judgeMissing = async (dir: string, runs: Run[], log: (line: string)
     cwd: files.judgeCwd,
     out: files.judgments,
     onBatch: (done, total) => done % 20 === 0 && log(`judged batch ${done}/${total}`),
+    onRefused: (p) => log(`judge refused ${p.query.id}:${p.sessionId}; left unjudged`),
   })
   return pairs.length
 }

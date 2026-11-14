@@ -70,7 +70,7 @@ export const buildSteering = async ({ dir, seed, base, target, log }: SteeringBu
   const graded = async (q: BenchQuery, ids: number[]) => {
     const fresh = await judgePairs(
       ids.map((sessionId) => ({ query: q, sessionId, snippets: [] })),
-      { model: manifest.judgeModel, cwd: files.judgeCwd, out: files.judgments }
+      { model: manifest.judgeModel, cwd: files.judgeCwd, out: files.judgments, onRefused: (p) => log(`judge refused ${p.query.id}:${p.sessionId}`) }
     )
     appendJsonl(judgeFile, fresh)
     return new Map(fresh.map((j) => [j.sessionId, j.grade]))
@@ -176,7 +176,7 @@ export const runSteering = async (dir: string, name: string, systems: SteeringRu
   )
   if (pairs.length) {
     log(`judging ${pairs.length} steering pairs`)
-    await judgePairs(pairs, { model: manifest.judgeModel, cwd: files.judgeCwd, out: files.judgments })
+    await judgePairs(pairs, { model: manifest.judgeModel, cwd: files.judgeCwd, out: files.judgments, onRefused: (p) => log(`judge refused ${p.query.id}:${p.sessionId}`) })
   }
   const grades = indexJudgments(readJsonl<Judgment>(files.judgments), manifest.promptVersion)
   const scores = items.map((item) =>
