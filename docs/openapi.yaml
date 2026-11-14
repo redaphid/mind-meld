@@ -1700,7 +1700,7 @@ components:
                 titleSource:
                   description: See SearchHit.titleSource.
                   type: string
-                  enum: [source, summary, none]
+                  enum: [source, generated, summary, none]
                 project:
                   type: string
 
@@ -1741,7 +1741,7 @@ components:
         titleSource:
           description: See SearchHit.titleSource.
           type: string
-          enum: [source, summary, none]
+          enum: [source, generated, summary, none]
         project:
           type: string
         lastSyncedAt:
@@ -2103,11 +2103,13 @@ components:
         titleSource:
           description: |
             How the title was obtained. `source` means the origin system supplied
-            it; `summary` means it was derived from the session summary; `none`
-            means the session has neither and `title` is null. A title is never
-            fabricated from message content (issue #95).
+            it; `generated` means the summarizer wrote it, which happens only for
+            a short session whose stored summary is its own transcript; `summary`
+            means it was derived from the session summary; `none` means the
+            session has none of these and `title` is null. A title is never a cut
+            fragment of message content (issue #95).
           type: string
-          enum: [source, summary, none]
+          enum: [source, generated, summary, none]
         project:
           type: string
         projectPath:
@@ -2213,7 +2215,7 @@ components:
         titleSource:
           description: See SearchHit.titleSource.
           type: string
-          enum: [source, summary, none]
+          enum: [source, generated, summary, none]
         summary:
           description: Full generated summary, or null if it has not been summarised yet.
           oneOf:
@@ -2282,7 +2284,7 @@ components:
         titleSource:
           description: See SearchHit.titleSource.
           type: string
-          enum: [source, summary, none]
+          enum: [source, generated, summary, none]
         summary:
           oneOf:
             - type: 'null'
@@ -2442,7 +2444,7 @@ components:
         titleSource:
           description: See SearchHit.titleSource.
           type: string
-          enum: [source, summary, none]
+          enum: [source, generated, summary, none]
         project:
           oneOf:
             - type: 'null'

@@ -220,7 +220,7 @@ describe('updateAggregateEmbeddings', () => {
   const session = (id: number, existing_content_chars: number | null = null) => ({
     id,
     external_id: `session-${id}`,
-    title: 'The Rusty Conquistador furnace',
+    title: 'The Rusty Conquistador furnace' as string | null,
     project_path: '/projects/example',
     source_name: 'claude_code',
     message_count: 1,
@@ -264,7 +264,7 @@ describe('updateAggregateEmbeddings', () => {
         .map(([, params]) => params[3])
 
     beforeEach(() => {
-      queued = [session(1)]
+      queued = [{ ...session(1), title: null }]
       generateTitleMock.mockResolvedValue('Furnace blower replaced and confirmed working')
     })
 
@@ -272,6 +272,14 @@ describe('updateAggregateEmbeddings', () => {
       summarizeMock.mockResolvedValue('[USER]: Thunderwrench HVAC Co. fixed it')
       await updateAggregateEmbeddings(Number.POSITIVE_INFINITY)
       expect(storedTitles()).toEqual(['Furnace blower replaced and confirmed working'])
+    })
+
+    it('does not ask the model when the source already titled the session', async () => {
+      queued = [session(1)]
+      summarizeMock.mockResolvedValue('[USER]: Thunderwrench HVAC Co. fixed it')
+      await updateAggregateEmbeddings(Number.POSITIVE_INFINITY)
+      expect(storedTitles()).toEqual([null])
+      expect(generateTitleMock).not.toHaveBeenCalled()
     })
 
     it('clears the generated title, without asking the model, once the summary is real', async () => {
