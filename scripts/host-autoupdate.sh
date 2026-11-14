@@ -401,8 +401,24 @@ take_lock() {
     if [[ -z "$owner" ]] && (( $(date +%s) - $(stat -c %Y "$LOCK_DIR") < 60 )); then
       log "a run is taking the lock; skipping"; exit 0
     fi
-    log "breaking a lock left by run ${owner:-?}, which is gone"
-    rm -rf "$LOCK_DIR"; mkdir "$LOCK_DIR" || exit 1
+    # Two starters can both judge the same lock dead. A rename succeeds for only
+    # one of them, so only that one breaks it. What it moved must still be the
+    # lock it judged: a run may have broken and retaken it in between.
+    local dead="$LOCK_DIR.dead.$$"
+    rm -rf "$dead"
+    if ! mv -T "$LOCK_DIR" "$dead" 2>/dev/null; then
+      log "another run broke the lock first; skipping"; exit 0
+    fi
+    if [[ "$(cat "$dead/pid" 2>/dev/null)" != "$owner" ]] \
+      || { [[ -z "$owner" ]] && (( $(date +%s) - $(stat -c %Y "$dead") < 60 )); }; then
+      mv -nT "$dead" "$LOCK_DIR" 2>/dev/null
+      log "another run took the lock; skipping"; exit 0
+    fi
+    rm -rf "$dead"
+    log "broke a lock left by run ${owner:-?}, which is gone"
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+      log "another run took the lock; skipping"; exit 0
+    fi
   fi
   echo "$$" >"$LOCK_DIR/pid"
   trap '[[ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" == "$$" ]] && rm -rf "$LOCK_DIR"; rm -f "$AUTOUPDATE_RUNNING_COPY"' EXIT
