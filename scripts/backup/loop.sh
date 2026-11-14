@@ -29,6 +29,10 @@ attempt() {
 	return 1
 }
 
+# Everything this loop starts inherits the lower priority, so a dump's zstd on
+# every core yields to whatever the owner is running.
+renice -n 10 -p $$ >/dev/null 2>&1 || log "renice failed; running at normal priority"
+
 log "backup sidecar up: daily at $BACKUP_AT_UTC UTC, keep $BACKUP_KEEP, restore drill every ${RESTORE_TEST_EVERY_DAYS}d"
 sleep "$STARTUP_DELAY_SECONDS"
 

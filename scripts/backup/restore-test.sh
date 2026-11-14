@@ -10,13 +10,13 @@
 # Result: $BACKUP_DIR/restore-test.json. Failure raises an alert.
 . "$(dirname "$0")/lib.sh"
 
+take_lock
 gen=${1:-$(newest_generation)}
 [ -n "$gen" ] && [ -d "$gen" ] || { alert "restore drill found no generation to restore"; exit 1; }
 manifest="$gen/MANIFEST.json"
 drill=/tmp/restore-drill
 port=5499
 started=$(date +%s)
-mkdir -p "$STATE"
 runlog="$STATE/restore-test.log"
 : >"$runlog"
 
@@ -24,8 +24,14 @@ stop_cluster() {
 	su-exec postgres pg_ctl -D "$drill/data" -m immediate stop >/dev/null 2>&1 || true
 	rm -rf "$drill"
 }
-trap stop_cluster EXIT
+finish() {
+	rc=$?
+	stop_cluster
+	[ "$rc" -eq 0 ] || [ -n "${alerted:-}" ] || alert "restore drill of $(basename "$gen") stopped unexpectedly (exit $rc); see .staging/.state/restore-test.log"
+}
+trap finish EXIT
 die() {
+	alerted=1
 	alert "restore drill of $(basename "$gen") failed: $1"
 	exit 1
 }
@@ -42,8 +48,10 @@ su-exec postgres pg_ctl -D "$drill/data" -w -l "$drill/server.log" \
 
 local_psql() { psql -X -h "$drill" -p "$port" -U postgres "$@"; }
 local_psql -d postgres -qc "create database conversations" >>"$runlog" 2>&1 || die "create database failed"
+# Its output is not quoted in the alert: a failed COPY's CONTEXT line carries row
+# content, and alerts leave the private folder.
 pg_restore -h "$drill" -p "$port" -U postgres -d conversations --no-owner --no-acl --exit-on-error --jobs=4 \
-	"$gen/conversations.pgdump" >>"$runlog" 2>&1 || die "pg_restore failed ($(tail -1 "$runlog"))"
+	"$gen/conversations.pgdump" >>"$runlog" 2>&1 || die "pg_restore failed; see .staging/.state/restore-test.log"
 restored_at=$(date +%s)
 
 restored=$(local_psql -d conversations -At -F ' ' -c "$COUNT_SQL") || die "counting restored rows failed"

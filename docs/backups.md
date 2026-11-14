@@ -35,8 +35,11 @@ restore-test.json        result of the last restore drill
 .staging/                work area, excluded from sync (.stignore: /.staging)
 ```
 
-`host-config.tar.gz` contains credentials. The backup directory must only ever
-sync to machines you would give those credentials to.
+`host-config.tar.gz` contains credentials, and nothing in a generation is
+encrypted: the dump, the Chroma archive and the config archive are plain files.
+Syncthing encrypts them in transit only. The backup directory must only ever
+sync to machines you would give those credentials to, unless the far end is
+added as an untrusted (encrypted) Syncthing device.
 
 Two generations are kept (`BACKUP_KEEP`). History is the far end's job, for
 example ZFS snapshots of the receiving dataset; the sidecar keeps a short tail.
@@ -53,6 +56,8 @@ nothing noticed. So each run refuses to promote anything it has not checked:
 - **Right database, not empty.** `current_database()` is checked, and the dump
   must hold table data for `sessions`, `messages`, `session_chunks`,
   `embeddings`, `tags` and `projects`, with non-zero sessions and messages.
+  A table-of-contents entry exists for an empty table too, so the verifier also
+  reads the dump's `sessions` rows and requires at least one.
 - **Complete.** `pg_restore --list` reads only the table of contents, which a
   truncated file still has, so the verifier also reads every data block
   (`pg_restore --file=/dev/null`).
@@ -60,12 +65,21 @@ nothing noticed. So each run refuses to promote anything it has not checked:
   must each be at least 50% of the previous generation (`BACKUP_MIN_RATIO_PCT`).
 - **Chroma consistent.** `chroma.sqlite3` is copied with sqlite's online backup
   (busy timeout, read-only), then `PRAGMA quick_check`. The HNSW files are plain
-  files, so their size and mtime are recorded before and after the copy and the
-  copy is retried if any changed.
+  files, so their size and nanosecond mtime are recorded before and after the
+  copy and the copy is retried if any changed.
+- **Chroma replayable.** Chroma records each index's replay point
+  (`max_seq_id`) in sqlite and keeps the index in files; on start it replays the
+  queue past that point. A copy whose sqlite point is ahead of its index files
+  restores with correct counts and vectors that search can never find. So the
+  index's element count (hnswlib header) plus the queue left to replay must
+  cover every metadata row, or the copy is retried.
 
 Everything is built in `.staging/`, then renamed into `generations/` in one
 step. A run killed halfway leaves only staging debris, which the next run
-deletes; a second concurrent run exits on a lock.
+deletes. Backup runs and restore drills share one lock: a second one exits 75
+and the loop retries later. Pruning runs only after a promotion and keeps the
+`BACKUP_KEEP` newest (at least 1), so the generation just verified is never
+pruned.
 
 ## Restore drill
 
@@ -83,7 +97,8 @@ docker exec mindmeld-backup /opt/mindmeld-backup/restore-test.sh
 
 ## Alerts
 
-Any failure prints `ERROR: mindmeld-backup: <reason>` and, when `BACKUP_NTFY_*`
+Any failure prints `ERROR: mindmeld-backup: <reason>`, including a run that
+dies somewhere no check anticipated (disk full while writing the manifest), and, when `BACKUP_NTFY_*`
 are set in `.env`, pushes the same text to ntfy directly. The same failure is
 pushed once per 24 hours, not once per retry. A failed run is retried after
 three hours; every path through the loop sleeps, so a failure cannot spin.
@@ -103,6 +118,24 @@ pg_restore -h <host> -p <port> -U mindmeld -d conversations --no-owner --jobs=4 
 Use `pg_restore` of the same major version as the dump (`pg_server_major` in
 the manifest). For Chroma, stop the `chroma` service, extract
 `chroma.tar.zst` into its empty data volume (`tar --zstd -xf`), and start it.
+
+### Proving a Chroma restore searches
+
+Counts cannot prove it: `count()` reads sqlite, so a store whose index lost
+vectors still reports every row. Restore into a throwaway Chroma of the same
+image on a free loopback port, sample ids, and query with the live vectors:
+
+```bash
+docker volume create chroma-restore
+docker run --rm -v <generation dir>:/gen:ro -v chroma-restore:/restore --entrypoint sh   mindmeld-backup:local -c 'cd /restore && zstd -dc /gen/chroma.tar.zst | tar -xf -'
+docker run --rm -v chroma-restore:/restore:ro -v <private dir>:/out --entrypoint sh   mindmeld-backup:local /opt/mindmeld-backup/chroma-sample-ids.sh
+docker run -d --name chroma-restore -p 127.0.0.1:<free port>:8000 -v chroma-restore:/data <live chroma image id>
+python -I scripts/backup/chroma-search-check.py http://127.0.0.1:8001 http://127.0.0.1:<free port> <private dir>
+```
+
+It fails when the restored store finds fewer sampled vectors in its own top 10
+than live does (HNSW is approximate, and live misses some too). Remove the
+container, the volume and the id files afterwards.
 
 ## Why Chroma is backed up at all
 

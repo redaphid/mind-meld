@@ -20,6 +20,13 @@ for t in $REQUIRED_TABLES; do
 	grep -q "TABLE DATA public $t " "$toc" || fail "postgres dump has no data for table $t (empty or wrong database)"
 done
 
+# A TABLE DATA entry exists for an empty table too, so a dump of a freshly
+# migrated, empty database passes the check above. Count real rows in one small table.
+rows=$(pg_restore --data-only --table=sessions --file=- "$dump" 2>/dev/null |
+	awk '/^COPY /{inside = 1; next} /^\\\.$/{inside = 0} inside{n++} END{print n + 0}') ||
+	fail "pg_restore cannot read the sessions table data"
+[ "$rows" -gt 0 ] || fail "postgres dump holds no sessions rows (empty database)"
+
 # --list reads only the table of contents at the head of the file, so a dump cut
 # short still lists cleanly. Reading every data block is what catches truncation.
 pg_restore --file=/dev/null "$dump" 2>/dev/null || fail "pg_restore could not read the whole dump (truncated or corrupt)"

@@ -17,8 +17,7 @@ use_dump=
 [ "${1:-}" = "--use-dump" ] && use_dump=$2
 
 mkdir -p "$STATE" "$GENERATIONS"
-exec 9>"$STATE/lock"
-flock -n 9 || { log "another backup run holds the lock; not starting a second"; exit 0; }
+take_lock
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 work="$STAGING/$stamp"
@@ -26,16 +25,23 @@ runlog="$STATE/last-run.log"
 : >"$runlog"
 snapdir=/tmp/chroma-snapshot
 
+# set -e can end the run anywhere (disk full while writing the manifest, say), and
+# such an exit must alert like any other failure instead of leaving only staleness.
 cleanup() {
-	[ -n "${holder_fd_open:-}" ] && exec 8>&- 2>/dev/null
+	rc=$?
+	[ -z "${holder_fd_open:-}" ] || exec 8>&- 2>/dev/null
 	rm -rf "$work" "$snapdir"
+	[ "$rc" -eq 0 ] || [ -n "${alerted:-}" ] || alert "backup run stopped unexpectedly (exit $rc); see .staging/.state/last-run.log"
 }
 trap cleanup EXIT
 
 die() {
+	alerted=1
 	alert "$1"
 	exit 1
 }
+
+case $BACKUP_KEEP in '' | *[!0-9]* | 0) die "BACKUP_KEEP must be a whole number of at least 1, not '$BACKUP_KEEP'" ;; esac
 
 # A bind mount that resolves to the wrong place is silently writable: this is how
 # dumps once landed in a VM-internal directory nobody synced. Refuse to run
@@ -109,9 +115,10 @@ log "postgres dump verified: $(file_bytes "$work/conversations.pgdump") bytes, d
 # in small steps and releases the lock between them, so chroma's writers are not
 # stalled for the whole copy; the busy timeout waits out a writer holding the lock.
 # The HNSW segment files are plain files rewritten when chroma persists an
-# index. Their (name, size, mtime) is recorded before and after the copy, and the
-# copy is retried if any changed, so the copied index matches the snapshot.
-segments_signature() { find "$CHROMA_DATA" -mindepth 2 -type f -exec stat -c '%n %s %Y' {} + | sort | cksum; }
+# index. Their (name, size, mtime to the nanosecond) is recorded before and after
+# the copy, and the copy is retried if any changed: data_level0.bin keeps its
+# size between persists, so only the mtime shows a rewrite.
+segments_signature() { find "$CHROMA_DATA" -mindepth 2 -type f -exec stat -c '%n %s %y' {} + | sort | cksum; }
 
 [ -s "$CHROMA_DATA/chroma.sqlite3" ] || die "chroma.sqlite3 is missing under $CHROMA_DATA"
 attempt=0
@@ -124,9 +131,15 @@ while :; do
 	for d in "$CHROMA_DATA"/*/; do
 		[ -d "$d" ] && cp -a "$d" "$snapdir/"
 	done
-	[ "$(segments_signature)" = "$before" ] && break
-	[ $attempt -lt 5 ] || die "chroma index files kept changing during the copy"
-	log "chroma index files changed during copy $attempt; retrying in 60s"
+	if [ "$(segments_signature)" != "$before" ]; then
+		problem="chroma index files changed during the copy"
+	else
+		gaps=$(hnsw_gaps "$snapdir")
+		[ -n "$gaps" ] || break
+		problem="chroma index is behind its replay point ($(echo $gaps))"
+	fi
+	[ $attempt -lt 5 ] || die "$problem, 5 attempts"
+	log "$problem on attempt $attempt; retrying in 60s"
 	sleep 60
 done
 [ "$(sqlite3 "$snapdir/chroma.sqlite3" "PRAGMA quick_check")" = "ok" ] || die "chroma snapshot failed sqlite quick_check"

@@ -35,12 +35,21 @@ union all select 'sessions_md5', md5(coalesce(string_agg(id || ':' || external_i
 
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*"; }
 
+# One lock for everything that reads or writes generations, so a drill can never
+# restore a generation that a backup run is pruning, and two drills never share
+# the throwaway cluster. Busy is exit 75 (EX_TEMPFAIL): the loop retries later.
+take_lock() {
+	mkdir -p "$STATE"
+	exec 9>"$STATE/lock"
+	flock -n 9 || { log "another backup or drill holds the lock; not starting"; exit 75; }
+}
+
 # log-alerter tails `docker logs`, which is PID 1's stdout. A run started with
 # `docker exec` writes somewhere else, so its alerts are copied to PID 1 too.
 emit() {
 	printf '%s\n' "$1"
 	if [ "$(readlink /proc/self/fd/1 2>/dev/null)" != "$(readlink /proc/1/fd/1 2>/dev/null)" ] && [ -w /proc/1/fd/1 ]; then
-		printf '%s\n' "$1" >/proc/1/fd/1
+		printf '%s\n' "$1" >>/proc/1/fd/1
 	fi
 }
 
@@ -92,3 +101,24 @@ file_bytes() { stat -c %s "$1"; }
 # Fails when $1 is below BACKUP_MIN_RATIO_PCT percent of $2. Data here only grows,
 # so a large drop means the dump or snapshot came from the wrong or an empty source.
 ratio_ok() { [ -z "${2:-}" ] || [ "$2" -eq 0 ] || [ $(($1 * 100)) -ge $(($2 * BACKUP_MIN_RATIO_PCT)) ]; }
+
+# Chroma keeps each HNSW segment's replay point (max_seq_id) in sqlite and the
+# index in files. On start it replays the queue past that point into the index.
+# If the copied sqlite's point is ahead of the copied files, the gap is never
+# replayed: counts still match, but those vectors cannot be found by search
+# (proven on a restored copy). So the index's element count (hnswlib header,
+# u64 at byte 20) plus the queue left to replay must cover every metadata row.
+# Prints one line per collection that falls short.
+hnsw_gaps() {
+	sqlite3 "$1/chroma.sqlite3" "select v.id, v.collection,
+		(select count(*) from embeddings e where e.segment_id = m.id),
+		(select count(*) from embeddings_queue q where q.topic like '%/' || v.collection
+			and q.seq_id > coalesce((select x.seq_id from max_seq_id x where x.segment_id = v.id), 0))
+		from segments v join segments m on m.collection = v.collection and m.scope = 'METADATA'
+		where v.scope = 'VECTOR'" |
+		while IFS='|' read -r seg col rows pending; do
+			indexed=0
+			[ ! -f "$1/$seg/header.bin" ] || indexed=$(od -A n -t u8 -j 20 -N 8 "$1/$seg/header.bin" | tr -d ' ')
+			[ $((indexed + pending)) -ge "$rows" ] || echo "collection $col: index $indexed + queue $pending < $rows rows"
+		done
+}
