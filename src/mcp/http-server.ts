@@ -11,7 +11,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
-import { searchWithDiagnostics, findProjectsByPath, UnknownDataClassError } from './search.js'
+import { searchWithDiagnostics, UnknownDataClassError } from './search.js'
 import { SnapshotConflictError } from './ingest-snapshot.js'
 import { IngestPayloadSchema, ingestConversation, MissingDataClassError } from './ingest.js'
 import { getSessionDigest, getMessages, getMessageById } from './session.js'
@@ -550,14 +550,12 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
     throw error
   }
 
-  const projectIds = cwd ? (await findProjectsByPath(cwd)).map(p => p.id) : []
-
   res.json({
     status: 'ok',
     query: q,
     mode: mode ?? 'hybrid',
     count: outcome.results.length,
-    projectIds,
+    projectIds: outcome.projectIds,
     // Additive and null on a healthy search, so nothing that ignores it breaks.
     // Non-null means the vector arms were skipped and these results came from
     // full text alone — the difference between "no such conversation" and "the
@@ -778,7 +776,7 @@ app.post('/api/ingest', async (req: any, res: any) => {
 })
 
 const start = async () => {
-  await runMigrations()
+  await runMigrations(config.postgres)
 
   // Only `mcp` writes the startup value, and only "off". The sync image runs
   // its binary afresh every cycle, so a worker writing it would undo a UI

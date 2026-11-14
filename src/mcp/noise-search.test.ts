@@ -115,10 +115,8 @@ beforeEach(() => {
   })
 
   query.mockImplementation(async (sql: string, params?: unknown[]) => {
-    if (sql.includes('s.id = $1')) {
-      const row = SESSIONS[params?.[0] as number]
-      return { rows: row ? [row] : [] }
-    }
+    if (sql.includes('s.id = ANY($1'))
+      return { rows: (params?.[0] as number[]).flatMap((id) => SESSIONS[id] ?? []) }
     // The full-text arm, for the text-mode cases: sessions 2 and 4 match.
     if (sql.includes('ranked_messages'))
       return {
