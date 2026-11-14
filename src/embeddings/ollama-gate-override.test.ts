@@ -42,9 +42,13 @@ describe("the GPU gate override", () => {
     expect(sentHeaders[0].get("content-type")).toBe("application/json");
   });
 
-  it("is never sent by the background client", async () => {
+  it.each([
+    ["a bulk embedding", () => getOllamaClient().embed({ model: "bge-m3", input: ["a", "b"] })],
+    ["a summarization", () => getOllamaClient().generate({ model: "qwen3:4b-instruct", prompt: "p", stream: false })],
+    ["a model check", () => getOllamaClient().list()],
+  ])("is never sent by the background client on %s", async (_name, call) => {
     stubOllama();
-    await getOllamaClient().embed({ model: "bge-m3", input: "q" });
+    await call();
     expect(sentHeaders).toHaveLength(1);
     expect(sentHeaders[0].has(GATE_OVERRIDE_HEADER)).toBe(false);
   });
@@ -89,11 +93,83 @@ describe("a 503 from the gate", () => {
     expect(res.embeddings).toEqual([[0.1]]);
   });
 
+  it("does not lose a background summarization either", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls++;
+        if (calls === 1) {
+          return new Response("{}", { status: 503, headers: { "Retry-After": "0" } });
+        }
+        return new Response(JSON.stringify({ response: "summary", done: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    const pending = getOllamaClient().generate({
+      model: "qwen3:4b-instruct",
+      prompt: "p",
+      stream: false,
+    });
+    await vi.advanceTimersByTimeAsync(config.ollama.retryDelayMs);
+    await expect(pending).resolves.toMatchObject({ response: "summary" });
+    expect(calls).toBe(2);
+  });
+
   it("fails the interactive client at once, without a retry", async () => {
     stubRefusingOnce();
     await expect(
       getInteractiveOllamaClient().embed({ model: "bge-m3", input: "q" }),
     ).rejects.toThrow();
     expect(calls).toBe(1);
+  });
+});
+
+describe("a dropped connection", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is retried by the background client", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls++;
+        if (calls === 1) throw new TypeError("fetch failed");
+        return new Response(JSON.stringify({ embeddings: [[0.1]] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    const pending = getOllamaClient().embed({ model: "bge-m3", input: "q" });
+    await vi.advanceTimersByTimeAsync(config.ollama.retryDelayMs);
+    await expect(pending).resolves.toMatchObject({ embeddings: [[0.1]] });
+    expect(calls).toBe(2);
+  });
+
+  it("does not fail a background model check either", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls++;
+        if (calls === 1) throw new TypeError("fetch failed");
+        return new Response(JSON.stringify({ models: [{ name: "bge-m3:latest" }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    const pending = getOllamaClient().list();
+    await vi.advanceTimersByTimeAsync(config.ollama.retryDelayMs);
+    await expect(pending).resolves.toMatchObject({ models: [{ name: "bge-m3:latest" }] });
+    expect(calls).toBe(2);
   });
 });
