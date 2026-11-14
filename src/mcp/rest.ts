@@ -4,7 +4,7 @@
 // tools; these mappers are the single seam between the two, so the HTTP
 // contract can stay stable while the query layer evolves.
 
-import type { SearchResult } from './search.js'
+import { SEARCH_MODES, isSearchMode, type SearchMode, type SearchResult } from './search.js'
 import type { Adjustment, EvidenceList } from './evidence.js'
 import type { TitleSource } from './title.js'
 import type { SessionDigest, MessagesResult, RenderedMessage, SessionMessage } from './session.js'
@@ -38,6 +38,24 @@ export type SearchHitDto = {
   evidence: EvidenceList
   base: number
   adjustments: Adjustment[]
+}
+
+// GET /api/search's mode and limit. An unknown mode used to become hybrid
+// silently, so a typo'd ?mode=vector ran a different search from the one asked
+// for; a limit below 1 used to reach the search layer.
+export const SEARCH_LIMIT_DEFAULT = 20
+export const SEARCH_LIMIT_MAX = 100
+
+export const parseSearchShape = (q: {
+  mode?: unknown
+  limit?: unknown
+}): { error: string } | { mode: SearchMode; limit: number } => {
+  const mode = q.mode ?? 'hybrid'
+  if (!isSearchMode(mode)) return { error: `mode must be one of ${SEARCH_MODES.join(', ')}` }
+  if (q.limit === undefined || q.limit === '') return { mode, limit: SEARCH_LIMIT_DEFAULT }
+  const limit = Number(q.limit)
+  if (!Number.isInteger(limit) || limit < 1) return { error: 'limit must be a positive integer' }
+  return { mode, limit: Math.min(limit, SEARCH_LIMIT_MAX) }
 }
 
 const iso = (value: Date | string | null | undefined): string | null => {

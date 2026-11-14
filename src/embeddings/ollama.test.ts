@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   isRecoverableEmbedError,
   isOversizeEmbedError,
   isNaNEmbedError,
   retryAfterMs,
+  getInteractiveOllamaClient,
 } from "./ollama.js";
 import { config } from "../config.js";
 
@@ -158,5 +159,28 @@ describe("retryAfterMs", () => {
       expect(retryAfterMs("")).toBe(retryDelayMs);
       expect(retryAfterMs("soon")).toBe(retryDelayMs);
     });
+  });
+});
+
+// A search that gave up must not keep the one Ollama slot busy embedding a
+// query nobody will read.
+describe("the interactive client", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("cancels the request in flight when its caller aborts", async () => {
+    let seen: AbortSignal | undefined;
+    vi.stubGlobal("fetch", (_input: unknown, init: RequestInit) => {
+      seen = init.signal ?? undefined;
+      return new Promise((_resolve, reject) =>
+        init.signal?.addEventListener("abort", () => reject(init.signal?.reason)),
+      );
+    });
+    const caller = new AbortController();
+    const embedding = getInteractiveOllamaClient(caller.signal).embed({ model: "m", input: "q" });
+    await vi.waitFor(() => expect(seen).toBeDefined());
+    caller.abort(new Error("search-abandoned-heron"));
+    await expect(embedding).rejects.toThrow("search-abandoned-heron");
   });
 });

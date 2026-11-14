@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
 import { listProjects, listSessions, getActivity } from './browse.js'
-import { toSearchHit, toDigest, toMessages, toMessage } from './rest.js'
+import { toSearchHit, toDigest, toMessages, toMessage, parseSearchShape } from './rest.js'
 import { listQuarantine, replayQuarantine, countPending } from '../sync/quarantine.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { hostHeaderValidation } from '@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js'
@@ -11,7 +11,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
-import { searchWithDiagnostics, UnknownDataClassError, SEARCH_MODES, isSearchMode } from './search.js'
+import { searchWithDiagnostics, UnknownDataClassError } from './search.js'
 import { SnapshotConflictError } from './ingest-snapshot.js'
 import { IngestPayloadSchema, ingestConversation, MissingDataClassError } from './ingest.js'
 import { getSessionDigest, getMessages, getMessageById } from './session.js'
@@ -504,19 +504,12 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
     return
   }
 
-  // An unknown mode used to become hybrid silently, so a typo'd
-  // ?mode=vector returned a different search from the one asked for.
-  const mode = req.query.mode ?? 'hybrid'
-  if (!isSearchMode(mode)) {
-    res.status(400).json({ status: 'error', error: `mode must be one of ${SEARCH_MODES.join(', ')}` })
+  const shape = parseSearchShape(req.query)
+  if ('error' in shape) {
+    res.status(400).json({ status: 'error', error: shape.error })
     return
   }
-
-  const limit = intParam(req.query.limit, 20)
-  if (limit < 1) {
-    res.status(400).json({ status: 'error', error: 'limit must be a positive integer' })
-    return
-  }
+  const { mode, limit } = shape
 
   const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : undefined
 
@@ -530,7 +523,7 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
       query: q,
       negativeQuery: typeof req.query.not === 'string' ? req.query.not : undefined,
       mode,
-      limit: Math.min(limit, 100),
+      limit,
       source: typeof req.query.source === 'string' ? req.query.source : undefined,
       since: typeof req.query.since === 'string' ? req.query.since : undefined,
       cwd,
