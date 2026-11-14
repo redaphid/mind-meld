@@ -141,9 +141,9 @@ describe('runFullSync phases', () => {
   })
 })
 
-// The flag a session was written with stays until its transcript changes, and
-// an unchanged transcript is never rewritten. So a prefix configured after a
-// session last synced never reached it, however many runs followed (#177).
+// A pattern configured after a session last synced never reached it, however
+// many runs followed (#177). Each run now flags what the classifier marks, and
+// never clears a flag.
 describe('runFullSync and the automated flag', () => {
   const prefixes = config.automated.prefixes
   const configure = (list: string[]) => Object.assign(config.automated, { prefixes: list })
@@ -151,7 +151,7 @@ describe('runFullSync and the automated flag', () => {
 
   const indexHolds = (session: { stored: boolean; opening: string }) =>
     vi.mocked(query).mockImplementation((async (sql: string) =>
-      sql.includes('opening')
+      sql.includes('AS opening')
         ? { rows: [{ id: 7, source: 'claude_code', machine: 'lairbox', ...session }] }
         : { rows: [], rowCount: sql.startsWith('UPDATE') ? 1 : 0 }) as never)
   const flagWrites = () => vi.mocked(query).mock.calls.filter(([sql]) => String(sql).startsWith('UPDATE sessions'))
@@ -162,14 +162,13 @@ describe('runFullSync and the automated flag', () => {
 
     const result = await runFullSync({ sources: [] })
 
-    expect(flagWrites()).toHaveLength(1)
-    expect(flagWrites()[0][1]).toEqual([[7], [false]])
-    expect(result.automatedFlagsCorrected).toBe(1)
+    expect(flagWrites()).toEqual([[expect.stringContaining('SET is_automated = true'), [[7]]]])
+    expect(result.automatedFlagsSet).toBe(1)
     expect(result.errors).toEqual([])
   })
 
   // A session flagged now must leave the queue before this run summarizes it.
-  it('corrects flags before the embedding phase reads the queue', async () => {
+  it('flags before the embedding phase reads the queue', async () => {
     configure(['Night-shift lair report:'])
     indexHolds({ stored: false, opening: 'Night-shift lair report: all quiet' })
 
@@ -179,13 +178,24 @@ describe('runFullSync and the automated flag', () => {
     expect(write).toBeLessThan(vi.mocked(generatePendingEmbeddings).mock.invocationCallOrder[0])
   })
 
-  it('writes nothing when every stored flag already agrees', async () => {
-    configure(['Night-shift lair report:'])
+  // One container recreated without the variable would otherwise clear ~800
+  // flags each run while the configured workers set them again.
+  it('changes no flag when run by a worker whose prefix list is empty', async () => {
+    configure([])
     indexHolds({ stored: true, opening: 'Night-shift lair report: all quiet' })
 
     const result = await runFullSync({ sources: [] })
 
     expect(flagWrites()).toEqual([])
-    expect(result.automatedFlagsCorrected).toBe(0)
+    expect(result.automatedFlagsSet).toBe(0)
+  })
+
+  it('records a failed check as a run error and still runs the embedding phase', async () => {
+    vi.mocked(query).mockRejectedValue(new Error('database gone'))
+
+    const result = await runFullSync({ sources: [] })
+
+    expect(result.errors).toEqual([expect.stringContaining('database gone')])
+    expect(generatePendingEmbeddings).toHaveBeenCalled()
   })
 })

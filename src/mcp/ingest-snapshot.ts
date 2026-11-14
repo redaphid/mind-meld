@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { transaction } from '../db/postgres.js'
-import { isAutomated } from '../embeddings/classify.js'
+import { flagAutomated } from '../embeddings/automated-flags.js'
 import { normalizeDeep } from '../utils/text-encoding.js'
 import type { IngestPayload } from './ingest-schema.js'
 
@@ -51,9 +51,9 @@ export const ingestSnapshot = async (sourceId: number, input: IngestPayload) => 
     if (payload.messages.length > 0) {
       const logicalHash = createHash('sha256').update(externalId).digest('hex')
       const session = await client.query<{ id: number }>(
-        `INSERT INTO sessions (project_id, external_id, title, started_at, ended_at, os, is_automated, last_synced_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW()) RETURNING id`,
-        [projectId, `snapshot:${logicalHash}:${revision}:${hash}`, payload.session.title, payload.session.startedAt, payload.session.endedAt ?? null, payload.os ?? null, isAutomated(payload.session.title)]
+        `INSERT INTO sessions (project_id, external_id, title, started_at, ended_at, os, last_synced_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW()) RETURNING id`,
+        [projectId, `snapshot:${logicalHash}:${revision}:${hash}`, payload.session.title, payload.session.startedAt, payload.session.endedAt ?? null, payload.os ?? null]
       )
       sessionId = session.rows[0].id
       for (const message of payload.messages)
@@ -62,6 +62,7 @@ export const ingestSnapshot = async (sourceId: number, input: IngestPayload) => 
           [sessionId, message.externalId, message.role, message.content, message.metadata === undefined ? null : JSON.stringify(message.metadata), message.timestamp, message.sequenceNum]
         )
       await client.query('SELECT update_session_stats($1::integer)', [sessionId])
+      await flagAutomated([sessionId], client.query.bind(client))
       await client.query(`UPDATE sessions SET content_chars = (SELECT COALESCE(SUM(LENGTH(content_text)), 0) FROM messages WHERE session_id = $1) WHERE id = $1`, [sessionId])
     }
     await client.query(`UPDATE sessions SET deleted_at = NOW(), centroid_vector = NULL WHERE id = $1`, [head.current_session_id])

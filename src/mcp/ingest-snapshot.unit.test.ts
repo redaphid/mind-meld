@@ -83,13 +83,16 @@ describe('when the effective project class differs', () => {
   })
 })
 
-// Every other writer classifies what it writes; this one stored false (#177).
+// Every other writer classified what it wrote; this one stored false (#177).
+// It now classifies inside its own transaction, where the new rows are visible.
 describe('when a snapshot thread opens like an automated run', () => {
-  it('stores it flagged automated', async () => {
-    const automated = payload()
-    automated.session.title = 'Huddle in #lair: lantern standup'
-    await ingestSnapshot(7, automated)
-    const insert = query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO sessions'))
-    expect(insert?.[1].at(-1)).toBe(true)
+  it('flags it automated in the same transaction', async () => {
+    const base = query.getMockImplementation()!
+    query.mockImplementation(async (sql: string, params: unknown[]) =>
+      sql.includes('AS opening')
+        ? { rows: [{ id: 71, source: 'source-roaming-squid', machine: null, stored: false, opening: 'Huddle in #lair: lantern standup' }] }
+        : base(sql, params))
+    await ingestSnapshot(7, payload())
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('SET is_automated = true'), [[71]])
   })
 })

@@ -1,11 +1,8 @@
 import { query } from '../db/postgres.js'
 import { isAutomated } from './classify.js'
+import { MEMORY_EXTERNAL_ID_LIKE } from '../sync/memory-id.js'
 
-// Sources synced through syncSession in src/sync/claude-code.ts, which
-// classifies a transcript by its first user message: transcripts carry no
-// title since #95. Memory backups share the claude_code source but hold no user
-// message, and their writer classifies the title, as every other writer does.
-const FIRST_PROMPT_SOURCES = ['claude_code', 'codex']
+type Run = Pick<typeof import('../db/postgres.js'), 'query'>['query']
 
 // A live session whose stored is_automated is the opposite of what
 // classifyAutomated says about its opening line today.
@@ -16,34 +13,68 @@ export type FlagDrift = {
   stored: boolean
 }
 
-// is_automated is a cached reading of a session's opening line against the
-// configured patterns, and sync rewrites it only when a transcript changes. So
-// a pattern added later never reaches sessions whose files are done changing,
-// and a flag set by anything but classifyAutomated is undone by the next
-// re-sync (#177). Zero rows means every stored flag agrees.
-export const findAutomatedDrift = async (): Promise<FlagDrift[]> => {
-  const { rows } = await query<FlagDrift & { opening: string | null }>(
-    `SELECT s.id, src.name AS source, COALESCE(s.machine, p.machine) AS machine, s.is_automated AS stored,
-            split_part(CASE WHEN m.found THEN m.content_text ELSE s.title END, E'\\n', 1) AS opening
-     FROM sessions s
-     JOIN projects p ON p.id = s.project_id
-     JOIN sources src ON src.id = p.source_id
-     LEFT JOIN LATERAL (
-       SELECT true AS found, content_text FROM messages
-       WHERE src.name = ANY($1::text[]) AND session_id = s.id AND role = 'user'
-       ORDER BY sequence_num NULLS FIRST, timestamp, id
-       LIMIT 1
-     ) m ON true
-     WHERE s.deleted_at IS NULL`,
-    [FIRST_PROMPT_SOURCES]
-  )
-  return rows
+// Sources synced through syncSession in src/sync/claude-code.ts.
+const TRANSCRIPT_SOURCES = ['claude_code', 'codex']
+
+// The text a session is classified by, for every writer: the only statement of
+// that rule (#177). Writers flag through flagAutomated once their messages
+// land, and drift is measured against the same rows, so the two cannot differ.
+//
+// - A transcript is judged by its first user message, even an empty one: it
+//   carries no title since #95, and a later user message can be a tool result
+//   quoting a persona prompt. A transcript with no user message is not
+//   automated.
+// - A memory backup shares the claude_code source but is judged by its title,
+//   the memory's name: its messages are versions of the file, not a prompt.
+// - Every other source is judged by its title, which names the thread.
+const openings = async (run: Run, ids?: readonly number[]) =>
+  (
+    await run<FlagDrift & { opening: string | null }>(
+      `SELECT s.id, src.name AS source, p.machine AS machine, s.is_automated AS stored,
+              split_part(CASE WHEN kind.transcript THEN m.content_text ELSE s.title END, E'\\n', 1) AS opening
+       FROM sessions s
+       JOIN projects p ON p.id = s.project_id
+       JOIN sources src ON src.id = p.source_id
+       CROSS JOIN LATERAL (
+         SELECT src.name = ANY($2::text[]) AND s.external_id NOT LIKE $3 AS transcript
+       ) kind
+       LEFT JOIN LATERAL (
+         SELECT content_text FROM messages
+         WHERE kind.transcript AND session_id = s.id AND role = 'user'
+         ORDER BY sequence_num NULLS FIRST, timestamp, id
+         LIMIT 1
+       ) m ON true
+       WHERE s.deleted_at IS NULL AND ($1::int[] IS NULL OR s.id = ANY($1::int[]))`,
+      [ids ?? null, TRANSCRIPT_SOURCES, MEMORY_EXTERNAL_ID_LIKE]
+    )
+  ).rows
+
+const drifted = (rows: Awaited<ReturnType<typeof openings>>): FlagDrift[] =>
+  rows
     .filter((row) => isAutomated(row.opening) !== row.stored)
     .map(({ id, source, machine, stored }) => ({ id, source, machine, stored }))
+
+// Sessions whose stored flag the classifier contradicts, in both directions.
+// `stored: false` should be flagged; `stored: true` is flagged by something
+// this process's rule does not explain. Both are 0 on a healthy index.
+export const findAutomatedDrift = async (): Promise<FlagDrift[]> => drifted(await openings(query))
+
+// Flags the given sessions, or every live session, that the classifier marks
+// automated. It never clears one. Every worker runs this with its own
+// environment, so a worker missing MINDMELD_AUTOMATED_PREFIXES must not be able
+// to undo what a configured one set: clearing is correctAutomatedDrift's job,
+// run on purpose by scripts/backfill-automated.ts.
+export const flagAutomated = async (ids?: readonly number[], run: Run = query): Promise<number> => {
+  const missing = drifted(await openings(run, ids)).filter((d) => !d.stored)
+  if (missing.length === 0) return 0
+  const result = await run(`UPDATE sessions SET is_automated = true WHERE id = ANY($1::int[]) AND NOT is_automated`, [
+    missing.map((d) => d.id),
+  ])
+  return result.rowCount ?? 0
 }
 
-// One statement, so it lands whole or not at all. A row that changed since it
-// was read keeps its new value: the write it lost to classified it too.
+// Sets each drifted flag to what the classifier says, in one statement. A row
+// whose flag changed since it was read keeps its new value.
 export const correctAutomatedDrift = async (drift: readonly FlagDrift[]): Promise<number> => {
   if (drift.length === 0) return 0
   const result = await query(
