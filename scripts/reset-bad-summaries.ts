@@ -7,10 +7,12 @@
 //   pnpm tsx scripts/reset-bad-summaries.ts --execute --category too_short
 //
 // The SQL signals here mirror scripts/audit-summaries.sh — keep them in sync.
+// loopy is not SQL: it is the summarizer's own isRepetitionLoop, via the health scan.
 
 import { query } from "../src/db/postgres.js";
 import { deleteByIds } from "../src/db/chroma.js";
 import { config } from "../src/config.js";
+import { loopingSummaryIds } from "../src/mcp/health.js";
 
 const CATEGORIES = [
   "truncated",
@@ -54,12 +56,7 @@ const SIGNALS_SQL = `
       (LENGTH(s.summary) < 500 AND s.content_chars > 8000) AS too_short,
       (s.content_chars > 5000
         AND LENGTH(s.summary)::numeric / NULLIF(s.content_chars, 0) < 0.005) AS over_compressed,
-      (LENGTH(s.summary) > 2000
-        AND array_length(string_to_array(s.summary, ' '), 1) > 300
-        AND (SELECT COUNT(DISTINCT w)::numeric
-               / NULLIF(array_length(string_to_array(s.summary, ' '), 1), 0)
-             FROM unnest(string_to_array(s.summary, ' ')) AS w) < 0.05
-      ) AS loopy,
+      (s.id = ANY($1::int[])) AS loopy,
       (s.summary ~ '^\\s*\\{' AND s.summary ~ '"file_paths"\\s*:') AS json_dump,
       -- Summaries should describe, not reproduce. Two or more fenced code blocks
       -- (>= 4 triple-backtick runs) means the model dumped code instead of summarizing.
@@ -78,10 +75,12 @@ const whereForCategory = (cat: Category | undefined): string => {
 
 const main = async () => {
   const where = whereForCategory(onlyCategory);
+  const loopIds = [await loopingSummaryIds()];
 
   const rows = await query<{ id: number }>(
     `${SIGNALS_SQL}
      SELECT id FROM scored WHERE ${where} ORDER BY id`,
+    loopIds,
   );
   const ids = rows.rows.map((r) => r.id);
   console.log(
@@ -100,6 +99,7 @@ const main = async () => {
      UNION ALL SELECT 'loopy', COUNT(*)::text FROM scored WHERE loopy
      UNION ALL SELECT 'json_dump', COUNT(*)::text FROM scored WHERE json_dump
      UNION ALL SELECT 'code_dump', COUNT(*)::text FROM scored WHERE code_dump`,
+    loopIds,
   );
   console.table(breakdown.rows);
 
