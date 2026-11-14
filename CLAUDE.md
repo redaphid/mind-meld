@@ -639,6 +639,15 @@ removes a volume. Three rules are deliberate:
   update or health check is pushed on its own, since it can leave the host on
   main's revision and still broken.
 
+- **Unknown is not current.** When docker cannot be asked, no app container is
+  running, or origin cannot be fetched, `status` says UNKNOWN and exits
+  nonzero, and a run that stays unable to tell for the stale threshold alerts.
+- **Postgres is not followed.** Its image is the stock server rebuilt by every
+  publish; following it would restart the database on every merge. Migrations
+  come from `mcp`, not from that image. `AUTOUPDATE_EXCLUDE_SERVICES` (default
+  `postgres`) names what is held; `status` lists it as not auto-updated.
+  Stopped containers are left stopped.
+
 To roll back: `scripts/host-autoupdate.sh pause`, then
 `docker tag <image>:prev <image>:latest` and `docker compose up -d --no-deps
 <service>` (each replaced image is tagged `:prev` first). `resume` when main is
