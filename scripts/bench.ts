@@ -14,7 +14,7 @@ import 'dotenv/config'
 import { parseArgs } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { closePool } from '../src/db/postgres.js'
-import { resolveBenchDir } from '../src/bench/dir.js'
+import { resolveBenchDir, resolveRunName } from '../src/bench/dir.js'
 import { loadBench } from '../src/bench/store.js'
 import { runBench } from '../src/bench/run.js'
 
@@ -36,7 +36,7 @@ const lines = await runBench({
   dir,
   systems: values.system ?? ['hybrid'],
   config: values.config,
-  name: values.name ?? new Date().toISOString().replace(/[:.]/g, '-'),
+  name: resolveRunName(values.name),
   from: values.from,
   judge: !values['no-judge'],
 })

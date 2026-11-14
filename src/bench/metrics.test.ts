@@ -99,6 +99,14 @@ describe('bootstrapMean', () => {
     expect(interval.lo < 0.5 && interval.hi > 0.5).toBe(true)
   })
 
+  // 100 values of 0 and 1: standard error 0.05, so a 95% interval is about
+  // 0.196 wide and a 90% one about 0.164.
+  it('is a 95% interval', () => {
+    const interval = bootstrapMean(Array.from({ length: 100 }, (_, i) => i % 2))!
+    expect(interval.hi - interval.lo).toBeGreaterThan(0.18)
+    expect(interval.hi - interval.lo).toBeLessThan(0.21)
+  })
+
   it('repeats exactly under the same seed', () => {
     expect(bootstrapMean([0, 0.3, 0.9, 1])).toEqual(bootstrapMean([0, 0.3, 0.9, 1]))
   })

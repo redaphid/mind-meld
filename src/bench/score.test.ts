@@ -82,6 +82,14 @@ describe('scoreQuery', () => {
     expect(scoreQuery(queryOf(), run.results, grades, run).ndcg10).toBeCloseTo(0.5, 10)
   })
 
+  // The run returned 11 (grade 3) but missed judged 13 (grade 2): the ideal
+  // still counts 13, so the score is 7 / (7 + 3/log2(3)), not 1.
+  it('scores nDCG against judged sessions the run missed', () => {
+    const run = runOf([11])
+    const withMissed = new Map<number, Grade>([...grades, [13, 2]])
+    expect(scoreQuery(queryOf(), run.results, withMissed, run).ndcg10).toBeCloseTo(7 / (7 + 3 / Math.log2(3)), 10)
+  })
+
   it('counts any hit on a no-answer query as a false positive', () => {
     const run = runOf([12])
     expect(scoreQuery(queryOf({ stratum: 'noanswer', goldSessionIds: [] }), run.results, grades, run).falsePositive).toBe(1)

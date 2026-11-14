@@ -16,7 +16,7 @@ import path from 'node:path'
 import { parseArgs } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { closePool } from '../src/db/postgres.js'
-import { resolveBenchDir } from '../src/bench/dir.js'
+import { resolveBenchDir, resolveRunName } from '../src/bench/dir.js'
 import { resolveSystems } from '../src/bench/run.js'
 import { buildSteering, runSteering } from '../src/bench/steering.js'
 import { searcherFor } from '../src/bench/systems.js'
@@ -49,7 +49,7 @@ if (values.build) {
 } else {
   const report = await runSteering(
     dir,
-    values.name ?? new Date().toISOString().replace(/[:.]/g, '-'),
+    resolveRunName(values.name),
     { base: await searcher(names.base), toward: await searcher(names.toward), away: await searcher(names.away), names },
     log
   )
