@@ -209,6 +209,21 @@ SUMMARY:`;
   return summary;
 }
 
+// A chunk this small is its own best summary. On a live index (2026-11-13),
+// 240 of 245 stored summaries of chunks under 2,000 chars were longer than the
+// chunk itself (30 of 30 under 500 chars, median 7x), padded with work the
+// chunk never described. Long sessions end in such a remainder chunk.
+export const CHUNK_VERBATIM_CHARS = 2000;
+
+// The chunk tier's summary of one chunk. Above the floor, a summary that does
+// not come back shorter than its chunk is padding of the same kind, so the
+// chunk's own text is kept instead.
+export async function summarizeSessionChunk(text: string): Promise<string> {
+  if (text.length <= CHUNK_VERBATIM_CHARS) return text;
+  const summary = await summarizeChunk(text, true);
+  return summary.length < text.length ? summary : text;
+}
+
 // Combine multiple summaries into one
 export async function combineSummaries(summaries: string[]): Promise<string> {
   const combined = summaries.join("\n\n---\n\n");

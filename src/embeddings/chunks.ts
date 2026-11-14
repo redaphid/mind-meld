@@ -3,7 +3,7 @@ import { query } from "../db/postgres.js";
 import { upsertEmbeddings, deleteByIds } from "../db/chroma.js";
 import { generateEmbeddings } from "./ollama.js";
 import {
-  summarizeChunk,
+  summarizeSessionChunk,
   chunkMessagesWithIndices,
   CHUNK_SIZE_CHARS,
   SHORT_CONVERSATION_CHARS,
@@ -85,7 +85,7 @@ export const persistSessionChunks = async (
       console.log(
         `Summarizing chunk ${i + 1}/${chunks.length} for session ${sessionId} (${chunkText.length} chars, messages ${startMessageId}..${endMessageId})...`,
       );
-      summary = await summarizeChunk(chunkText, true);
+      summary = await summarizeSessionChunk(chunkText);
       const elapsedS = ((performance.now() - startedAt) / 1000).toFixed(1);
       console.log(
         `Chunk ${i + 1}/${chunks.length} (${summary.length} chars, ${elapsedS}s): ${summary.replace(/\s+/g, " ").slice(0, 200)}`,
