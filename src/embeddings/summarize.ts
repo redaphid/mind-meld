@@ -285,15 +285,37 @@ const rejectNonSummary = (summary: string): string => {
   return summary;
 };
 
+// A chunk this small is its own best summary. On a live index (2026-11-13),
+// 240 of 245 stored summaries of chunks under 2,000 chars were longer than the
+// chunk itself (30 of 30 under 500 chars, median 7x), padded with work the
+// chunk never described. Long sessions end in such a remainder chunk.
+export const CHUNK_VERBATIM_CHARS = 2000;
+
+// The chunk tier's summary of one chunk. Above the floor, a summary that does
+// not come back shorter than its chunk is padding of the same kind, so the
+// chunk's own text is kept instead.
+export async function summarizeSessionChunk(text: string): Promise<string> {
+  if (text.length <= CHUNK_VERBATIM_CHARS) return text;
+  const summary = await summarizeChunk(text, true);
+  return summary.length < text.length ? summary : text;
+}
+
 // Combine multiple summaries into one
+// joinIfShort: false when any input is transcript kept verbatim (a small chunk,
+// see summarizeSessionChunk). Joined as-is, its [USER]:/[ASSISTANT]: lines
+// would become the session summary, which every bad-summary audit flags as
+// raw_message_leak or truncated, and a reset would only rebuild it the same.
 export async function combineSummaries(
   summaries: string[],
-  style: SummaryStyle = CODING_STYLE,
+  {
+    style = CODING_STYLE,
+    joinIfShort = true,
+  }: { style?: SummaryStyle; joinIfShort?: boolean } = {},
 ): Promise<string> {
   const combined = summaries.join("\n\n---\n\n");
 
   // If combined summaries are short enough, return as-is
-  if (combined.length <= style.verbatimAtOrBelowChars) {
+  if (joinIfShort && combined.length <= style.verbatimAtOrBelowChars) {
     console.log(
       `SUMMARY-OF-SUMMARIES (${summaries.length} chunk summaries joined as-is, ${combined.length} chars):\n${combined}`,
     );
@@ -502,7 +524,7 @@ async function summarizeInChunks(
   }
 
   // Combine all chunk summaries
-  return combineSummaries(chunkSummaries, style);
+  return combineSummaries(chunkSummaries, { style });
 }
 
 // A summary that isn't smaller than its input is not a summary. qwen3 at 0.3 falls
