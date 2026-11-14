@@ -1,0 +1,9 @@
+# Backup sidecar (docker-compose.backup.yml). Built FROM the same image as the
+# database so pg_dump, pg_restore and the drill's throwaway cluster always
+# share the server's major version.
+ARG POSTGRES_IMAGE=ghcr.io/redaphid/mindmeld-postgres:latest
+FROM ${POSTGRES_IMAGE}
+RUN apk add --no-cache sqlite tar zstd curl python3
+COPY scripts/backup/ /opt/mindmeld-backup/
+RUN chmod +x /opt/mindmeld-backup/*.sh
+ENTRYPOINT ["/opt/mindmeld-backup/loop.sh"]

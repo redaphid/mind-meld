@@ -48,13 +48,15 @@ quality
 vitest.config.ts
 knip.jsonc
 
-# Operator-side helper scripts. Two of them ARE container entrypoints - the
+# Operator-side helper scripts. Three of them ARE container entrypoints - the
 # centroids image runs `pnpm compute:centroids`, which excluding this
-# directory left crash-looping forever on ERR_MODULE_NOT_FOUND (task 274), and
-# the local compose `migrate` service runs scripts/migrate.ts.
+# directory left crash-looping forever on ERR_MODULE_NOT_FOUND (task 274),
+# the local compose `migrate` service runs scripts/migrate.ts, and the backup
+# sidecar runs scripts/backup/.
 scripts
 !scripts/compute-centroids.ts
 !scripts/migrate.ts
+!scripts/backup
 *.sh
 
 # Logs
