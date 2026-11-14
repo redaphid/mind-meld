@@ -76,7 +76,7 @@ export type LogEvent = SearchEvent | FollowUpEvent
 // Evidence is kept short and without text: `ev` is each arm's rank and raw
 // similarity, best first, `adj` what each adjustment moved the score by. With
 // `base` that is enough to replay fusion and relevance experiments offline.
-type LoggedEvidence = { arm: Arm; rank: number; cosine: number } | { arm: 'lexical'; rank: number; tsRank: number }
+type LoggedEvidence = { arm: Exclude<Arm, 'lexical'>; rank: number; cosine: number } | { arm: 'lexical'; rank: number; tsRank: number }
 
 export type LoggedHit = {
   s: number

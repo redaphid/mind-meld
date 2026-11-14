@@ -687,10 +687,12 @@ describe('evidence', () => {
     expect((fullText[1] as unknown[]).at(-1)).toBe(8)
   })
 
-  it('over-fetches every vector arm fivefold under a data-class filter', async () => {
+  it('over-fetches every vector arm fivefold under a data-class filter, and full text not at all', async () => {
     serve({})
-    await search({ query: 'q', mode: 'semantic', limit: 4 })
+    await search({ query: 'q', mode: 'hybrid', limit: 4 })
     expect(querySimilar.mock.calls.map(([, , n]) => n)).toEqual([20, 20, 20])
+    const fullText = query.mock.calls.find(([sql]) => String(sql).includes('ranked_messages'))!
+    expect((fullText[1] as unknown[]).at(-1)).toBe(8)
   })
 })
 

@@ -294,7 +294,7 @@ paths:
             default: hybrid
         - name: limit
           in: query
-          description: Hits to return. Capped at 100; below 1 is a 400.
+          description: Hits to return. Capped at 100; a limit that is not a positive integer is a 400.
           schema:
             type: integer
             default: 20
@@ -444,7 +444,7 @@ paths:
                     items:
                       $ref: '#/components/schemas/SearchHit'
         '400':
-          description: Missing `q`, an unknown `mode` or `dataClass`, or a `limit` below 1.
+          description: Missing `q`, an unknown `mode` or `dataClass`, or a `limit` that is not a positive integer.
           content:
             application/json:
               schema:
