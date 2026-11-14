@@ -490,6 +490,31 @@ where γ = 0.2 (prevents over-suppression)
 
 Centroids are automatically recomputed every 7 hours by the `mindmeld-centroids` Docker container. Adjust via `CENTROID_INTERVAL_SECONDS` in `.env`.
 
+### The search log (`search_log`, `src/mcp/search-log.ts`)
+
+Every MCP and REST search writes a row, and so does every call that follows
+one: `getSession`, `getSessionTranscript`, `getMessages`, `getMessage`,
+`getChunk`, tag and report calls, and the REST session and message reads. Each
+search mints a list handle (`Lk3x9qa`), shown on the first line of the MCP text
+and as `list` in REST JSON.
+
+- **Linking.** A follow-up joins a search by the list handle it passes
+  (`list` on the tools, `?list=` over REST), or else by caller: that caller's
+  latest search within 30 minutes whose results hold the session, which also
+  fills `rank`. The caller is the MCP transport session id over HTTP (exact,
+  one per connected client), the process over stdio (one client per process,
+  but interleaved work in it is indistinguishable), and the `X-Mindmeld-Caller`
+  header over REST. Without that header a REST client is `rest:anon`, which is
+  many unrelated clients, so its follow-ups link only by the list they pass.
+- **Never on the response path.** `record` only enqueues; one loop writes rows
+  in order. A full queue (`MINDMELD_SEARCH_LOG_QUEUE`, 1000) drops and counts;
+  a failed insert counts and logs its SQLSTATE only. Both counts are in
+  `/status` as `searchLog`. `MINDMELD_SEARCH_LOG=off` stops writes.
+- **Personal data.** `request` holds query text. It is nulled after
+  `MINDMELD_SEARCH_LOG_RAW_DAYS` (180) by a daily pass in `mcp`; the hash,
+  results and links stay. No HTTP route returns raw rows, and nothing that
+  touches this table may log a driver error message, which can quote the row.
+
 ### SQL Search
 
 ```sql

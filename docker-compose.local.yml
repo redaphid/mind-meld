@@ -11,7 +11,6 @@ services:
       - "${POSTGRES_PORT:?POSTGRES_PORT is required}:5432"
     volumes:
       - ${DATA_DIR:?DATA_DIR is required}/postgres:/var/lib/postgresql/data
-      - ./init-db:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mindmeld -d conversations"]
       interval: 10s
@@ -37,21 +36,22 @@ services:
       timeout: 5s
       retries: 5
 
-  # Run migrations on every startup (idempotent)
+  # Applies init-db through the tracked runner (src/db/migrations.ts), the same
+  # code mcp runs at startup: each pending file once, in one transaction, and a
+  # failure exits nonzero so nothing below starts against a half-migrated schema.
   migrate:
-    image: postgres:16-alpine
+    build:
+      context: .
+      dockerfile: Dockerfile.http
     container_name: mindmeld-migrate
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      PGHOST: postgres
-      PGUSER: mindmeld
-      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-      PGDATABASE: conversations
-    volumes:
-      - ./init-db:/migrations:ro
-    entrypoint: ["sh", "-c", "for f in /migrations/*.sql; do echo Running: $$f; psql -f $$f; done"]
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    command: ["npx", "tsx", "scripts/migrate.ts"]
     restart: "no"
 
   sync:
