@@ -4,8 +4,8 @@
 // the process could exit, while `docker ps` still showed the container Up.
 //
 // This runs each image's real CMD under sh with the work replaced by a command
-// that fails and `sleep` replaced by a function that ends the run, and checks
-// that exactly one pass happens before the first sleep.
+// that fails, and again by one that succeeds, and `sleep` replaced by a function
+// that ends the run. Exactly one pass must happen before the first sleep.
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -32,17 +32,17 @@ const shellCmd = (dockerfile: string): string => {
 
 const hasSh = spawnSync('sh', ['-c', 'true']).status === 0
 
-describe.skipIf(!hasSh)('worker loops back off after a failing pass', () => {
-  for (const [dockerfile, work] of Object.entries(WORKERS)) {
-    it(`${dockerfile} sleeps before running again`, () => {
+describe.skipIf(!hasSh)('worker loops sleep after every pass', () => {
+  for (const [dockerfile, work] of Object.entries(WORKERS)) for (const [outcome, status] of [['fails', 1], ['succeeds', 0]] as const) {
+    it(`${dockerfile} sleeps before running again when a pass ${outcome}`, () => {
       const cmd = shellCmd(dockerfile)
       expect(cmd).toContain(work)
 
       const script = [
         'passes=0',
-        'fail_pass() { passes=$((passes + 1)); echo "pass $passes"; return 1; }',
+        `run_pass() { passes=$((passes + 1)); echo "pass $passes"; return ${status}; }`,
         'sleep() { echo "slept after $passes pass(es)"; exit 0; }',
-        cmd.replace(work, 'fail_pass'),
+        cmd.replace(work, 'run_pass'),
       ].join('\n')
       const run = spawnSync('sh', ['-c', script], { encoding: 'utf8', timeout: 5000 })
 
