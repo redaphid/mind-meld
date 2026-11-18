@@ -22,10 +22,12 @@ const healingParams = () => [config.healing.retryLimit, config.healing.cooldownD
 
 // Every message the embedder will ever consider, before asking whether it is
 // done. Pending and vectorised are two halves of this one population.
-const messageSource = `FROM messages m
+const messageRows = `FROM messages m
      JOIN sessions s ON m.session_id = s.id
      JOIN projects p ON s.project_id = p.id
-     JOIN sources src ON p.source_id = src.id
+     JOIN sources src ON p.source_id = src.id`;
+
+const messageSource = `${messageRows}
      LEFT JOIN embeddings e ON e.message_id = m.id AND e.chroma_collection = 'convo-messages'`;
 
 const messageEligibility = `m.content_text IS NOT NULL
@@ -38,7 +40,11 @@ const messageEligibility = `m.content_text IS NOT NULL
 // selected for embedding or merely counted. `firstParam` is where this
 // fragment's own placeholders begin, letting a caller reserve $1 for a LIMIT.
 //
-// The UNEMBEDDABLE join is deliberately not a plain "has a marker" test: a
+// NOT EXISTS rather than LEFT JOIN ... IS NULL: the joins were filtered only
+// after every eligible row was sorted, which nextMessagesToEmbed's index walk
+// cannot survive (see pending.db.test.ts).
+//
+// The UNEMBEDDABLE test is deliberately not a plain "has a marker" test: a
 // NaN failure that is still inside its retry budget and past its cooldown is
 // healable, so it does NOT suppress the row. Those messages are real pending
 // work and must keep counting as such.
@@ -56,19 +62,40 @@ export const embeddableMessages = (
       : `AND LENGTH(m.content_text) <= ${Number(maxChars)}`;
 
   return {
-    sql: `${messageSource}
-     LEFT JOIN embeddings skip ON skip.message_id = m.id
-       AND skip.chroma_collection = 'UNEMBEDDABLE'
-       AND NOT (
-         skip.failure_reason = 'nan'
-         AND skip.retry_count < ${retryLimit}
-         AND skip.updated_at < NOW() - make_interval(days => ${cooldownDays})
-       )
+    sql: `${messageRows}
      WHERE ${messageEligibility}
-       AND e.id IS NULL
-       AND skip.id IS NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM embeddings e
+         WHERE e.message_id = m.id AND e.chroma_collection = 'convo-messages'
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM embeddings skip
+         WHERE skip.message_id = m.id
+           AND skip.chroma_collection = 'UNEMBEDDABLE'
+           AND NOT (
+             skip.failure_reason = 'nan'
+             AND skip.retry_count < ${retryLimit}
+             AND skip.updated_at < NOW() - make_interval(days => ${cooldownDays})
+           )
+       )
        ${charFilter}`,
     params: healingParams(),
+  };
+};
+
+// The embedder's next batch: newest eligible messages first. $1 is the LIMIT.
+export const nextMessagesToEmbed = (
+  maxChars?: number,
+): { sql: string; params: number[] } => {
+  const embeddable = embeddableMessages(2, maxChars);
+  return {
+    sql: `SELECT m.id, m.session_id, m.content_text, m.role, m.timestamp,
+            p.path as project_path, src.name as source_name, m.model,
+            COALESCE(p.data_class, src.data_class) as data_class
+     ${embeddable.sql}
+     ORDER BY m.timestamp DESC, m.id DESC
+     LIMIT $1`,
+    params: embeddable.params,
   };
 };
 

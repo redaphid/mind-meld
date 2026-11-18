@@ -34,7 +34,7 @@ vi.mock('./summarize.js', () => ({
 vi.mock('./chunks.js', () => ({ persistSessionChunks: vi.fn() }))
 vi.mock('./classify.js', () => ({ classifyNoise: () => null }))
 vi.mock('./pending.js', () => ({
-  embeddableMessages: () => ({ sql: 'FROM messages m', params: [] }),
+  nextMessagesToEmbed: () => ({ sql: 'SELECT m.id, m.session_id FROM messages m LIMIT $1', params: [] }),
   embeddableSessions: () => 'FROM sessions s',
 }))
 vi.mock('../sync/sync-control.js', () => ({
@@ -467,17 +467,5 @@ describe('updateAggregateEmbeddings', () => {
 
       expect(storedSummaries()).toEqual([])
     })
-  })
-})
-
-describe('when a backfill competes with recent messages', () => {
-  let selection: string
-  beforeEach(async () => {
-    servePending([])
-    await generatePendingEmbeddings()
-    selection = queryMock.mock.calls.find(([sql]) => sql.includes('SELECT m.id, m.session_id'))?.[0]
-  })
-  it('selects by newest message time before insertion id', () => {
-    expect(selection).toMatch(/ORDER BY m\.timestamp DESC NULLS LAST, m\.id DESC/)
   })
 })

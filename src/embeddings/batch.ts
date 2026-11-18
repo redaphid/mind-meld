@@ -11,7 +11,7 @@ import { generateEmbeddings, ensureEmbeddingModel } from "./ollama.js";
 import { summarizeConversation, ensureSummarizeModel, combineSummaries, generateTitle } from "./summarize.js";
 import { isVerbatimTranscript } from "./verbatim.js";
 import { persistSessionChunks, SessionMessage } from "./chunks.js";
-import { embeddableMessages, embeddableSessions } from "./pending.js";
+import { embeddableSessions, nextMessagesToEmbed } from "./pending.js";
 import { classifyNoise } from "./classify.js";
 import { aiHold, AI_HOLD_NOTICE } from "../sync/sync-control.js";
 
@@ -71,19 +71,10 @@ interface GetMessagesResult {
 async function getMessagesToEmbed(limit: number, maxChars?: number): Promise<GetMessagesResult> {
   // Fetch more than needed since we filter in JS — noise rate is ~10-15%
   const overfetch = Math.ceil(limit * 1.3);
-  // $1 is the LIMIT, so the shared predicate's own params start at $2. This is
-  // the same fragment /status and /api/throughput count with — see pending.ts
-  // for why that sharing is load-bearing rather than tidiness.
-  const embeddable = embeddableMessages(2, maxChars);
-  const result = await query<MessageToEmbed>(
-    `SELECT m.id, m.session_id, m.content_text, m.role, m.timestamp,
-            p.path as project_path, src.name as source_name, m.model,
-            COALESCE(p.data_class, src.data_class) as data_class
-     ${embeddable.sql}
-     ORDER BY m.timestamp DESC NULLS LAST, m.id DESC
-     LIMIT $1`,
-    [overfetch, ...embeddable.params],
-  );
+  // Shared with pending.ts, the same predicate /status and /api/throughput
+  // count with — see there for why that sharing is load-bearing.
+  const next = nextMessagesToEmbed(maxChars);
+  const result = await query<MessageToEmbed>(next.sql, [overfetch, ...next.params]);
 
   const kept: MessageToEmbed[] = [];
   const skipped: Array<{ id: number; detail: string }> = [];

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   embeddableMessages,
   embeddableSessions,
+  nextMessagesToEmbed,
   pendingMessagesCount,
   pendingSessionsCount,
   vectorisedMessagesCount,
@@ -25,13 +26,11 @@ describe("embeddableMessages", () => {
   });
 
   it("skips anything already marked unembeddable", () => {
-    expect(sql).toContain("skip.chroma_collection = 'UNEMBEDDABLE'");
-    expect(sql).toContain("skip.id IS NULL");
+    expect(sql).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM embeddings skip\s*WHERE skip\.message_id = m\.id\s*AND skip\.chroma_collection = 'UNEMBEDDABLE'/);
   });
 
   it("still counts an already-embedded message as done", () => {
-    expect(sql).toContain("e.chroma_collection = 'convo-messages'");
-    expect(sql).toContain("e.id IS NULL");
+    expect(sql).toMatch(/NOT EXISTS \(\s*SELECT 1 FROM embeddings e\s*WHERE e\.message_id = m\.id AND e\.chroma_collection = 'convo-messages'/);
   });
 
   // A NaN failure inside its retry budget and past its cooldown is healable —
@@ -67,6 +66,15 @@ describe("embeddableMessages", () => {
       "LENGTH(m.content_text) <= NaN",
     );
     expect(embeddableMessages(1, hostile).sql).not.toContain("DROP TABLE");
+  });
+});
+
+// Newest message first, matching idx_messages_embedding_eligible exactly. A
+// NULLS LAST the index lacks makes PostgreSQL sort every eligible row instead
+// (see pending.db.test.ts).
+describe("nextMessagesToEmbed", () => {
+  it("selects by newest message time before insertion id", () => {
+    expect(nextMessagesToEmbed().sql).toMatch(/ORDER BY m\.timestamp DESC, m\.id DESC\s+LIMIT \$1/);
   });
 });
 
