@@ -48,7 +48,7 @@ const messageEligibility = `m.content_text IS NOT NULL
 // NaN failure that is still inside its retry budget and past its cooldown is
 // healable, so it does NOT suppress the row. Those messages are real pending
 // work and must keep counting as such.
-export const embeddableMessages = (
+const embeddableMessages = (
   firstParam = 1,
   maxChars?: number,
 ): { sql: string; params: number[] } => {

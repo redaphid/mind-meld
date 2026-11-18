@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import {
-  embeddableMessages,
   embeddableSessions,
   nextMessagesToEmbed,
   pendingMessagesCount,
@@ -13,8 +12,8 @@ import {
 // pending — 30,961 noise-marked, 1,376 in deleted sessions, 2 tool messages —
 // against zero real work, with an ETA in October 2027. Each guard below is one
 // of the filters whose absence produced that number.
-describe("embeddableMessages", () => {
-  const { sql } = embeddableMessages();
+describe("the pending-messages predicate", () => {
+  const { sql } = pendingMessagesCount();
 
   it("skips tool messages", () => {
     expect(sql).toContain("m.role != 'tool'");
@@ -45,15 +44,15 @@ describe("embeddableMessages", () => {
   // have to move. If they stop moving, the selector silently filters on the
   // wrong value.
   it("renumbers its parameters so a caller can reserve earlier ones", () => {
-    expect(embeddableMessages(1).sql).toContain("skip.retry_count < $1");
-    expect(embeddableMessages(2).sql).toContain("skip.retry_count < $2");
-    expect(embeddableMessages(2).sql).toContain("make_interval(days => $3)");
-    expect(embeddableMessages(2).params).toHaveLength(2);
+    expect(pendingMessagesCount().sql).toContain("skip.retry_count < $1");
+    expect(nextMessagesToEmbed().sql).toContain("skip.retry_count < $2");
+    expect(nextMessagesToEmbed().sql).toContain("make_interval(days => $3)");
+    expect(nextMessagesToEmbed().params).toHaveLength(2);
   });
 
   it("applies a character ceiling only when asked for one", () => {
-    expect(embeddableMessages(1).sql).not.toContain("LENGTH(m.content_text) <=");
-    expect(embeddableMessages(1, 8000).sql).toContain(
+    expect(nextMessagesToEmbed().sql).not.toContain("LENGTH(m.content_text) <=");
+    expect(nextMessagesToEmbed(8000).sql).toContain(
       "LENGTH(m.content_text) <= 8000",
     );
   });
@@ -62,10 +61,10 @@ describe("embeddableMessages", () => {
   // able to carry anything but a number.
   it("coerces the character ceiling to a number", () => {
     const hostile = "8000; DROP TABLE messages" as unknown as number;
-    expect(embeddableMessages(1, hostile).sql).toContain(
+    expect(nextMessagesToEmbed(hostile).sql).toContain(
       "LENGTH(m.content_text) <= NaN",
     );
-    expect(embeddableMessages(1, hostile).sql).not.toContain("DROP TABLE");
+    expect(nextMessagesToEmbed(hostile).sql).not.toContain("DROP TABLE");
   });
 });
 
@@ -102,8 +101,9 @@ describe("embeddableSessions", () => {
 // The counters must be the predicate, not a copy that resembles it.
 describe("the counters and the selectors cannot drift", () => {
   it("counts messages with exactly the fragment the selector selects with", () => {
-    expect(pendingMessagesCount().sql).toContain(embeddableMessages(1).sql);
-    expect(pendingMessagesCount().params).toEqual(embeddableMessages(1).params);
+    const predicate = (sql: string) => sql.slice(sql.indexOf("FROM messages m")).split("ORDER BY")[0].trim();
+    const selector = predicate(nextMessagesToEmbed().sql).replace(/\$(\d+)/g, (_, n) => `$${Number(n) - 1}`);
+    expect(predicate(pendingMessagesCount().sql)).toBe(selector);
   });
 
   it("counts sessions with exactly the fragment the selector selects with", () => {
