@@ -106,6 +106,10 @@ describe("the counters and the selectors cannot drift", () => {
     expect(predicate(pendingMessagesCount().sql)).toBe(selector);
   });
 
+  it("binds the same healing values the selector binds", () => {
+    expect(pendingMessagesCount().params).toEqual(nextMessagesToEmbed().params);
+  });
+
   it("counts sessions with exactly the fragment the selector selects with", () => {
     expect(pendingSessionsCount("convo-sessions").sql).toContain(
       embeddableSessions("$1"),
