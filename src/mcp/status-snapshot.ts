@@ -1,4 +1,4 @@
-export type Snapshot<T> = { value: T; asOf: Date }
+type Snapshot<T> = { value: T; asOf: Date }
 
 export const staleWhileRevalidate = <T>(
   load: () => Promise<T>,

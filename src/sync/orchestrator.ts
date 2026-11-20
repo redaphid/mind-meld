@@ -278,8 +278,6 @@ type IndexTotals = {
   embeddings: number;
 };
 
-// Full counts over the largest tables: tens of seconds on a large index, so
-// /status serves them from a background snapshot rather than per request.
 export async function getIndexTotals(): Promise<IndexTotals> {
   const totals = await query<{
     projects: string;
