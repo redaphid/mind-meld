@@ -50,10 +50,6 @@ export type SearchParams = {
   likeProject?: string[]
   unlikeProject?: string[]
   includeAutomated?: boolean
-  // A session with no summary has no real title and no session-tier vector, so
-  // it can only ever arrive as an untriageable row. Withheld by default; pass
-  // true to reach one deliberately (issue #95).
-  includeUnsummarized?: boolean
   dataClass?: string[]
   // Open-vocabulary agent tags (src/mcp/tags.ts). `tags` narrows to things
   // carrying any of them; `excludeTags` hides things carrying any of them, on
@@ -328,10 +324,7 @@ export const findProjectsByPath = async (cwd: string) => {
   return result.rows
 }
 
-const CURRENT_SNAPSHOT = 'EXISTS (SELECT 1 FROM ingest_heads ih WHERE ih.current_session_id = s.id)'
-
 type SessionRow = SessionFields & {
-  is_current_snapshot?: boolean
   message_count: number
 }
 
@@ -339,7 +332,7 @@ type SessionRow = SessionFields & {
 const AUTOMATED_FILTER = `($2::boolean OR s.is_automated = false)`
 
 const SESSION_QUERY = `
-  SELECT s.id, s.title, s.summary, s.generated_title, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
+  SELECT s.id, s.title, s.summary, s.generated_title, p.name as project_name, p.path as project_path,
          src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
          s.started_at, s.ended_at, s.message_count, p.id as project_id
   FROM sessions s
@@ -373,7 +366,7 @@ type MessageAnchoredRow = SessionRow & { message_id: number; content_text: strin
 
 const getSessionsByMessageIds = (messageIds: number[], includeAutomated: boolean) =>
   hydrate<MessageAnchoredRow>(
-    `SELECT s.id, s.title, s.summary, s.generated_title, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
+    `SELECT s.id, s.title, s.summary, s.generated_title, p.name as project_name, p.path as project_path,
             src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
             s.started_at, s.ended_at, s.message_count, p.id as project_id,
             m.id as message_id, m.content_text
@@ -391,7 +384,7 @@ type ChunkAnchoredRow = SessionRow & { chunk_id: number; chunk_index: number; ch
 
 const getSessionsByChunkIds = (chunkIds: number[], includeAutomated: boolean) =>
   hydrate<ChunkAnchoredRow>(
-    `SELECT s.id, s.title, s.summary, s.generated_title, ${CURRENT_SNAPSHOT} AS is_current_snapshot, p.name as project_name, p.path as project_path,
+    `SELECT s.id, s.title, s.summary, s.generated_title, p.name as project_name, p.path as project_path,
             src.name as source_name, COALESCE(p.data_class, src.data_class) as data_class,
             s.started_at, s.ended_at, s.message_count, p.id as project_id,
             c.id as chunk_id, c.chunk_index, c.summary as chunk_summary
@@ -552,14 +545,13 @@ const toSearchResult = ({ session, texts, headline }: Candidate, { sessionId: _,
 // alone.
 const passesFilters = (
   session: SessionRow,
-  params: { source?: string; projectOnly?: boolean; includeUnsummarized?: boolean },
+  params: { source?: string; projectOnly?: boolean },
   sinceDate: Date | null,
   projectIds: number[],
   dataClasses: string[] | null,
   tagFilter: TagFilter,
   messageId?: number
 ) => {
-  if (!params.includeUnsummarized && session.summary === null && !session.is_current_snapshot) return false
   if (dataClasses && !dataClasses.includes(session.data_class)) return false
   if (params.source && session.source_name !== params.source) return false
   if (sinceDate && lastActivity(session) < sinceDate) return false
@@ -747,7 +739,6 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       `($3::timestamptz IS NULL OR ${LAST_ACTIVITY_SQL} >= $3)`,
       `($4::boolean OR s.is_automated = false)`,
     ]
-    if (!params.includeUnsummarized) conditions.push(`(s.summary IS NOT NULL OR ${CURRENT_SNAPSHOT})`)
     const values: unknown[] = [params.query, params.source ?? null, sinceDate, includeAutomated]
     let nextParam = 5
 

@@ -568,7 +568,6 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
       cwd,
       projectOnly: boolParam(req.query.projectOnly),
       includeAutomated: boolParam(req.query.includeAutomated),
-      includeUnsummarized: boolParam(req.query.includeUnsummarized),
       dataClass,
       // Without these two, the default-excluded tag set would be a ONE-WAY
       // DOOR over HTTP: a search here still hides "useless"-tagged sessions

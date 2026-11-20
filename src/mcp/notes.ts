@@ -108,11 +108,11 @@ export const writeNote = async ({ text, title, tags }: WriteNoteParams): Promise
 
   // Notes are already terse, so the note IS its own summary - set it directly
   // rather than leaving the session to wait in the async LLM summarization
-  // queue. Session-tier search excludes summary IS NULL by default (search.ts),
-  // so without this a freshly saved note would be unreachable until a
-  // background worker eventually got to a one-message session; full-text
+  // queue. A session gets its session-tier vector only alongside its summary,
+  // so without this a freshly saved note would have no session-level hit until
+  // a background worker eventually got to a one-message session; full-text
   // search over the message itself works immediately either way (plain GIN
-  // index, no async step), but the session-level hit would not.
+  // index, no async step).
   await query('UPDATE sessions SET summary = $1 WHERE id = $2', [trimmed, sessionId])
 
   // The automatic tag leads, so it survives even if the caller passes nothing.
