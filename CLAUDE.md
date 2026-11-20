@@ -141,23 +141,47 @@ Run it with `docker exec mindmeld-postgres psql -U mindmeld -d conversations`.
 A useful second question is *what shape* the residue is — a backlog whose
 "short, fast path" bucket averages ~80 chars is noise, not work.
 
-### The queue is global and nothing claims a row
+### The queue is global; a session is claimed before it is summarized
 
 `runPendingEmbeddings` → `generatePendingEmbeddings` / `updateAggregateEmbeddings`
-select from a **global** queue with no `FOR UPDATE SKIP LOCKED` and no advisory
-lock anywhere in `src/embeddings/batch.ts`, `src/mcp/sync-run.ts` or
-`src/sync/orchestrator.ts`. Every process that runs a sync drains the same
-rows, so **workers duplicate each other's LLM work**. In a default deployment
-that is at least three: the `mcp` service (the HTTP/UI server runs the queue
-too, and can be the single largest GPU consumer), the `sync` worker, and any
-per-machine sync loop — which runs a *full global* pass once per machine
-folder, not a pass scoped to that machine.
+select from a **global** queue. Every process that runs a sync selects the same
+rows: in a default deployment at least three, the `mcp` service (the HTTP/UI
+server runs the queue too), the `sync` worker, and any per-machine sync loop —
+which runs a *full global* pass once per machine folder, not a pass scoped to
+that machine.
 
-Measured over 90 minutes: 339 chunk summarization passes to cover 250 needed
-chunks (**1.36x redundancy**); one 8-chunk session received 24 passes; 37 of 45
-sessions were worked by more than one worker concurrently.
+Before claiming existed, that meant **workers duplicated each other's LLM
+work**. Measured over 90 minutes: 339 chunk summarization passes to cover 250
+needed chunks (**1.36x redundancy**); one 8-chunk session received 24 passes;
+37 of 45 sessions were worked by more than one worker concurrently.
 
-When two workers land on the same session, they used to **destroy completed
+**Sessions are now claimed** (`claimSession` in `src/embeddings/batch.ts`,
+tested with two concurrent callers in `src/embeddings/batch.db.test.ts`).
+`updateAggregateEmbeddings` checks out one pool connection for the batch and,
+per session, takes `pg_try_advisory_lock(<session id>)` on it. Three things
+about it are deliberate:
+
+- **A session-level advisory lock, not `FOR UPDATE SKIP LOCKED`.** A session is
+  5-10 minutes of LLM calls outside the database; a row lock would mean a
+  transaction held open for all of it. An advisory lock dies with its
+  connection, so a crashed worker cannot leave a stale claim, and nothing needs
+  a lease length.
+- **The claim re-checks that the session is still pending.** The batch is
+  selected before the loop, so another worker may have finished a session
+  since; without the re-check two workers walking the same list would each
+  redo everything the other had just done.
+- **The connection is destroyed, not returned to the pool** (`release(true)`),
+  so a lock whose unlock failed cannot outlive the batch on a pooled
+  connection. The lock and the work never share a pool that could hand out a
+  different connection per query.
+
+The key is the bare session id in the `conversations` database's advisory-lock
+space; nothing else takes advisory locks there, and anything that starts to
+must use a disjoint key. **Message** embedding is not claimed: a row is one
+cheap embedding call and its writes are upserts, so duplicate work there costs
+seconds.
+
+When two workers did land on the same session, they used to **destroy completed
 work**: `persistSessionChunks` upserted the `session_chunks` row with
 `ON CONFLICT DO UPDATE`, then inserted that chunk's `embeddings` row with a
 bare INSERT, which violated the unique `embeddings_session_chunk_idx`
@@ -166,10 +190,10 @@ output away as `Failed to update session N embedding: duplicate key`. That
 write now upserts too, so the later worker's chunk wins instead of failing
 (`src/embeddings/chunks.db.test.ts`). The index is **partial** (`WHERE
 session_chunk_id IS NOT NULL`), so the conflict target must repeat that
-`WHERE` or Postgres will not match it. The duplicated GPU work itself is not
-fixed yet: nothing claims a session.
+`WHERE` or Postgres will not match it.
 
-Find duplicated work from the `logs` table:
+Duplicated work should now be rare (a claim lost with its connection, or a
+session that grew after one worker finished it). Check it from the `logs` table:
 
 ```sql
 WITH s AS (
@@ -368,8 +392,8 @@ count, so the overview probes each one (`src/mcp/system-status.ts`):
   must not draw the same empty bar.
 
 `/api/summaries` covers the slow phase, including how many distinct workers are
-summarizing the same session — non-zero duplication is the global-unclaimed-queue
-problem above, made visible. `/api/embedding-series` is the same pipeline over
+summarizing the same session — non-zero duplication means the session claim
+above is being bypassed. `/api/embedding-series` is the same pipeline over
 time, bucketed; a single averaged rate cannot tell a steady drain from a burst
 two hours ago.
 

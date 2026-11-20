@@ -6,15 +6,22 @@ import { describe, it, expect, beforeEach, onTestFinished, vi } from 'vitest'
 // about the loop's stopping conditions only, so Postgres, Chroma, the GPU and
 // the clock are all stubbed; what is real is the control flow.
 
-const { queryMock, generateEmbeddingsMock, summarizeMock, aiHoldMock, generateTitleMock } = vi.hoisted(() => ({
+const { queryMock, claimQueryMock, generateEmbeddingsMock, summarizeMock, aiHoldMock, generateTitleMock } = vi.hoisted(() => ({
   generateTitleMock: vi.fn(),
+  claimQueryMock: vi.fn(),
   queryMock: vi.fn(),
   generateEmbeddingsMock: vi.fn(),
   summarizeMock: vi.fn(),
   aiHoldMock: vi.fn(),
 }))
 
-vi.mock('../db/postgres.js', () => ({ query: queryMock, queries: {} }))
+// Two real workers contending for one session is batch.db.test.ts, against
+// real PostgreSQL.
+vi.mock('../db/postgres.js', () => ({
+  query: queryMock,
+  queries: {},
+  getClient: async () => ({ query: claimQueryMock, release: () => {} }),
+}))
 vi.mock('../db/chroma.js', () => ({
   addEmbeddings: vi.fn(),
   upsertEmbeddings: vi.fn(),
@@ -250,6 +257,7 @@ describe('updateAggregateEmbeddings', () => {
       return 'a summary long enough to pass the length check'
     })
     generateEmbeddingsMock.mockResolvedValue([[0.1]])
+    claimQueryMock.mockReset().mockResolvedValue({ rows: [{ locked: true }], rowCount: 1 })
     queryMock.mockImplementation(async (sql: string) => {
       if (sql.includes('SELECT s.id, s.external_id')) return { rows: queued }
       if (sql.includes('SELECT id, content_text, role FROM messages')) return { rows: sessionMessages }
@@ -300,6 +308,36 @@ describe('updateAggregateEmbeddings', () => {
       const stats = await updateAggregateEmbeddings(25 * MINUTE)
 
       expect(stats.sessionsFetched).toBe(AGGREGATE_BATCH_SIZE)
+    })
+  })
+
+  describe('when another worker is summarizing the session', () => {
+    beforeEach(async () => {
+      queued = [session(1)]
+      claimQueryMock.mockResolvedValue({ rows: [{ locked: false }], rowCount: 1 })
+      await updateAggregateEmbeddings(Infinity)
+    })
+
+    it('skips it', () => {
+      expect(summarizeMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('when another worker finished the session after this batch was selected', () => {
+    beforeEach(async () => {
+      queued = [session(1)]
+      claimQueryMock.mockImplementation(async (sql: string) =>
+        sql.includes('pg_try_advisory_lock') ? { rows: [{ locked: true }], rowCount: 1 } : { rows: [], rowCount: 0 },
+      )
+      await updateAggregateEmbeddings(Infinity)
+    })
+
+    it('skips it', () => {
+      expect(summarizeMock).not.toHaveBeenCalled()
+    })
+
+    it('gives the claim back', () => {
+      expect(claimQueryMock).toHaveBeenCalledWith('SELECT pg_advisory_unlock($1)', [1])
     })
   })
 
