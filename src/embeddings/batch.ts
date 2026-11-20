@@ -1,5 +1,6 @@
 import { config } from "../config.js";
-import { query, queries } from "../db/postgres.js";
+import { query, queries, getClient } from "../db/postgres.js";
+import type pg from "pg";
 import {
   addEmbeddings,
   upsertEmbeddings,
@@ -430,6 +431,27 @@ const markSessionProcessed = async (
 
 export const AGGREGATE_BATCH_SIZE = 100;
 
+// Every worker selects the same pending sessions, and one is minutes of GPU, so
+// a worker claims a session before summarizing it: a session-level advisory
+// lock keyed by the session id, on a connection the batch holds to itself.
+// The lock dies with that connection, so a crashed worker leaves no claim. A
+// claim also re-checks the session is still pending: the batch was selected
+// before the loop, and another worker may have finished it since.
+const claimSession = async (claims: pg.PoolClient, sessionId: number) => {
+  const lock = await claims.query<{ locked: boolean }>(
+    `SELECT pg_try_advisory_lock($1) AS locked`,
+    [sessionId],
+  );
+  if (!lock.rows[0].locked) return false;
+  const pending = await claims.query(
+    `SELECT 1 ${embeddableSessions("$1")} AND s.id = $2`,
+    [config.chroma.collections.sessions, sessionId],
+  );
+  if (pending.rowCount) return true;
+  await claims.query(`SELECT pg_advisory_unlock($1)`, [sessionId]);
+  return false;
+};
+
 // Update session-level embeddings with summarization for long conversations
 // Now also re-embeds sessions where content_chars has grown
 export async function updateAggregateEmbeddings(deadline: number): Promise<{
@@ -479,188 +501,199 @@ export async function updateAggregateEmbeddings(deadline: number): Promise<{
 
   console.log(`Processing ${sessions.rows.length} session embeddings...`);
 
-  for (const session of sessions.rows) {
-    // The checkpoint that actually matters. Summarizing one session is 5-10
-    // minutes of GPU, so checking once per session is the difference between
-    // yielding promptly and holding the card for the rest of the batch.
-    const held = await aiHold();
-    if (held) {
-      console.log(AI_HOLD_NOTICE[held]);
-      break;
-    }
-    if (Date.now() >= deadline) break;
+  const claims = await getClient();
+  try {
+    for (const session of sessions.rows) {
+      // The checkpoint that actually matters. Summarizing one session is 5-10
+      // minutes of GPU, so checking once per session is the difference between
+      // yielding promptly and holding the card for the rest of the batch.
+      const held = await aiHold();
+      if (held) {
+        console.log(AI_HOLD_NOTICE[held]);
+        break;
+      }
+      if (Date.now() >= deadline) break;
+      if (!(await claimSession(claims, session.id))) {
+        console.log(`Session ${session.id} is claimed or done by another worker; skipping`);
+        continue;
+      }
 
-    const isReembed = session.existing_content_chars !== null;
-    let actualContentChars = 0;
+      const isReembed = session.existing_content_chars !== null;
+      let actualContentChars = 0;
 
-    try {
-      // Also verify Chroma has the embedding with correct content_chars
-      const chromaMetadata = await getEmbeddingMetadata(
-        config.chroma.collections.sessions,
-        sessionVectorId(session.id),
-      );
+      try {
+        // Also verify Chroma has the embedding with correct content_chars
+        const chromaMetadata = await getEmbeddingMetadata(
+          config.chroma.collections.sessions,
+          sessionVectorId(session.id),
+        );
 
-      // If Chroma already has this embedding with sufficient content_chars,
-      // just sync the Postgres record and skip the expensive summarize/embed
-      if (chromaMetadata) {
-        const chromaContentChars = chromaMetadata.content_chars as
-          | number
-          | undefined;
-        if (chromaContentChars && chromaContentChars >= session.content_chars) {
-          // Record in Postgres so this session stops appearing in pending queries
-          await query(
-            `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed)
-             SELECT MIN(m.id), $1, $2, $3, $4, $5
-             FROM messages m WHERE m.session_id = $6
-             ON CONFLICT (message_id, chroma_collection)
-             DO UPDATE SET content_chars_at_embed = $5`,
-            [
-              config.chroma.collections.sessions,
-              sessionVectorId(session.id),
-              config.embeddings.model,
-              config.embeddings.dimensions,
-              chromaContentChars,
-              session.id,
-            ],
+        // If Chroma already has this embedding with sufficient content_chars,
+        // just sync the Postgres record and skip the expensive summarize/embed
+        if (chromaMetadata) {
+          const chromaContentChars = chromaMetadata.content_chars as
+            | number
+            | undefined;
+          if (chromaContentChars && chromaContentChars >= session.content_chars) {
+            // Record in Postgres so this session stops appearing in pending queries
+            await query(
+              `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed)
+               SELECT MIN(m.id), $1, $2, $3, $4, $5
+               FROM messages m WHERE m.session_id = $6
+               ON CONFLICT (message_id, chroma_collection)
+               DO UPDATE SET content_chars_at_embed = $5`,
+              [
+                config.chroma.collections.sessions,
+                sessionVectorId(session.id),
+                config.embeddings.model,
+                config.embeddings.dimensions,
+                chromaContentChars,
+                session.id,
+              ],
+            );
+            continue;
+          }
+        }
+
+        // Get ALL message content for this session
+        const messages = await query<SessionMessage>(
+          `SELECT id, content_text, role FROM messages
+           WHERE session_id = $1 AND content_text IS NOT NULL AND LENGTH(content_text) > 0
+           ORDER BY sequence_num`,
+          [session.id],
+        );
+
+        if (messages.rows.length === 0) {
+          await markSessionProcessed(session.id, "No embeddable content", 0);
+          continue;
+        }
+
+        // Format messages with role context
+        const formattedMessages = messages.rows.map(
+          (m) => `[${m.role.toUpperCase()}]: ${m.content_text}`,
+        );
+
+        // Calculate actual content chars
+        actualContentChars = formattedMessages.reduce(
+          (sum, m) => sum + m.length,
+          0,
+        );
+
+        // Persist chunk-level summaries for long sessions (returns null for
+        // short ones). When chunks are persisted we reuse their summaries to
+        // build the session-level summary, avoiding a second qwen pass.
+        const chunks = await persistSessionChunks(session.id, messages.rows);
+        const textForEmbedding = chunks
+          ? await combineSummaries(
+              chunks.map((c) => c.summary),
+              { joinIfShort: !chunks.some((c) => c.verbatim) },
+            )
+          : await summarizeConversation(formattedMessages);
+        const wasSummarized =
+          textForEmbedding.length < formattedMessages.join("").length;
+
+        // Send the whole summary. The old slice(0, 32000) assumed ~4 chars/token,
+        // but bge-m3's real ceiling for these summaries measured ~22k chars — so the
+        // slice cut the tail off long ones and ollama silently cut more. Oversize is
+        // now summarized down inside generateEmbeddings instead of being chopped.
+        const embeddings = await generateEmbeddings([textForEmbedding]);
+
+        if (embeddings[0] === null) {
+          await markSessionProcessed(
+            session.id,
+            "Embedding generation failed",
+            actualContentChars,
           );
           continue;
         }
-      }
 
-      // Get ALL message content for this session
-      const messages = await query<SessionMessage>(
-        `SELECT id, content_text, role FROM messages
-         WHERE session_id = $1 AND content_text IS NOT NULL AND LENGTH(content_text) > 0
-         ORDER BY sequence_num`,
-        [session.id],
-      );
+        // Upsert to Chroma sessions collection (update if exists)
+        await upsertEmbeddings(config.chroma.collections.sessions, {
+          ids: [sessionVectorId(session.id)],
+          embeddings: [embeddings[0]],
+          documents: [textForEmbedding.slice(0, 2000)],
+          metadatas: [
+            {
+              source: session.source_name,
+              project_path: session.project_path,
+              session_id: session.external_id,
+              title: session.title ?? "",
+              started_at: session.started_at?.getTime() ?? Date.now(),
+              message_count: session.message_count,
+              total_tokens: session.total_tokens,
+              content_chars: actualContentChars,
+              was_summarized: wasSummarized,
+              embedded_at: Date.now(),
+            },
+          ],
+        });
 
-      if (messages.rows.length === 0) {
-        await markSessionProcessed(session.id, "No embeddable content", 0);
-        continue;
-      }
+        // A source title outranks a generated one (title.ts), so only an untitled
+        // session is worth the call. A session that has outgrown its verbatim
+        // transcript gets NULL, so a stale generated title never outlives it.
+        const generatedTitle =
+          isVerbatimTranscript(textForEmbedding) && !session.title?.trim()
+            ? await generateTitle(textForEmbedding)
+            : null;
 
-      // Format messages with role context
-      const formattedMessages = messages.rows.map(
-        (m) => `[${m.role.toUpperCase()}]: ${m.content_text}`,
-      );
-
-      // Calculate actual content chars
-      actualContentChars = formattedMessages.reduce(
-        (sum, m) => sum + m.length,
-        0,
-      );
-
-      // Persist chunk-level summaries for long sessions (returns null for
-      // short ones). When chunks are persisted we reuse their summaries to
-      // build the session-level summary, avoiding a second qwen pass.
-      const chunks = await persistSessionChunks(session.id, messages.rows);
-      const textForEmbedding = chunks
-        ? await combineSummaries(
-            chunks.map((c) => c.summary),
-            { joinIfShort: !chunks.some((c) => c.verbatim) },
-          )
-        : await summarizeConversation(formattedMessages);
-      const wasSummarized =
-        textForEmbedding.length < formattedMessages.join("").length;
-
-      // Send the whole summary. The old slice(0, 32000) assumed ~4 chars/token,
-      // but bge-m3's real ceiling for these summaries measured ~22k chars — so the
-      // slice cut the tail off long ones and ollama silently cut more. Oversize is
-      // now summarized down inside generateEmbeddings instead of being chopped.
-      const embeddings = await generateEmbeddings([textForEmbedding]);
-
-      if (embeddings[0] === null) {
-        await markSessionProcessed(
-          session.id,
-          "Embedding generation failed",
-          actualContentChars,
+        // Store summary in Postgres for FTS (always update - summary improves over time)
+        await query(
+          `UPDATE sessions SET summary = $1, content_chars = $2, generated_title = $4 WHERE id = $3`,
+          [textForEmbedding, actualContentChars, session.id, generatedTitle],
         );
-        continue;
+
+        // Record/update in PostgreSQL with content_chars_at_embed
+        // Use MIN(m.id) for deterministic message selection — using LIMIT 1 without ORDER BY
+        // picks a random message, creating duplicate records when the session grows
+        await query(
+          `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed)
+           SELECT MIN(m.id), $1, $2, $3, $4, $5
+           FROM messages m WHERE m.session_id = $6
+           ON CONFLICT (message_id, chroma_collection)
+           DO UPDATE SET content_chars_at_embed = $5`,
+          [
+            config.chroma.collections.sessions,
+            sessionVectorId(session.id),
+            config.embeddings.model,
+            config.embeddings.dimensions,
+            actualContentChars,
+            session.id,
+          ],
+        );
+
+        if (isReembed) {
+          reembeddings++;
+          console.log(
+            `Re-embedded session ${session.id} (${session.existing_content_chars} → ${actualContentChars} chars)`,
+          );
+        } else {
+          newEmbeddings++;
+          console.log(
+            `Embedded session ${session.id} (${session.message_count} messages, ${actualContentChars} chars)`,
+          );
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // qwen refused (NO_UPDATE / short answer). Don't retry forever — mark
+        // processed so the session leaves the pending queue.
+        if (msg.startsWith("Summary too short")) {
+          console.warn(
+            `Session ${session.id} summary refused; marking processed: ${msg}`,
+          );
+          await markSessionProcessed(
+            session.id,
+            `[unsummarizable] ${msg.slice(0, 200)}`,
+            actualContentChars,
+          );
+          continue;
+        }
+        console.error(`Failed to update session ${session.id} embedding:`, e);
+      } finally {
+        await claims.query(`SELECT pg_advisory_unlock($1)`, [session.id]);
       }
-
-      // Upsert to Chroma sessions collection (update if exists)
-      await upsertEmbeddings(config.chroma.collections.sessions, {
-        ids: [sessionVectorId(session.id)],
-        embeddings: [embeddings[0]],
-        documents: [textForEmbedding.slice(0, 2000)],
-        metadatas: [
-          {
-            source: session.source_name,
-            project_path: session.project_path,
-            session_id: session.external_id,
-            title: session.title ?? "",
-            started_at: session.started_at?.getTime() ?? Date.now(),
-            message_count: session.message_count,
-            total_tokens: session.total_tokens,
-            content_chars: actualContentChars,
-            was_summarized: wasSummarized,
-            embedded_at: Date.now(),
-          },
-        ],
-      });
-
-      // A source title outranks a generated one (title.ts), so only an untitled
-      // session is worth the call. A session that has outgrown its verbatim
-      // transcript gets NULL, so a stale generated title never outlives it.
-      const generatedTitle =
-        isVerbatimTranscript(textForEmbedding) && !session.title?.trim()
-          ? await generateTitle(textForEmbedding)
-          : null;
-
-      // Store summary in Postgres for FTS (always update - summary improves over time)
-      await query(
-        `UPDATE sessions SET summary = $1, content_chars = $2, generated_title = $4 WHERE id = $3`,
-        [textForEmbedding, actualContentChars, session.id, generatedTitle],
-      );
-
-      // Record/update in PostgreSQL with content_chars_at_embed
-      // Use MIN(m.id) for deterministic message selection — using LIMIT 1 without ORDER BY
-      // picks a random message, creating duplicate records when the session grows
-      await query(
-        `INSERT INTO embeddings (message_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed)
-         SELECT MIN(m.id), $1, $2, $3, $4, $5
-         FROM messages m WHERE m.session_id = $6
-         ON CONFLICT (message_id, chroma_collection)
-         DO UPDATE SET content_chars_at_embed = $5`,
-        [
-          config.chroma.collections.sessions,
-          sessionVectorId(session.id),
-          config.embeddings.model,
-          config.embeddings.dimensions,
-          actualContentChars,
-          session.id,
-        ],
-      );
-
-      if (isReembed) {
-        reembeddings++;
-        console.log(
-          `Re-embedded session ${session.id} (${session.existing_content_chars} → ${actualContentChars} chars)`,
-        );
-      } else {
-        newEmbeddings++;
-        console.log(
-          `Embedded session ${session.id} (${session.message_count} messages, ${actualContentChars} chars)`,
-        );
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      // qwen refused (NO_UPDATE / short answer). Don't retry forever — mark
-      // processed so the session leaves the pending queue.
-      if (msg.startsWith("Summary too short")) {
-        console.warn(
-          `Session ${session.id} summary refused; marking processed: ${msg}`,
-        );
-        await markSessionProcessed(
-          session.id,
-          `[unsummarizable] ${msg.slice(0, 200)}`,
-          actualContentChars,
-        );
-        continue;
-      }
-      console.error(`Failed to update session ${session.id} embedding:`, e);
     }
+  } finally {
+    claims.release(true);
   }
 
   return {
