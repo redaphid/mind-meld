@@ -1,8 +1,8 @@
 // Runs `host-autoupdate.sh` against a throwaway checkout and a stub
 // docker. On macOS it runs under the system /bin/bash, which is 3.2 and has no
 // associative arrays, next to BSD date, stat and mv: the host it must work on.
-import { describe, it, expect, beforeAll, beforeEach } from 'vitest'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { describe, it, expect, afterAll, beforeAll, beforeEach } from 'vitest'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -25,9 +25,10 @@ describe('host-autoupdate.sh', () => {
   let checkout: string
   let stubs: string
   let commits: string[]
+  let root: string
 
   beforeAll(() => {
-    const root = mkdtempSync(join(tmpdir(), 'host-autoupdate-'))
+    root = mkdtempSync(join(tmpdir(), 'host-autoupdate-'))
     const origin = join(root, 'origin.git')
     checkout = join(root, 'checkout')
     stubs = join(root, 'bin')
@@ -47,6 +48,10 @@ describe('host-autoupdate.sh', () => {
     chmodSync(join(stubs, 'timeout'), 0o755)
     // The script re-runs itself with `bash` from PATH; keep that the same bash.
     symlinkSync(spawnSync('sh', ['-c', `command -v ${BASH}`], { encoding: 'utf8' }).stdout.trim(), join(stubs, 'bash'))
+  })
+
+  afterAll(() => {
+    rmSync(root, { recursive: true, force: true })
   })
 
   const autoupdate = (command: string, revision: string, uiRevision = revision): SpawnSyncReturns<string> =>
@@ -76,7 +81,7 @@ describe('host-autoupdate.sh', () => {
       expect(run.stderr).toBe('')
     })
 
-    it('lists each published revision once', () => {
+    it('lists the published revision', () => {
       expect(run.stdout).toMatch(new RegExp(`published  ${commits[1].slice(0, 8)} +\\(as of`))
     })
 
