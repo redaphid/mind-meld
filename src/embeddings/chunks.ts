@@ -153,7 +153,14 @@ export const persistSessionChunks = async (
     await query(
       `INSERT INTO embeddings
          (session_chunk_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed, summarize_model)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (session_chunk_id, chroma_collection) WHERE session_chunk_id IS NOT NULL
+       DO UPDATE SET
+         chroma_id = EXCLUDED.chroma_id,
+         embedding_model = EXCLUDED.embedding_model,
+         dimensions = EXCLUDED.dimensions,
+         content_chars_at_embed = EXCLUDED.content_chars_at_embed,
+         summarize_model = EXCLUDED.summarize_model`,
       [
         chunkId,
         config.chroma.collections.chunks,
