@@ -26,6 +26,7 @@ describe('host-autoupdate.sh', () => {
   let stubs: string
   let commits: string[]
   let root: string
+  let prefixedOnly: string
 
   beforeAll(() => {
     root = mkdtempSync(join(tmpdir(), 'host-autoupdate-'))
@@ -48,17 +49,26 @@ describe('host-autoupdate.sh', () => {
     chmodSync(join(stubs, 'timeout'), 0o755)
     // The script re-runs itself with `bash` from PATH; keep that the same bash.
     symlinkSync(spawnSync('sh', ['-c', `command -v ${BASH}`], { encoding: 'utf8' }).stdout.trim(), join(stubs, 'bash'))
+
+    // A Mac with Homebrew coreutils but no unprefixed `timeout`.
+    prefixedOnly = join(root, 'prefixed-only')
+    mkdirSync(prefixedOnly)
+    for (const tool of ['awk', 'cat', 'cp', 'curl', 'cut', 'date', 'dirname', 'git', 'grep', 'head', 'mkdir', 'mktemp', 'mv', 'rm', 'sed', 'sleep', 'sort', 'stat', 'tail', 'tr', 'wc']) {
+      symlinkSync(spawnSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim(), join(prefixedOnly, tool))
+    }
+    for (const tool of ['bash', 'docker']) symlinkSync(join(stubs, tool), join(prefixedOnly, tool))
+    symlinkSync(join(stubs, 'timeout'), join(prefixedOnly, 'gtimeout'))
   })
 
   afterAll(() => {
     rmSync(root, { recursive: true, force: true })
   })
 
-  const autoupdate = (command: string, revision: string, uiRevision = revision): SpawnSyncReturns<string> =>
+  const autoupdate = (command: string, revision: string, uiRevision = revision, path = `${stubs}:${process.env.PATH}`): SpawnSyncReturns<string> =>
     spawnSync(BASH, [SCRIPT, command], {
       encoding: 'utf8',
       timeout: 30_000,
-      env: { ...process.env, PATH: `${stubs}:${process.env.PATH}`, AUTOUPDATE_REPO: checkout, STUB_REVISION: revision, STUB_UI_REVISION: uiRevision },
+      env: { ...process.env, PATH: path, AUTOUPDATE_REPO: checkout, STUB_REVISION: revision, STUB_UI_REVISION: uiRevision },
     })
   const status = (revision: string): SpawnSyncReturns<string> => autoupdate('status', revision)
 
@@ -125,6 +135,18 @@ describe('host-autoupdate.sh', () => {
 
     it('breaks the lock and runs', () => {
       expect(readFileSync(join(checkout, '.autoupdate/autoupdate.log'), 'utf8')).toContain('broke a lock left by run 999999')
+    })
+  })
+
+  describe('when only gtimeout is on PATH', () => {
+    let run: SpawnSyncReturns<string>
+
+    beforeEach(() => {
+      run = autoupdate('status', commits[1], commits[1], prefixedOnly)
+    })
+
+    it('fetches main and reports the host current', () => {
+      expect(run.stdout).toContain('mindmeld on this host: CURRENT')
     })
   })
 })

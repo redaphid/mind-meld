@@ -115,7 +115,7 @@ behind_since() {
 
 fetch_main() {
   # Bounded like every docker call: a hung fetch would hold the lock forever.
-  if GIT_TERMINAL_PROMPT=0 timeout 120 git fetch -q origin "$BRANCH" 2>/dev/null; then
+  if GIT_TERMINAL_PROMPT=0 "$TIMEOUT" 120 git fetch -q origin "$BRANCH" 2>/dev/null; then
     date +%s >"$FETCHED_FILE"; return 0
   fi
   local last; last="$(cat "$FETCHED_FILE" 2>/dev/null || echo 0)"
@@ -413,7 +413,7 @@ take_lock() {
     fi
     if [[ "$(cat "$dead/pid" 2>/dev/null)" != "$owner" ]] \
       || { [[ -z "$owner" ]] && (( $(date +%s) - $(mtime "$dead") < 60 )); }; then
-      mv -n "$dead" "$LOCK_DIR" 2>/dev/null
+      [[ -e "$LOCK_DIR" ]] || mv "$dead" "$LOCK_DIR" 2>/dev/null
       log "another run took the lock; skipping"; exit 0
     fi
     rm -rf "$dead"
