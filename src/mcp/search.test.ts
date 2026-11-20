@@ -98,6 +98,7 @@ describe('resolveDataClasses', () => {
   it('preserves explicit class filters for a pasted permalink', () => {
     expect(resolveDataClasses({ query: 'https://example.slack.com/archives/C123/p1234567890123456', dataClass: ['coding'] })).toEqual(['coding'])
   })
+
   it('defaults to coding only', () => {
     expect(resolveDataClasses({})).toEqual(['coding'])
   })
@@ -147,6 +148,7 @@ describe('search default data-class filter (semantic arm)', () => {
     expect(results.map(result => result.session_id)).toEqual([1])
     expect(embed).not.toHaveBeenCalled()
   })
+
   it('excludes non-coding sessions by default', async () => {
     mockDbForSemantic()
     mockChromaSessionsOnly()
