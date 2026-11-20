@@ -39,8 +39,15 @@ env:
   IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/mindmeld
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
+  # Each architecture builds on a runner of its own architecture. Under QEMU
+  # emulation the arm64 `pnpm install` died with SIGILL ("qemu: uncaught target
+  # signal 4") and buildkit then waited on it until the 6-hour job limit, so
+  # mindmeld-centroids stayed a commit behind the rest and the host, which
+  # deploys only a set built from one commit, deployed nothing.
+  build:
+    runs-on: ${{ matrix.arch.runner }}
+    # A build takes minutes; a hang fails here instead of at the 6-hour default.
+    timeout-minutes: 30
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     permissions:
       contents: read
@@ -49,29 +56,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - dockerfile: Dockerfile.postgres
-            image: postgres
-            platforms: linux/amd64,linux/arm64
-          - dockerfile: Dockerfile.sync
-            image: sync
-            platforms: linux/amd64,linux/arm64
-          - dockerfile: Dockerfile.centroids
-            image: centroids
-            platforms: linux/amd64,linux/arm64
-          - dockerfile: Dockerfile.http
-            image: mcp
-            platforms: linux/amd64,linux/arm64
-          - dockerfile: Dockerfile.ui
-            image: ui
-            platforms: linux/amd64,linux/arm64
+        target:
+          - { dockerfile: Dockerfile.postgres, image: postgres }
+          - { dockerfile: Dockerfile.sync, image: sync }
+          - { dockerfile: Dockerfile.centroids, image: centroids }
+          - { dockerfile: Dockerfile.http, image: mcp }
+          - { dockerfile: Dockerfile.ui, image: ui }
+        arch:
+          - { platform: linux/amd64, runner: ubuntu-latest, name: amd64 }
+          - { platform: linux/arm64, runner: ubuntu-24.04-arm, name: arm64 }
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -87,7 +84,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_PREFIX }}-${{ matrix.image }}
+          images: ${{ env.IMAGE_PREFIX }}-${{ matrix.target.image }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -95,14 +92,88 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
+      # Pushed by digest only; the merge job puts the tags on the
+      # multi-architecture manifest once both halves exist.
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
-          platforms: ${{ matrix.platforms }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          file: ${{ matrix.target.dockerfile }}
+          platforms: ${{ matrix.arch.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          outputs: type=image,name=${{ env.IMAGE_PREFIX }}-${{ matrix.target.image }},push-by-digest=true,name-canonical=true,push=true
+          # One scope per image and architecture: in a shared scope each
+          # mode=max export replaced the others' cache.
+          cache-from: type=gha,scope=${{ matrix.target.image }}-${{ matrix.arch.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target.image }}-${{ matrix.arch.name }}
+
+      - name: Record digest and tags
+        env:
+          IMAGE: ${{ matrix.target.image }}
+          ARCH: ${{ matrix.arch.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/publish/$IMAGE"
+          printf '%s\n' "$DIGEST" >"$RUNNER_TEMP/publish/$IMAGE/digest-$ARCH"
+          printf '%s\n' "$TAGS" >"$RUNNER_TEMP/publish/$IMAGE/tags"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-${{ matrix.target.image }}-${{ matrix.arch.name }}
+          path: ${{ runner.temp }}/publish
+          if-no-files-found: error
+          retention-days: 1
+
+  # Tags each image whose every architecture built. One image failing still
+  # publishes the others, as before; the failed one turns this job red.
+  merge:
+    needs: build
+    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: publish-*
+          path: ${{ runner.temp }}/publish
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish multi-architecture manifests
+        working-directory: ${{ runner.temp }}/publish
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          failed=""
+          for image in *; do
+            digests=("$image"/digest-*)
+            if [[ ${#digests[@]} -ne 2 ]]; then
+              echo "::error::$image built for ${#digests[@]} of 2 architectures; not tagging it"
+              failed+=" $image"
+              continue
+            fi
+            tags=()
+            while IFS= read -r tag; do [[ -n "$tag" ]] && tags+=(-t "$tag"); done <"$image/tags"
+            sources=()
+            for d in "${digests[@]}"; do sources+=("$IMAGE_PREFIX-$image@$(cat "$d")"); done
+            docker buildx imagetools create "${tags[@]}" "${sources[@]}" || failed+=" $image"
+          done
+          [[ -z "$failed" ]] || { echo "::error::not published:$failed"; exit 1; }
+          [[ "$BUILD_RESULT" == success ]] || { echo "::error::a build job ended $BUILD_RESULT"; exit 1; }
