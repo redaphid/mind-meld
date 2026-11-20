@@ -81,6 +81,8 @@ services:
       # comparable.
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3}
       CENTROID_INTERVAL_SECONDS: ${CENTROID_INTERVAL_SECONDS:-25200}
+      # Only the fallback for an unreadable switch; mcp is what writes it.
+      MINDMELD_SEMANTIC: ${MINDMELD_SEMANTIC:-on}
 
   mcp:
     image: ghcr.io/redaphid/mindmeld-mcp:latest
@@ -119,6 +121,10 @@ services:
       # Extra automated-session prefixes (see .env.example). Every process that
       # syncs classifies sessions, so each needs the same list.
       MINDMELD_AUTOMATED_PREFIXES: ${MINDMELD_AUTOMATED_PREFIXES:-}
+      # off = start in full-text-only mode: no Ollama/GPU work, no vectors.
+      # mcp switches the stored switch off at startup; the UI can switch it
+      # back on. See "The semantic switch" in CLAUDE.md.
+      MINDMELD_SEMANTIC: ${MINDMELD_SEMANTIC:-on}
     ports:
       - "${MCP_HTTP_PORT:-3847}:3000"
 

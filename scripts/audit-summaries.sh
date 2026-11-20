@@ -1,10 +1,13 @@
 #!/bin/bash
 # Audit session summaries for common failure modes:
 #   - truncation (old fallback path wrote raw [USER]:/[ASSISTANT]: text)
-#   - repetition loops (qwen generating same n-gram forever)
 #   - refusals / prompt-injection mimicry (<done>, BLOCKED, etc.)
 #   - impossibly short relative to source content
 #   - marker-only values (e.g. "Embedding generation failed")
+#
+# Repetition loops are not counted here: their definition is TypeScript
+# (src/embeddings/repetition-loop.ts), shared with the summarizer that refuses
+# them. Count them with: pnpm tsx scripts/reset-bad-summaries.ts --category loopy
 #
 # Usage:
 #   ./scripts/audit-summaries.sh             # summary counts
@@ -53,18 +56,6 @@ WITH scored AS (
     -- Compression too extreme: summary less than 0.5% of source.
     (s.content_chars > 5000
       AND LENGTH(s.summary)::numeric / NULLIF(s.content_chars, 0) < 0.005) AS over_compressed,
-    -- Loop detector: very low distinct-word ratio on long output = token-generation loop.
-    -- Tightened to < 0.05 to avoid flagging real multi-topic summaries.
-    CASE
-      WHEN LENGTH(s.summary) > 2000
-       AND array_length(string_to_array(s.summary, ' '), 1) > 300
-       AND (
-         SELECT COUNT(DISTINCT w)::numeric
-           / NULLIF(array_length(string_to_array(s.summary, ' '), 1), 0)
-         FROM unnest(string_to_array(s.summary, ' ')) AS w
-       ) < 0.05
-      THEN true ELSE false
-    END AS loopy,
     -- Bare JSON dump (no prose).
     (s.summary ~ '^\s*\{' AND s.summary ~ '"file_paths"\s*:') AS json_dump
   FROM sessions s
@@ -90,11 +81,10 @@ SELECT
   COUNT(*) FILTER (WHERE raw_message_leak)   AS raw_leak,
   COUNT(*) FILTER (WHERE too_short)          AS too_short,
   COUNT(*) FILTER (WHERE over_compressed)    AS over_compressed,
-  COUNT(*) FILTER (WHERE loopy)              AS loopy,
   COUNT(*) FILTER (WHERE json_dump)          AS json_dump,
   COUNT(*) FILTER (WHERE truncated OR marker_only OR no_update OR refusal
                       OR raw_message_leak OR too_short OR over_compressed
-                      OR loopy OR json_dump) AS any_bad
+                      OR json_dump) AS any_bad
 FROM scored
 GROUP BY source
 ORDER BY source;
@@ -102,7 +92,7 @@ SQL
     ;;
 
   samples)
-    for cat in truncated marker_only no_update refusal raw_message_leak too_short over_compressed loopy json_dump; do
+    for cat in truncated marker_only no_update refusal raw_message_leak too_short over_compressed json_dump; do
       echo "=== $cat ==="
       psql -P pager=off <<SQL
 $SIGNALS_CTE
@@ -116,9 +106,9 @@ SQL
     ;;
 
   ids)
-    [[ -z "$CATEGORY" ]] && { echo "usage: $0 ids <truncated|marker_only|no_update|refusal|raw_message_leak|too_short|over_compressed|loopy|json_dump|any>" >&2; exit 1; }
+    [[ -z "$CATEGORY" ]] && { echo "usage: $0 ids <truncated|marker_only|no_update|refusal|raw_message_leak|too_short|over_compressed|json_dump|any>" >&2; exit 1; }
     WHERE_CLAUSE="$CATEGORY"
-    [[ "$CATEGORY" == "any" ]] && WHERE_CLAUSE="truncated OR marker_only OR no_update OR refusal OR raw_message_leak OR too_short OR over_compressed OR loopy OR json_dump"
+    [[ "$CATEGORY" == "any" ]] && WHERE_CLAUSE="truncated OR marker_only OR no_update OR refusal OR raw_message_leak OR too_short OR over_compressed OR json_dump"
     psql -tAc "$(cat <<SQL
 $SIGNALS_CTE
 SELECT id FROM scored WHERE $WHERE_CLAUSE ORDER BY id

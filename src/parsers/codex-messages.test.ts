@@ -78,6 +78,20 @@ describe('parseCodexLine', () => {
     if (sequenceFallback.kind === 'message') expect(sequenceFallback.message.uuid).toBe('ordinal:13');
   });
 
+  it('indexes the text of content-part tool outputs without their images', () => {
+    const screenshot = parseCodexLine(record('response_item', {
+      type: 'custom_tool_call_output', id: 'out-2', output: [
+        { type: 'input_text', text: 'Wrote screenshot of The Rusty Conquistador' },
+        { type: 'input_image', image_url: `data:image/png;base64,${'A'.repeat(2_000_000)}` },
+      ],
+    }, 7), 14);
+    expect(screenshot.kind).toBe('message');
+    if (screenshot.kind === 'message') {
+      expect(screenshot.message.contentText).toBe('Wrote screenshot of The Rusty Conquistador');
+      expect(screenshot.message.toolResult).toBe('Wrote screenshot of The Rusty Conquistador');
+    }
+  });
+
   it('skips records that are not indexable conversation messages', () => {
     expect(parseCodexLine(record('event_msg', { type: 'task_started' }, 1), 0).kind).toBe('skip');
     expect(parseCodexLine(JSON.stringify({

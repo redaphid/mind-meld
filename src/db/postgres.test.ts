@@ -86,36 +86,12 @@ describe('source and project lookups', () => {
 })
 
 describe('session upserts and lookups', () => {
-  it('upsertSession classifies automated sessions from the title', async () => {
+  // A re-sync must not be able to undo a flag (#177): the upsert never touches
+  // is_automated, and classification happens once the messages have landed.
+  it('upsertSession never writes the automated flag', async () => {
     poolQuery.mockResolvedValue({ rows: [{ id: 9 }], rowCount: 1 })
-    await queries.upsertSession({
-      projectId: 1,
-      externalId: 's1',
-      title: 'You are a Slack monitoring assistant',
-    })
-    expect(lastCall()[1][14]).toBe(true)
-
-    await queries.upsertSession({ projectId: 1, externalId: 's2', title: 'Fixing the build' })
-    expect(lastCall()[1][14]).toBe(false)
-  })
-
-  // #95 left Claude Code sessions untitled, and every re-sync then wrote
-  // is_automated = false: 0 of 580 sessions in a week, Slack monitors included.
-  it('upsertSession classifies an untitled session from its first prompt', async () => {
-    poolQuery.mockResolvedValue({ rows: [{ id: 9 }], rowCount: 1 })
-    await queries.upsertSession({
-      projectId: 1,
-      externalId: 's3',
-      firstPrompt: 'You are a curiosity curator helping @someone discover discussions.',
-    })
-    expect(lastCall()[1][14]).toBe(true)
-
-    await queries.upsertSession({
-      projectId: 1,
-      externalId: 's4',
-      firstPrompt: 'Fix the bug\nYou are a Slack monitoring assistant',
-    })
-    expect(lastCall()[1][14]).toBe(false)
+    await queries.upsertSession({ projectId: 1, externalId: 's1', title: 'You are a Slack monitoring assistant' })
+    expect(lastCall()[0]).not.toContain('is_automated')
   })
 
   // Every subagent transcript already has a session row by the time linkage
@@ -197,7 +173,16 @@ describe('session upserts and lookups', () => {
 
   it('updateSessionStats delegates to the SQL function', async () => {
     await queries.updateSessionStats(5)
-    expect(lastCall()[0]).toContain('update_session_stats($1::integer)')
+    expect(poolQuery).toHaveBeenCalledWith(expect.stringContaining('update_session_stats($1::integer)'), [5])
+  })
+
+  it('updateSessionStats flags the session once its opening text is in place', async () => {
+    poolQuery.mockImplementation(async (sql: string) =>
+      sql.includes('AS opening')
+        ? { rows: [{ id: 5, source: 'claude_code', machine: null, stored: false, opening: 'You are a Slack monitoring assistant' }] }
+        : { rows: [], rowCount: 1 })
+    await queries.updateSessionStats(5)
+    expect(poolQuery).toHaveBeenCalledWith(expect.stringContaining('SET is_automated = true'), [[5]])
   })
 })
 

@@ -6,11 +6,12 @@ import { describe, it, expect, beforeEach, onTestFinished, vi } from 'vitest'
 // about the loop's stopping conditions only, so Postgres, Chroma, the GPU and
 // the clock are all stubbed; what is real is the control flow.
 
-const { queryMock, generateEmbeddingsMock, summarizeMock, shouldStandDownMock } = vi.hoisted(() => ({
+const { queryMock, generateEmbeddingsMock, summarizeMock, aiHoldMock, generateTitleMock } = vi.hoisted(() => ({
+  generateTitleMock: vi.fn(),
   queryMock: vi.fn(),
   generateEmbeddingsMock: vi.fn(),
   summarizeMock: vi.fn(),
-  shouldStandDownMock: vi.fn(),
+  aiHoldMock: vi.fn(),
 }))
 
 vi.mock('../db/postgres.js', () => ({ query: queryMock, queries: {} }))
@@ -28,16 +29,17 @@ vi.mock('./summarize.js', () => ({
   summarizeConversation: summarizeMock,
   ensureSummarizeModel: vi.fn(),
   combineSummaries: vi.fn(),
+  generateTitle: generateTitleMock,
 }))
 vi.mock('./chunks.js', () => ({ persistSessionChunks: vi.fn() }))
 vi.mock('./classify.js', () => ({ classifyNoise: () => null }))
 vi.mock('./pending.js', () => ({
-  embeddableMessages: () => ({ sql: 'FROM messages m', params: [] }),
+  nextMessagesToEmbed: () => ({ sql: 'SELECT m.id, m.session_id FROM messages m LIMIT $1', params: [] }),
   embeddableSessions: () => 'FROM sessions s',
 }))
-vi.mock('../sync/stand-down.js', () => ({
-  shouldStandDown: shouldStandDownMock,
-  STAND_DOWN_NOTICE: 'standing down',
+vi.mock('../sync/sync-control.js', () => ({
+  aiHold: aiHoldMock,
+  AI_HOLD_NOTICE: { 'semantic-off': 'semantic off', 'standing-down': 'standing down' },
 }))
 // retryDelayMs is what the stall backoff multiplies, so zero keeps these tests
 // at wall-clock zero without faking timers.
@@ -58,7 +60,8 @@ import {
 } from './batch.js'
 import { getEmbeddingMetadata, upsertEmbeddings } from '../db/chroma.js'
 import { persistSessionChunks } from './chunks.js'
-import { combineSummaries } from './summarize.js'
+import { combineSummaries, ensureSummarizeModel } from './summarize.js'
+import { ensureEmbeddingModel } from './ollama.js'
 
 const message = (id: number) => ({
   id,
@@ -89,7 +92,7 @@ const servePending = (batches: ReturnType<typeof message>[][], repeatLast = fals
 
 beforeEach(() => {
   vi.clearAllMocks()
-  shouldStandDownMock.mockResolvedValue(false)
+  aiHoldMock.mockResolvedValue(null)
   summarizeMock.mockResolvedValue('a summary long enough to pass the length check')
 })
 
@@ -185,10 +188,25 @@ describe('generatePendingEmbeddings', () => {
   describe('when the stand-down switch is thrown', () => {
     it('stops without calling it a stall — yielding is not a failure', async () => {
       servePending([[message(1)]], true)
-      shouldStandDownMock.mockResolvedValue(true)
+      aiHoldMock.mockResolvedValue('standing-down')
       const stats = await generatePendingEmbeddings()
 
       expect(stats.stalled).toBeNull()
+      expect(generateEmbeddingsMock).not.toHaveBeenCalled()
+    })
+  })
+
+  // Off means no Ollama request of any kind, and the model checks are Ollama
+  // requests too: they must not run ahead of the gate.
+  describe('when semantic is switched off', () => {
+    it('reaches nothing in Ollama, not even a model check', async () => {
+      servePending([[message(1)]], true)
+      aiHoldMock.mockResolvedValue('semantic-off')
+      const stats = await generatePendingEmbeddings()
+
+      expect(stats).toMatchObject({ processed: 0, stalled: null })
+      expect(ensureEmbeddingModel).not.toHaveBeenCalled()
+      expect(ensureSummarizeModel).not.toHaveBeenCalled()
       expect(generateEmbeddingsMock).not.toHaveBeenCalled()
     })
   })
@@ -202,7 +220,7 @@ describe('updateAggregateEmbeddings', () => {
   const session = (id: number, existing_content_chars: number | null = null) => ({
     id,
     external_id: `session-${id}`,
-    title: 'The Rusty Conquistador furnace',
+    title: 'The Rusty Conquistador furnace' as string | null,
     project_path: '/projects/example',
     source_name: 'claude_code',
     message_count: 1,
@@ -236,6 +254,38 @@ describe('updateAggregateEmbeddings', () => {
       if (sql.includes('SELECT s.id, s.external_id')) return { rows: queued }
       if (sql.includes('SELECT id, content_text, role FROM messages')) return { rows: sessionMessages }
       return { rows: [], rowCount: 0 }
+    })
+  })
+
+  describe('when a summary is the session transcript itself', () => {
+    const storedTitles = () =>
+      queryMock.mock.calls
+        .filter(([sql]) => String(sql).startsWith('UPDATE sessions SET summary'))
+        .map(([, params]) => params[3])
+
+    beforeEach(() => {
+      queued = [{ ...session(1), title: null }]
+      generateTitleMock.mockResolvedValue('Furnace blower replaced and confirmed working')
+    })
+
+    it('stores a generated title for it', async () => {
+      summarizeMock.mockResolvedValue('[USER]: Thunderwrench HVAC Co. fixed it')
+      await updateAggregateEmbeddings(Number.POSITIVE_INFINITY)
+      expect(storedTitles()).toEqual(['Furnace blower replaced and confirmed working'])
+    })
+
+    it('does not ask the model when the source already titled the session', async () => {
+      queued = [session(1)]
+      summarizeMock.mockResolvedValue('[USER]: Thunderwrench HVAC Co. fixed it')
+      await updateAggregateEmbeddings(Number.POSITIVE_INFINITY)
+      expect(storedTitles()).toEqual([null])
+      expect(generateTitleMock).not.toHaveBeenCalled()
+    })
+
+    it('clears the generated title, without asking the model, once the summary is real', async () => {
+      await updateAggregateEmbeddings(Number.POSITIVE_INFINITY)
+      expect(storedTitles()).toEqual([null])
+      expect(generateTitleMock).not.toHaveBeenCalled()
     })
   })
 
@@ -281,10 +331,35 @@ describe('updateAggregateEmbeddings', () => {
 
   describe('when the stand-down switch is thrown', () => {
     it('summarizes nothing', async () => {
-      shouldStandDownMock.mockResolvedValue(true)
+      aiHoldMock.mockResolvedValue('standing-down')
       await updateAggregateEmbeddings(Infinity)
 
       expect(summarizeMock).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('when semantic is switched off', () => {
+    it('reaches nothing in Ollama, not even a model check', async () => {
+      queued = [session(1), session(2)]
+      aiHoldMock.mockResolvedValue('semantic-off')
+      const stats = await updateAggregateEmbeddings(Infinity)
+
+      expect(stats.sessionsFetched).toBe(0)
+      expect(ensureSummarizeModel).not.toHaveBeenCalled()
+      expect(summarizeMock).not.toHaveBeenCalled()
+    })
+
+    // A session is 5-10 minutes of GPU, so switching off mid-drain has to stop
+    // at the next session rather than finish the batch.
+    it('stops a drain already under way at the next session', async () => {
+      queued = [session(1), session(2), session(3)]
+      aiHoldMock
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValue('semantic-off')
+      await updateAggregateEmbeddings(Infinity)
+
+      expect(summarizeMock).toHaveBeenCalledTimes(1)
     })
   })
 
@@ -338,6 +413,7 @@ describe('updateAggregateEmbeddings', () => {
         endMessageId: 1,
         summary,
         contentChars: 100,
+        verbatim: false,
       })
       vi.mocked(persistSessionChunks).mockResolvedValueOnce([
         chunk(0, 'Thunderwrench HVAC Co. replaced the blower'),
@@ -348,6 +424,30 @@ describe('updateAggregateEmbeddings', () => {
 
       expect(summarizeMock).not.toHaveBeenCalled()
       expect(storedSummaries()).toEqual(['both jobs, combined'])
+    })
+  })
+
+  describe('when a long session ends in a chunk kept verbatim', () => {
+    it('has the chunk summaries merged rather than joined, so no transcript lines become the session summary', async () => {
+      queued = [session(1)]
+      const chunk = (chunkIndex: number, summary: string, verbatim: boolean) => ({
+        id: chunkIndex,
+        chunkIndex,
+        startMessageId: 1,
+        endMessageId: 1,
+        summary,
+        contentChars: summary.length,
+        verbatim,
+      })
+      vi.mocked(persistSessionChunks).mockResolvedValueOnce([
+        chunk(0, 'Thunderwrench HVAC Co. replaced the blower', false),
+        chunk(1, '[USER]: thanks, that fixed it', true),
+      ])
+      vi.mocked(combineSummaries).mockResolvedValueOnce('both jobs, merged')
+      await updateAggregateEmbeddings(Infinity)
+
+      expect(vi.mocked(combineSummaries)).toHaveBeenCalledWith(expect.any(Array), { joinIfShort: false })
+      expect(storedSummaries()).toEqual(['both jobs, merged'])
     })
   })
 
@@ -367,17 +467,5 @@ describe('updateAggregateEmbeddings', () => {
 
       expect(storedSummaries()).toEqual([])
     })
-  })
-})
-
-describe('when a backfill competes with recent messages', () => {
-  let selection: string
-  beforeEach(async () => {
-    servePending([])
-    await generatePendingEmbeddings()
-    selection = queryMock.mock.calls.find(([sql]) => sql.includes('SELECT m.id, m.session_id'))?.[0]
-  })
-  it('selects by newest message time before insertion id', () => {
-    expect(selection).toMatch(/ORDER BY m\.timestamp DESC NULLS LAST, m\.id DESC/)
   })
 })

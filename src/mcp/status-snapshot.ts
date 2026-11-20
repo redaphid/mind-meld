@@ -1,16 +1,26 @@
-export const cacheStatusSnapshot = <T>(
+export type Snapshot<T> = { value: T; asOf: Date }
+
+export const staleWhileRevalidate = <T>(
   load: () => Promise<T>,
-  { refreshAfterMs = 30000, now = Date.now } = {},
-): (() => Promise<T>) => {
-  let snapshot: { value: T; expiresAt: number } | null = null
-  let pending: Promise<T> | null = null
+  { refreshAfterMs, now = Date.now }: { refreshAfterMs: number; now?: () => number },
+): (() => Snapshot<T> | null) => {
+  let snapshot: Snapshot<T> | null = null
+  let refreshing = false
+
+  const refresh = async () => {
+    refreshing = true
+    try {
+      snapshot = { value: await load(), asOf: new Date(now()) }
+    } catch (error) {
+      console.error('[status] count refresh failed:', error instanceof Error ? error.message : error)
+    } finally {
+      refreshing = false
+    }
+  }
+
   return () => {
-    if (snapshot && now() < snapshot.expiresAt) return Promise.resolve(snapshot.value)
-    if (pending) return pending
-    pending = load().then(value => {
-      snapshot = { value, expiresAt: now() + refreshAfterMs }
-      return value
-    }).finally(() => { pending = null })
-    return pending
+    const stale = !snapshot || now() - snapshot.asOf.getTime() >= refreshAfterMs
+    if (stale && !refreshing) void refresh()
+    return snapshot
   }
 }

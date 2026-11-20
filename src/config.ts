@@ -39,6 +39,17 @@ function getEnvBool(key: string, defaultValue: boolean): boolean {
   return value.toLowerCase() === "true" || value === "1";
 }
 
+// An on/off switch someone types by hand (MINDMELD_SEMANTIC, MINDMELD_SEARCH_LOG),
+// parsed strictly: a typo such as "of" must stop the process at startup rather
+// than quietly leave the switch in a state nobody chose. Unset means on.
+function getEnvSwitch(key: string): boolean {
+  const value = process.env[key];
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (["", "on", "true", "1"].includes(normalized)) return true;
+  if (["off", "false", "0"].includes(normalized)) return false;
+  throw new Error(`${key} must be "on" or "off", got "${value}"`);
+}
+
 function getEnvFloat(key: string, defaultValue: number): number {
   const value = process.env[key];
   if (!value) return defaultValue;
@@ -104,6 +115,17 @@ export const config = {
   // things: it tags that one session, and it teaches search what noise LOOKS
   // like, so that SIMILAR sessions nobody has reported are ranked down too. The
   // second half is this block.
+  // The search event log (src/mcp/search-log.ts). Off stops new rows only; the
+  // list handle is still returned so output stays the same shape.
+  searchLog: {
+    enabled: getEnvSwitch("MINDMELD_SEARCH_LOG"),
+    // Rows waiting to be written. Past it new rows are dropped and counted, so
+    // a stalled database costs log rows, never memory or search latency.
+    queueCapacity: getEnvInt("MINDMELD_SEARCH_LOG_QUEUE", 1000),
+    // Days the query text (search_log.request) is kept before it is nulled.
+    rawDays: getEnvInt("MINDMELD_SEARCH_LOG_RAW_DAYS", 180),
+  },
+
   noise: {
     // How hard a result that resembles reported noise is pushed down, as a
     // multiplicative damping: score * (1 - weight * similarityToNearestCluster).
@@ -258,6 +280,13 @@ export const config = {
   sync: {
     intervalMinutes: getEnvInt("SYNC_INTERVAL_MINUTES", 60),
     incremental: getEnvBool("SYNC_INCREMENTAL", true),
+  },
+
+  // The semantic switch (src/sync/sync-control.ts). The live value is a row in
+  // Postgres that the UI can flip; this is what `mcp` writes there at startup
+  // when it says off, and what every process assumes if the row is unreadable.
+  semantic: {
+    enabledAtStartup: getEnvSwitch("MINDMELD_SEMANTIC"),
   },
 
   // Embedding healing

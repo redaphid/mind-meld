@@ -1,31 +1,59 @@
 import { describe, expect, it, vi } from 'vitest'
-import { cacheStatusSnapshot } from './status-snapshot.js'
+import { staleWhileRevalidate } from './status-snapshot.js'
 
-describe('when status reads overlap', () => {
-  it('shares the unfinished snapshot instead of starting duplicate work', async () => {
+const settle = () => new Promise(resolve => setTimeout(resolve, 0))
+
+describe('staleWhileRevalidate', () => {
+  it('answers before the first count finishes, then serves it', async () => {
     let finish = (_value: string) => {}
     const load = vi.fn(() => new Promise<string>(resolve => { finish = resolve }))
-    const read = cacheStatusSnapshot(load)
-    const first = read(), second = read()
+    const read = staleWhileRevalidate(load, { refreshAfterMs: 30 })
+    expect(read()).toBeNull()
+    expect(read()).toBeNull()
     finish('The kraken is awake.')
-    expect(await Promise.all([first, second])).toEqual(['The kraken is awake.', 'The kraken is awake.'])
+    await settle()
+    expect(read()?.value).toBe('The kraken is awake.')
     expect(load).toHaveBeenCalledTimes(1)
   })
-  it('refreshes after the last completed snapshot expires', async () => {
+
+  it('keeps serving the old snapshot while a stale one is recounted', async () => {
     let clock = 0
-    const load = vi.fn().mockResolvedValueOnce('old').mockResolvedValueOnce('new')
-    const read = cacheStatusSnapshot(load, { refreshAfterMs: 30, now: () => clock })
-    await read()
+    let finish = (_value: string) => {}
+    const load = vi.fn()
+      .mockResolvedValueOnce('old')
+      .mockImplementationOnce(() => new Promise<string>(resolve => { finish = resolve }))
+    const read = staleWhileRevalidate(load, { refreshAfterMs: 30, now: () => clock })
+    read()
+    await settle()
     clock = 29
-    expect(await read()).toBe('old')
+    expect(read()?.value).toBe('old')
+    expect(load).toHaveBeenCalledTimes(1)
     clock = 30
-    expect(await read()).toBe('new')
+    expect(read()?.value).toBe('old')
+    expect(read()?.value).toBe('old')
     expect(load).toHaveBeenCalledTimes(2)
+    finish('new')
+    await settle()
+    expect(read()).toEqual({ value: 'new', asOf: new Date(30) })
   })
-  it('does not keep a rejected refresh pinned forever', async () => {
-    const load = vi.fn().mockRejectedValueOnce(new Error('The lair is offline.')).mockResolvedValueOnce('recovered')
-    const read = cacheStatusSnapshot(load)
-    await expect(read()).rejects.toThrow('The lair is offline.')
-    expect(await read()).toBe('recovered')
+
+  it('keeps the last good snapshot when a recount fails, and tries again', async () => {
+    let clock = 0
+    const load = vi.fn()
+      .mockResolvedValueOnce('Valley of the Sun')
+      .mockRejectedValueOnce(new Error('The lair is offline.'))
+      .mockResolvedValueOnce('The Rusty Conquistador')
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const read = staleWhileRevalidate(load, { refreshAfterMs: 30, now: () => clock })
+    read()
+    await settle()
+    clock = 30
+    read()
+    await settle()
+    expect(read()?.value).toBe('Valley of the Sun')
+    await settle()
+    expect(read()?.value).toBe('The Rusty Conquistador')
+    expect(errors).toHaveBeenCalledWith('[status] count refresh failed:', 'The lair is offline.')
+    errors.mockRestore()
   })
 })

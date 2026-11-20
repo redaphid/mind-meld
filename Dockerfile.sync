@@ -32,10 +32,13 @@ RUN chmod +x /app/mindmeld
 # Default to hourly sync (3600 seconds)
 ENV SYNC_INTERVAL_SECONDS=3600
 
-# Run sync in a loop
+# Run sync in a loop. The sleep is unconditional, as in Dockerfile.centroids:
+# a sync run that records any error exits nonzero, and behind `&&` that skipped
+# the sleep, so a failing sync ran again at once, over and over, while the
+# container still showed Up. src/quality/worker-loops.test.ts runs this CMD.
 CMD while true; do \
-      echo "=== Sync starting at $(date -Iseconds) ===" && \
-      /app/mindmeld sync && \
-      echo "=== Sync complete, sleeping ${SYNC_INTERVAL_SECONDS}s ===" && \
+      echo "=== Sync starting at $(date -Iseconds) ==="; \
+      /app/mindmeld sync || echo "=== Sync FAILED ==="; \
+      echo "=== Sleeping ${SYNC_INTERVAL_SECONDS}s ==="; \
       sleep ${SYNC_INTERVAL_SECONDS}; \
     done

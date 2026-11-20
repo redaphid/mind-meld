@@ -1,4 +1,6 @@
 FROM postgres:16-alpine
 
-# Copy init scripts into the entrypoint directory
-COPY init-db/*.sql /docker-entrypoint-initdb.d/
+# init-db/ is not copied into /docker-entrypoint-initdb.d. The mcp service applies
+# it at startup through src/db/migrations.ts, which records each file in
+# schema_migrations. A copy applied here would be unrecorded, so mcp would apply
+# every file a second time on a fresh volume.
