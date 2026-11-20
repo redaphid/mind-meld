@@ -64,9 +64,12 @@ mkdir -p "$STATE_DIR"
 log() { printf '%s  %s\n' "$(date '+%F %T')" "$*"; }
 # Every docker call is bounded, so a wedged engine cannot hold the lock forever.
 DOCKER_TIMEOUT=300
-dk() { timeout "$DOCKER_TIMEOUT" docker "$@" 2>&1 | tr -d '\r'; }
+TIMEOUT="$(command -v timeout || command -v gtimeout)" \
+  || { echo "host-autoupdate needs timeout(1) on PATH (macOS: brew install coreutils)" >&2; exit 1; }
+dk() { "$TIMEOUT" "$DOCKER_TIMEOUT" docker "$@" 2>&1 | tr -d '\r'; }
 short() { printf '%s' "${1:0:8}"; }
-iso() { date -u -d "@$1" '+%FT%TZ'; }
+iso() { date -u -d "@$1" '+%FT%TZ' 2>/dev/null || date -u -r "$1" '+%FT%TZ'; }
+mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"; }
 excluded() { [[ " ${EXCLUDE//,/ } " == *" $1 "* ]]; }
 
 # --- what is running --------------------------------------------------------
@@ -112,7 +115,7 @@ behind_since() {
 
 fetch_main() {
   # Bounded like every docker call: a hung fetch would hold the lock forever.
-  if GIT_TERMINAL_PROMPT=0 timeout 120 git fetch -q origin "$BRANCH" 2>/dev/null; then
+  if GIT_TERMINAL_PROMPT=0 "$TIMEOUT" 120 git fetch -q origin "$BRANCH" 2>/dev/null; then
     date +%s >"$FETCHED_FILE"; return 0
   fi
   local last; last="$(cat "$FETCHED_FILE" 2>/dev/null || echo 0)"
@@ -197,13 +200,12 @@ update_containers() {
   # A publish pushes each image as its own job finishes, so a pull can land in
   # the middle of one. Deploy only a complete set: every app image labelled
   # with the same commit of main, and that commit not older than anything running.
-  local -A revs=()
-  for ref in "${refs[@]}"; do rev="$(image_revision "$ref")"; revs["${rev:-unlabelled}"]=1; done
-  if (( ${#revs[@]} != 1 )); then
-    RESULT="waiting: published images are from different commits ($(for r in "${!revs[@]}"; do short "$r"; printf ' '; done))"
+  local published
+  published="$(for ref in "${refs[@]}"; do rev="$(image_revision "$ref")"; echo "${rev:-unlabelled}"; done | sort -u)"
+  if [[ "$published" == *$'\n'* ]]; then
+    RESULT="waiting: published images are from different commits ($(for r in $published; do short "$r"; printf ' '; done))"
     return 0
   fi
-  local published="${!revs[*]}"
   if ! is_commit "$published" || ! git merge-base --is-ancestor "$published" "origin/$BRANCH"; then
     RESULT="refusing: published images carry revision '$(short "$published")', which is not a commit on $BRANCH"
     return 1
@@ -255,12 +257,12 @@ measure() {
   MAIN_SHA="$(git rev-parse "origin/$BRANCH")"
   RUNNING=""; HELD=""; PUBLISHED=""; BEHIND_SINCE=0
   local service name ref rev since
-  local -A seen=()
+  local seen=" "
   while IFS='|' read -r service name ref rev; do
     [[ -n "$service" ]] || continue
     RUNNING+="$service=$(short "${rev:-unlabelled}") "
-    if [[ -z "${seen[$ref]:-}" ]]; then
-      seen[$ref]=1
+    if [[ "$seen" != *" $ref "* ]]; then
+      seen+="$ref "
       PUBLISHED+="$(short "$(image_revision "$ref")") "
     fi
     since="$(behind_since "$rev" "$MAIN_SHA")"
@@ -398,7 +400,7 @@ take_lock() {
       log "run $owner holds the lock; skipping"; exit 0
     fi
     # A run between its mkdir and writing its pid looks ownerless for a moment.
-    if [[ -z "$owner" ]] && (( $(date +%s) - $(stat -c %Y "$LOCK_DIR") < 60 )); then
+    if [[ -z "$owner" ]] && (( $(date +%s) - $(mtime "$LOCK_DIR") < 60 )); then
       log "a run is taking the lock; skipping"; exit 0
     fi
     # Two starters can both judge the same lock dead. A rename succeeds for only
@@ -406,12 +408,12 @@ take_lock() {
     # lock it judged: a run may have broken and retaken it in between.
     local dead="$LOCK_DIR.dead.$$"
     rm -rf "$dead"
-    if ! mv -T "$LOCK_DIR" "$dead" 2>/dev/null; then
+    if ! mv "$LOCK_DIR" "$dead" 2>/dev/null; then
       log "another run broke the lock first; skipping"; exit 0
     fi
     if [[ "$(cat "$dead/pid" 2>/dev/null)" != "$owner" ]] \
-      || { [[ -z "$owner" ]] && (( $(date +%s) - $(stat -c %Y "$dead") < 60 )); }; then
-      mv -nT "$dead" "$LOCK_DIR" 2>/dev/null
+      || { [[ -z "$owner" ]] && (( $(date +%s) - $(mtime "$dead") < 60 )); }; then
+      [[ -e "$LOCK_DIR" ]] || mv "$dead" "$LOCK_DIR" 2>/dev/null
       log "another run took the lock; skipping"; exit 0
     fi
     rm -rf "$dead"
