@@ -334,6 +334,32 @@ describe('search parameter arms', () => {
     for (const r of results) expect(r.score).toBeGreaterThan(0.5)
   })
 
+  it('drops a session from another project under projectOnly', async () => {
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (typeof sql === 'string' && sql.includes('FROM projects p') && sql.includes('LIKE'))
+        return rows({ id: 7, path: '/p/proj', name: 'proj', source_name: 'claude_code' })
+      if (typeof sql === 'string' && sql.includes(SESSIONS_BY_ID))
+        return rowsForIds(params, (id) => (id === 1 ? { ...fixtures[1], project_id: 99 } : fixtures[id]))
+      return rows()
+    })
+    mockChromaSessionsOnly()
+
+    const results = await search({ query: 'x', mode: 'semantic', cwd: '/p/proj/sub', projectOnly: true, dataClass: ['*'] })
+    expect(results.map((r) => r.session_id)).toEqual([2])
+  })
+
+  it('narrows the text arm to the cwd project under projectOnly', async () => {
+    query.mockImplementation(async (sql: string) =>
+      typeof sql === 'string' && sql.includes('FROM projects p') && sql.includes('LIKE')
+        ? rows({ id: 7, path: '/p/proj', name: 'proj', source_name: 'claude_code' })
+        : rows()
+    )
+
+    await search({ query: 'x', mode: 'text', cwd: '/p/proj/sub', projectOnly: true })
+    const ftsCall = query.mock.calls.find(c => String(c[0]).includes('ranked_messages'))
+    expect(ftsCall?.[1]).toContainEqual([7])
+  })
+
   it('hands back the projects the cwd resolved to', async () => {
     query.mockImplementation(async (sql: string) =>
       typeof sql === 'string' && sql.includes('FROM projects p') && sql.includes('LIKE')
