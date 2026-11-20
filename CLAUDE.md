@@ -157,15 +157,17 @@ Measured over 90 minutes: 339 chunk summarization passes to cover 250 needed
 chunks (**1.36x redundancy**); one 8-chunk session received 24 passes; 37 of 45
 sessions were worked by more than one worker concurrently.
 
-When two workers land on the same session, the collision **destroys completed
-work**: `persistSessionChunks` upserts the `session_chunks` row with
-`ON CONFLICT DO UPDATE`, then inserts that chunk's `embeddings` row with a
-**bare INSERT**, which violates the unique `embeddings_session_chunk_idx`
-(`session_chunk_id, chroma_collection`). The loser's minutes of LLM output are
-thrown away and logged as `Failed to update session N embedding: duplicate
-key`. The session-level write in `batch.ts` does the same operation correctly
-with `ON CONFLICT DO UPDATE` — the chunk path just lacks it. Neither the lock
-nor the `ON CONFLICT` is fixed yet.
+When two workers land on the same session, they used to **destroy completed
+work**: `persistSessionChunks` upserted the `session_chunks` row with
+`ON CONFLICT DO UPDATE`, then inserted that chunk's `embeddings` row with a
+bare INSERT, which violated the unique `embeddings_session_chunk_idx`
+(`session_chunk_id, chroma_collection`) and threw the loser's minutes of LLM
+output away as `Failed to update session N embedding: duplicate key`. That
+write now upserts too, so the later worker's chunk wins instead of failing
+(`src/embeddings/chunks.db.test.ts`). The index is **partial** (`WHERE
+session_chunk_id IS NOT NULL`), so the conflict target must repeat that
+`WHERE` or Postgres will not match it. The duplicated GPU work itself is not
+fixed yet: nothing claims a session.
 
 Find duplicated work from the `logs` table:
 
