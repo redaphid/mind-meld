@@ -80,14 +80,23 @@ export type SearchParams = {
 // Values are trimmed and lowercased — the vocabulary is lowercase, and a
 // miscased value should match rather than silently return nothing.
 export const resolveDataClasses = (
-  params: Pick<SearchParams, 'dataClass' | 'source'>
+  params: Pick<SearchParams, 'dataClass' | 'source' | 'query'>
 ): string[] | null => {
   const cleaned = (params.dataClass ?? [])
     .map((c) => c.trim().toLowerCase())
     .filter((c) => c.length > 0)
   if (cleaned.length > 0) return cleaned.includes('*') ? null : cleaned
   if (params.source) return null
+  if (urlQuery(params.query)) return null
   return ['coding']
+}
+
+// A pasted link (a Slack permalink, typically) is matched literally against
+// the indexed permalink, never embedded, and searches every data class.
+const urlQuery = (query?: string): string | null => {
+  const trimmed = query?.trim() ?? ''
+  if (!/^https?:\/\//i.test(trimmed) || !URL.canParse(trimmed)) return null
+  return trimmed
 }
 
 // A dataClass value nobody has ever classified anything under would silently
@@ -629,6 +638,7 @@ const scoringVectors = async (sessionIds: number[]): Promise<Map<number, number[
 export const searchWithDiagnostics = async (params: SearchParams): Promise<SearchOutcome> => {
   const limit = params.limit ?? 8
   const mode = params.mode ?? DEFAULT_SEARCH_MODE
+  const queryUrl = urlQuery(params.query)
   const includeAutomated = params.includeAutomated ?? false
 
   if (
@@ -741,14 +751,16 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
 
   const fullTextRows = async (): Promise<ArmRun> => {
     const conditions = [
-      `to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $1)`,
+      queryUrl
+        ? `(split_part(m.content_json->>'permalink', '?', 1) = split_part($1, '?', 1) OR (to_tsvector('english', m.content_text) @@ plainto_tsquery('english', $1) AND strpos(m.content_text, $1) > 0))`
+        : `to_tsvector('english', m.content_text) @@ websearch_to_tsquery('english', $1)`,
       `s.deleted_at IS NULL`,
       `($2::text IS NULL OR src.name = $2)`,
       `($3::timestamptz IS NULL OR ${LAST_ACTIVITY_SQL} >= $3)`,
       `($4::boolean OR s.is_automated = false)`,
     ]
     if (!params.includeUnsummarized) conditions.push(`(s.summary IS NOT NULL OR ${CURRENT_SNAPSHOT})`)
-    const values: unknown[] = [params.query, params.source ?? null, sinceDate, includeAutomated]
+    const values: unknown[] = [queryUrl ?? params.query, params.source ?? null, sinceDate, includeAutomated]
     let nextParam = 5
 
     if (params.projectOnly && projectIds.length > 0) {
@@ -832,11 +844,11 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
     return { arm: 'lexical', hits }
   }
 
-  const wantsSemantic = mode === 'semantic' || mode === 'hybrid'
+  const wantsSemantic = !queryUrl && (mode === 'semantic' || mode === 'hybrid')
   if (wantsSemantic && !vectorsOn) degraded = SWITCHED_OFF
   const [semantic, fullText] = await Promise.all([
     wantsSemantic && vectorsOn ? timed('semanticMs', semanticArms) : [],
-    (mode === 'text' || mode === 'hybrid') && params.query
+    (mode === 'text' || mode === 'hybrid' || queryUrl) && params.query
       ? timed('fullTextMs', fullTextRows).catch((error: unknown) => {
           abandon.abort(error)
           throw error
