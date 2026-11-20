@@ -32,7 +32,7 @@ vi.mock('../embeddings/ollama.js', () => ({ ensureEmbeddingModel: vi.fn() }))
 vi.mock('../embeddings/summarize.js', () => ({ ensureSummarizeModel: vi.fn() }))
 vi.mock('../db/postgres.js', () => ({ query: vi.fn() }))
 
-import { runFullSync } from './orchestrator.js'
+import { runFullSync, getSyncStatus } from './orchestrator.js'
 import { syncClaudeCode, syncClaudeHistory } from './claude-code.js'
 import { syncCodex } from './codex.js'
 import { drainIngestSpool } from './ingest-spool.js'
@@ -197,5 +197,34 @@ describe('runFullSync and the automated flag', () => {
 
     expect(result.errors).toEqual([expect.stringContaining('database gone')])
     expect(generatePendingEmbeddings).toHaveBeenCalled()
+  })
+})
+
+describe('getSyncStatus', () => {
+  describe('when a source has synced', () => {
+    let status: Awaited<ReturnType<typeof getSyncStatus>>
+
+    beforeEach(async () => {
+      vi.mocked(query)
+        .mockResolvedValueOnce({
+          rows: [{ name: 'claude_code', last_sync_timestamp: null, files_processed: null, records_synced: 7, last_error: null }],
+          rowCount: 1,
+        } as never)
+        .mockResolvedValueOnce({
+          rows: [{ projects: '2', sessions: '30', messages: '400', embeddings: '5000' }],
+          rowCount: 1,
+        } as never)
+      status = await getSyncStatus()
+    })
+
+    it('reports each source, with missing counters as zero', () => {
+      expect(status.sources).toEqual([
+        { name: 'claude_code', lastSync: null, filesProcessed: 0, recordsSynced: 7, lastError: null },
+      ])
+    })
+
+    it('reports the index totals as numbers', () => {
+      expect(status.totals).toEqual({ projects: 2, sessions: 30, messages: 400, embeddings: 5000 })
+    })
   })
 })

@@ -474,7 +474,7 @@ export const OverviewView = () => {
       </div>`}
       ${vectorised === null &&
       html`<div class="m faint" style="margin:0;font-size:13px">
-        counting — the first count after a restart takes a minute or two
+        ${s.countsError ? `count failed: ${s.countsError}` : 'counting — the first count after a restart takes a minute or two'}
       </div>`}
       ${vectorised != null &&
       html`<div class="m" style="margin:0;font-size:13px">
@@ -482,7 +482,10 @@ export const OverviewView = () => {
           <span class="right faint">${fmtExact(vectorised)} / ${fmtExact(embeddable)}</span>
         </div>
         <${Bar} value=${vectorised} total=${embeddable} />`}
-      ${s?.countsAsOf && html`<div class="m faint" style="font-size:12px">counted ${timeAgo(s.countsAsOf)}</div>`}
+      ${s?.countsAsOf &&
+      html`<div class="m faint" style="font-size:12px">
+        counted ${timeAgo(s.countsAsOf)}${s.countsError && ` — the last recount failed: ${s.countsError}`}
+      </div>`}
       ${vectorised !== null &&
       html`<div class="m" style="margin-top:10px">
         <${Pill} kind=${pending.messages > 0 ? 'warn' : 'good'}>

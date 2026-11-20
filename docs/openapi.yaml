@@ -113,8 +113,9 @@ paths:
         `totals`, `pendingEmbeddings` and `vectorisedMessages` are full counts
         over millions of rows, so they are never computed on the request: they
         come from the last finished background count, taken at `countsAsOf`
-        and recounted once it is five minutes old. Until the first count after
-        a restart finishes, all four are null.
+        and recounted every five minutes. Until the first count after a restart
+        finishes, all four are null. A failed recount keeps the last counts and
+        sets `countsError`.
       responses:
         '200':
           description: Current pipeline status.
@@ -1707,7 +1708,7 @@ components:
     Status:
       type: object
       required:
-        [status, version, sync, totals, pendingEmbeddings, vectorisedMessages, countsAsOf, quarantined, chroma, latestSession]
+        [status, version, sync, totals, pendingEmbeddings, vectorisedMessages, countsAsOf, countsError, quarantined, chroma, latestSession]
       properties:
         status:
           type: string
@@ -1774,6 +1775,11 @@ components:
           description: |
             When `totals`, `pendingEmbeddings` and `vectorisedMessages` were
             counted. Null until the first count after a restart finishes.
+        countsError:
+          type: [string, 'null']
+          description: |
+            Why the most recent recount failed, such as a statement timeout.
+            Null once a recount succeeds.
         quarantined:
           type: integer
           description: |

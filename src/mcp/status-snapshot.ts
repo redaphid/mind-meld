@@ -1,26 +1,32 @@
-type Snapshot<T> = { value: T; asOf: Date }
+type Snapshot<T> = { value: T | null; asOf: Date | null; error: string | null }
 
+// A recount that fails waits out the same interval as one that succeeds: a
+// count that times out under load must not be retried on every poll.
 export const staleWhileRevalidate = <T>(
   load: () => Promise<T>,
   { refreshAfterMs, now = Date.now }: { refreshAfterMs: number; now?: () => number },
-): (() => Snapshot<T> | null) => {
-  let snapshot: Snapshot<T> | null = null
+): (() => Snapshot<T>) => {
+  const snapshot: Snapshot<T> = { value: null, asOf: null, error: null }
+  let attemptedAt = -Infinity
   let refreshing = false
 
   const refresh = async () => {
     refreshing = true
+    attemptedAt = now()
     try {
-      snapshot = { value: await load(), asOf: new Date(now()) }
+      snapshot.value = await load()
+      snapshot.asOf = new Date(now())
+      snapshot.error = null
     } catch (error) {
-      console.error('[status] count refresh failed:', error instanceof Error ? error.message : error)
+      snapshot.error = error instanceof Error ? error.message : String(error)
+      console.error('[status] count refresh failed:', snapshot.error)
     } finally {
       refreshing = false
     }
   }
 
   return () => {
-    const stale = !snapshot || now() - snapshot.asOf.getTime() >= refreshAfterMs
-    if (stale && !refreshing) void refresh()
-    return snapshot
+    if (!refreshing && now() - attemptedAt >= refreshAfterMs) void refresh()
+    return { ...snapshot }
   }
 }
