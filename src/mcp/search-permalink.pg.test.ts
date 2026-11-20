@@ -22,18 +22,19 @@ describe.skipIf(!dbAvailable)('search for a pasted permalink', () => {
       `INSERT INTO sources (name, display_name, data_class) VALUES ('slack:thunderwrench', 'Thunderwrench HVAC Co.', 'slack') RETURNING id`)
     const { rows: [project] } = await client.query<{ id: number }>(
       `INSERT INTO projects (source_id, external_id) VALUES ($1, 'C0LAIR') RETURNING id`, [source.id])
-    const seed = async (name: string, permalink: string) => {
+    const seed = async (name: string, permalink: string, text = 'The clockwork squid has landed in the lair') => {
       const { rows: [session] } = await client.query<{ id: number }>(
         `INSERT INTO sessions (project_id, external_id, summary) VALUES ($1, $2, 'The Rusty Conquistador thread') RETURNING id`,
         [project.id, name])
       await client.query(
         `INSERT INTO messages (session_id, external_id, role, content_text, content_json, timestamp)
-         VALUES ($1, $2, 'user', 'The clockwork squid has landed in the lair', $3, now())`,
-        [session.id, `${name}-message`, { permalink }])
+         VALUES ($1, $2, 'user', $3, $4, now())`,
+        [session.id, `${name}-message`, text, { permalink }])
       sessions[name] = session.id
     }
     await seed('thread-root', THREAD)
     await seed('thread-reply', 'https://valley-of-the-sun.slack.com/archives/C0LAIR/p1731379999000001?thread_ts=1731370000.123456&cid=C0LAIR')
+    await seed('shared-link', 'https://valley-of-the-sun.slack.com/archives/C0LAIR/p1731388888000001', 'The squid docs live at https://Thunderwrench.example today')
     process.env.POSTGRES_DB = scratch.name
     process.env.POSTGRES_HOST = PG.host
     process.env.POSTGRES_PORT = String(PG.port)
@@ -53,6 +54,7 @@ describe.skipIf(!dbAvailable)('search for a pasted permalink', () => {
     ['when the bare permalink is pasted', THREAD, 'thread-root'],
     ['when the permalink carries a thread_ts query', REPLY, 'thread-root'],
     ['when a reply stored with thread_ts is pasted without it', 'https://valley-of-the-sun.slack.com/archives/C0LAIR/p1731379999000001', 'thread-reply'],
+    ['when a link quoted in message text is pasted as written', 'https://Thunderwrench.example', 'shared-link'],
   ])('%s', (_, url, expected) => {
     let outcome: Awaited<ReturnType<typeof import('./search.js').searchWithDiagnostics>>
 

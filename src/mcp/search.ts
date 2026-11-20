@@ -93,10 +93,10 @@ export const resolveDataClasses = (
 
 // A pasted link (a Slack permalink, typically) is matched literally against
 // the indexed permalink, never embedded, and searches every data class.
-const urlQuery = (query?: string): URL | null => {
+const urlQuery = (query?: string): string | null => {
   const trimmed = query?.trim() ?? ''
   if (!/^https?:\/\//i.test(trimmed) || !URL.canParse(trimmed)) return null
-  return new URL(trimmed)
+  return trimmed
 }
 
 // A dataClass value nobody has ever classified anything under would silently
@@ -758,7 +758,7 @@ export const searchWithDiagnostics = async (params: SearchParams): Promise<Searc
       `($4::boolean OR s.is_automated = false)`,
     ]
     if (!params.includeUnsummarized) conditions.push(`(s.summary IS NOT NULL OR ${CURRENT_SNAPSHOT})`)
-    const values: unknown[] = [queryUrl?.href ?? params.query, params.source ?? null, sinceDate, includeAutomated]
+    const values: unknown[] = [queryUrl ?? params.query, params.source ?? null, sinceDate, includeAutomated]
     let nextParam = 5
 
     if (params.projectOnly && projectIds.length > 0) {
