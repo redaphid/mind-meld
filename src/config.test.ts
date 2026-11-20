@@ -21,6 +21,8 @@ const MANAGED = [
   'CODEX_PATH',
   'LOG_RETENTION_DAYS',
   'SYNC_INCREMENTAL',
+  'MINDMELD_SEMANTIC',
+  'MINDMELD_SEARCH_LOG',
 ] as const;
 
 type ManagedKey = (typeof MANAGED)[number];
@@ -174,5 +176,36 @@ describe('flags from the environment', () => {
 
   it('reads any other word as false rather than guessing', async () => {
     expect((await loadConfig({ SYNC_INCREMENTAL: 'yes' })).sync.incremental).toBe(false);
+  });
+});
+
+// The flag someone types to start without the AI pipeline. A typo must stop
+// the process rather than leave the GPU work running behind their back.
+describe('MINDMELD_SEMANTIC', () => {
+  it('is on when unset, so existing deployments are unchanged', async () => {
+    expect((await loadConfig({})).semantic.enabledAtStartup).toBe(true);
+  });
+
+  it('reads "off" as off, in any case', async () => {
+    expect((await loadConfig({ MINDMELD_SEMANTIC: 'off' })).semantic.enabledAtStartup).toBe(false);
+    expect((await loadConfig({ MINDMELD_SEMANTIC: 'OFF' })).semantic.enabledAtStartup).toBe(false);
+  });
+
+  it('refuses a value it does not recognise', async () => {
+    await expect(loadConfig({ MINDMELD_SEMANTIC: 'of' })).rejects.toThrow('MINDMELD_SEMANTIC');
+  });
+});
+
+// Read with the same strict switch: "on" once parsed as off, silently
+// stopping the log while the switch said otherwise.
+describe('MINDMELD_SEARCH_LOG', () => {
+  it('is on when unset, and on when set to "on"', async () => {
+    expect((await loadConfig({})).searchLog.enabled).toBe(true);
+    expect((await loadConfig({ MINDMELD_SEARCH_LOG: 'on' })).searchLog.enabled).toBe(true);
+  });
+
+  it('is off when set to "off", and refuses a typo', async () => {
+    expect((await loadConfig({ MINDMELD_SEARCH_LOG: 'off' })).searchLog.enabled).toBe(false);
+    await expect(loadConfig({ MINDMELD_SEARCH_LOG: 'of' })).rejects.toThrow('MINDMELD_SEARCH_LOG');
   });
 });

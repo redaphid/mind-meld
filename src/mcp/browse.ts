@@ -6,6 +6,7 @@ import { query } from '../db/postgres.js'
 import { UNKNOWN_MACHINE } from './machines.js'
 import { resolveTitle, type TitleSource } from './title.js'
 import { LAST_ACTIVITY_SQL } from './last-activity.js'
+import { CURRENT_SNAPSHOT } from './snapshot-visibility.js'
 
 export type ProjectSummary = {
   id: number
@@ -84,8 +85,6 @@ export type SessionListFilter = {
   machine?: string
   q?: string
   includeAutomated?: boolean
-  // Sessions are not listed until they are properly summarized and indexed;
-  // pass true to see the backlog deliberately (issue #95).
   includeUnsummarized?: boolean
 }
 
@@ -93,6 +92,7 @@ type SessionListRow = {
   id: number
   title: string | null
   summary: string | null
+  generated_title: string | null
   project: string | null
   project_id: number
   source: string
@@ -127,15 +127,14 @@ export const listSessions = async (
     clauses.push(`(s.title ILIKE ${p} OR p.name ILIKE ${p})`)
   }
   if (!filter.includeAutomated) clauses.push('s.is_automated = false')
-  // Not surfaced until it is properly summarized and indexed (issue #95).
-  if (!filter.includeUnsummarized) clauses.push('s.summary IS NOT NULL')
+  if (!filter.includeUnsummarized) clauses.push(`(s.summary IS NOT NULL OR ${CURRENT_SNAPSHOT})`)
 
   params.push(filter.limit, filter.offset)
   const limitParam = `$${params.length - 1}`
   const offsetParam = `$${params.length}`
 
   const result = await query<SessionListRow>(
-    `SELECT s.id, s.title, s.summary, p.name AS project, s.project_id,
+    `SELECT s.id, s.title, s.summary, s.generated_title, p.name AS project, s.project_id,
             src.name AS source, COALESCE(p.machine, $1) AS machine,
             s.message_count, s.is_automated, s.started_at, s.last_synced_at,
             (SELECT COUNT(*) FROM session_chunks c WHERE c.session_id = s.id) AS chunk_count,

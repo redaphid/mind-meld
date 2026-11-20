@@ -3,7 +3,7 @@ import { query } from "../db/postgres.js";
 import { upsertEmbeddings, deleteByIds } from "../db/chroma.js";
 import { generateEmbeddings } from "./ollama.js";
 import {
-  summarizeChunk,
+  summarizeSessionChunk,
   chunkMessagesWithIndices,
   CHUNK_SIZE_CHARS,
   SHORT_CONVERSATION_CHARS,
@@ -24,6 +24,8 @@ export interface PersistedChunk {
   endMessageId: number;
   summary: string;
   contentChars: number;
+  // The chunk's own transcript text was kept instead of a model summary.
+  verbatim: boolean;
 }
 
 // Persist chunk-level summaries + embeddings for a session. Returns the
@@ -85,7 +87,7 @@ export const persistSessionChunks = async (
       console.log(
         `Summarizing chunk ${i + 1}/${chunks.length} for session ${sessionId} (${chunkText.length} chars, messages ${startMessageId}..${endMessageId})...`,
       );
-      summary = await summarizeChunk(chunkText, true);
+      summary = await summarizeSessionChunk(chunkText);
       const elapsedS = ((performance.now() - startedAt) / 1000).toFixed(1);
       console.log(
         `Chunk ${i + 1}/${chunks.length} (${summary.length} chars, ${elapsedS}s): ${summary.replace(/\s+/g, " ").slice(0, 200)}`,
@@ -127,6 +129,7 @@ export const persistSessionChunks = async (
         endMessageId,
         summary,
         contentChars: chunkText.length,
+        verbatim: summary === chunkText,
       });
       continue;
     }
@@ -150,7 +153,14 @@ export const persistSessionChunks = async (
     await query(
       `INSERT INTO embeddings
          (session_chunk_id, chroma_collection, chroma_id, embedding_model, dimensions, content_chars_at_embed, summarize_model)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (session_chunk_id, chroma_collection) WHERE session_chunk_id IS NOT NULL
+       DO UPDATE SET
+         chroma_id = EXCLUDED.chroma_id,
+         embedding_model = EXCLUDED.embedding_model,
+         dimensions = EXCLUDED.dimensions,
+         content_chars_at_embed = EXCLUDED.content_chars_at_embed,
+         summarize_model = EXCLUDED.summarize_model`,
       [
         chunkId,
         config.chroma.collections.chunks,
@@ -169,6 +179,7 @@ export const persistSessionChunks = async (
       endMessageId,
       summary,
       contentChars: chunkText.length,
+      verbatim: summary === chunkText,
     });
   }
 

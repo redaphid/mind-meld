@@ -1,3 +1,6 @@
 # These run on the Actions runner, where CRLF breaks them, so pin the line
 # endings regardless of the checkout's autocrlf setting.
 .github/workflows/*.yml text eol=lf
+
+# Container scripts: a CRLF shebang line fails with "not found" inside the image.
+scripts/backup/*.sh text eol=lf

@@ -10,11 +10,9 @@ const buildUrl = (path, params = {}) => {
   return url.pathname + url.search
 }
 
-export const apiGet = async (path, params, signal) => {
-  const res = await fetch(buildUrl(path, params), {
-    signal,
-    headers: { accept: 'application/json' },
-  })
+// Every route answers {status: 'ok', ...} or {status: 'error', error}; a
+// non-JSON body (a proxy error page) is reported with its HTTP status.
+const readBody = async res => {
   const text = await res.text()
 
   let body
@@ -30,11 +28,42 @@ export const apiGet = async (path, params, signal) => {
   return body
 }
 
+// Names this tab to the search log, so opening a hit links to the search it
+// came from (src/mcp/search-log.ts). One id per tab, kept across reloads.
+const tabId = (() => {
+  const fresh = Math.random().toString(36).slice(2, 10)
+  try {
+    const id = sessionStorage.getItem('mindmeld-tab') ?? fresh
+    sessionStorage.setItem('mindmeld-tab', id)
+    return id
+  } catch {
+    return fresh
+  }
+})()
+
+export const apiGet = async (path, params, signal) =>
+  readBody(
+    await fetch(buildUrl(path, params), {
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000),
+      headers: { accept: 'application/json', 'x-mindmeld-caller': `ui:${tabId}`, 'x-mindmeld-client': 'web-ui' },
+    })
+  )
+
+export const apiPost = async (path, body) =>
+  readBody(
+    await fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(body ?? {}),
+    })
+  )
+
 // key: any serialisable value. Changing it refetches; a null key means "not
 // ready yet", which keeps a view from firing a request with missing params.
 export const useApi = (path, params, key) => {
   const [state, setState] = useState({ data: null, error: null, loading: !!path })
   const [nonce, setNonce] = useState(0)
+  const pendingRef = useRef(null)
   const paramsRef = useRef(params)
   paramsRef.current = params
 
@@ -42,10 +71,12 @@ export const useApi = (path, params, key) => {
 
   useEffect(() => {
     if (!path) {
+      pendingRef.current = null
       setState({ data: null, error: null, loading: false })
       return
     }
     const controller = new AbortController()
+    pendingRef.current = controller
     setState(s => ({ ...s, loading: true, error: null }))
 
     apiGet(path, paramsRef.current, controller.signal)
@@ -59,10 +90,11 @@ export const useApi = (path, params, key) => {
         // error, because there is nothing else it could show.
         setState(s => ({ data: s.data, error: err.message, loading: false }))
       })
+      .finally(() => { if (pendingRef.current === controller) pendingRef.current = null })
 
     return () => controller.abort()
   }, [serialised, nonce])
 
-  const reload = useCallback(() => setNonce(n => n + 1), [])
+  const reload = useCallback(() => { if (!pendingRef.current) setNonce(n => n + 1) }, [])
   return { ...state, reload }
 }

@@ -6,7 +6,8 @@ import { generatePendingEmbeddings, updateAggregateEmbeddings, AGGREGATE_BATCH_S
 import { ensureEmbeddingModel } from '../embeddings/ollama.js';
 import { ensureSummarizeModel } from '../embeddings/summarize.js';
 import { query } from '../db/postgres.js';
-import { shouldStandDown, STAND_DOWN_NOTICE } from './stand-down.js';
+import { flagAutomated } from '../embeddings/automated-flags.js';
+import { aiHold, AI_HOLD_NOTICE, type AiHold } from './sync-control.js';
 
 const MAX_AGGREGATE_DRAIN_MS = 50 * 60 * 1000;
 
@@ -45,13 +46,16 @@ export interface FullSyncResult {
     drained: number;
     quarantined: number;
   };
+  // Sessions the classifier marks automated that were not flagged yet. Non-zero
+  // after a pattern is added; flags are never cleared here (#177).
+  automatedFlagsSet: number;
   embeddings: {
     messagesEmbedded: number;
     sessionsUpdated: number;
   };
-  // True when the embedding phase was skipped because something asked
-  // ingestion to stand down. Not an error — see where it is set.
-  standDown: boolean;
+  // Why the embedding phase was skipped (semantic switched off, or a
+  // stand-down), or null when it ran. Not an error — see where it is set.
+  held: AiHold | null;
   errors: string[];
 }
 
@@ -67,12 +71,15 @@ export async function runFullSync(options?: {
   console.log(`Starting full sync at ${startTime.toISOString()}`);
   console.log('='.repeat(60));
 
-  // Pull models to disk if not present (does NOT load into VRAM)
-  try {
-    await Promise.all([ensureEmbeddingModel(), ensureSummarizeModel()]);
-    console.log('Models verified');
-  } catch (e) {
-    console.warn('Model pull check failed (non-fatal):', e);
+  // Pull models to disk if not present (does NOT load into VRAM). These are
+  // Ollama requests, so they wait behind the same gate as the embedding phase.
+  if (!options?.skipEmbeddings && !(await aiHold())) {
+    try {
+      await Promise.all([ensureEmbeddingModel(), ensureSummarizeModel()]);
+      console.log('Models verified');
+    } catch (e) {
+      console.warn('Model pull check failed (non-fatal):', e);
+    }
   }
 
   const result: FullSyncResult = {
@@ -84,8 +91,9 @@ export async function runFullSync(options?: {
     history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
     memories: emptyMemoryStats(),
     spool: { configured: false, drained: 0, quarantined: 0 },
+    automatedFlagsSet: 0,
     embeddings: { messagesEmbedded: 0, sessionsUpdated: 0 },
-    standDown: false,
+    held: null,
     errors: [],
   };
 
@@ -188,20 +196,36 @@ export async function runFullSync(options?: {
     errors.push(error);
   }
 
+  // Writers flag the sessions they write, but a pattern configured since never
+  // reaches sessions whose files are done changing (#177). This only sets
+  // flags, so a worker missing MINDMELD_AUTOMATED_PREFIXES cannot undo what a
+  // configured one set. Before the embedding phase, so a session flagged here
+  // is not summarized by this run.
+  try {
+    result.automatedFlagsSet = await flagAutomated();
+    if (result.automatedFlagsSet > 0)
+      console.log(`
+--- Flagged ${result.automatedFlagsSet} sessions automated ---`);
+  } catch (e) {
+    const error = `Automated flag check failed: ${e}`;
+    console.error(error);
+    errors.push(error);
+  }
+
   // Generate embeddings.
   //
-  // Stand-down gates this phase and not the file sync above it, because the
-  // point is to yield the GPU, and reading transcripts into Postgres never
-  // touches it. Conversations keep being indexed while standing down; only
-  // their vectors wait, and the next cycle picks them up from the same queue.
+  // The AI gate holds this phase and not the file sync above it, because the
+  // point is to keep off the GPU, and reading transcripts into Postgres never
+  // touches it. Conversations keep being indexed while held; only their
+  // vectors wait, and a later cycle picks them up from the same queue.
   // Deliberately NOT pushed onto `errors`: a run that records an error exits
-  // nonzero, and container monitoring would read an intentional yield as a
+  // nonzero, and container monitoring would read an intentional hold as a
   // failed sync. It is reported as its own fact instead.
-  const standingDown = !options?.skipEmbeddings && (await shouldStandDown());
-  if (standingDown) console.log(STAND_DOWN_NOTICE);
-  result.standDown = standingDown;
+  const held = options?.skipEmbeddings ? null : await aiHold();
+  if (held) console.log(AI_HOLD_NOTICE[held]);
+  result.held = held;
 
-  if (!options?.skipEmbeddings && !standingDown) {
+  if (!options?.skipEmbeddings && !held) {
     try {
       console.log('\n--- Generating Embeddings ---');
       const embeddingStats = await generatePendingEmbeddings();
@@ -216,10 +240,11 @@ export async function runFullSync(options?: {
         result.embeddings.sessionsUpdated += aggregateStats.sessionsUpdated;
         if (aggregateStats.sessionsFetched < AGGREGATE_BATCH_SIZE) break;
         // The drain would otherwise keep requesting batches for the next 50
-        // minutes; updateAggregateEmbeddings returns early when standing down,
-        // so without this the loop spins asking for work it will not do.
-        if (await shouldStandDown()) {
-          console.log(STAND_DOWN_NOTICE);
+        // minutes; updateAggregateEmbeddings returns early when held, so
+        // without this the loop spins asking for work it will not do.
+        const heldNow = await aiHold();
+        if (heldNow) {
+          console.log(AI_HOLD_NOTICE[heldNow]);
           break;
         }
         if (Date.now() >= deadline) {
@@ -246,33 +271,14 @@ export async function runFullSync(options?: {
 }
 
 // Get sync status
-export async function getSyncStatus(): Promise<{
-  sources: {
-    name: string;
-    lastSync: Date | null;
-    filesProcessed: number;
-    recordsSynced: number;
-    lastError: string | null;
-  }[];
-  totals: {
-    projects: number;
-    sessions: number;
-    messages: number;
-    embeddings: number;
-  };
-}> {
-  const sourceStats = await query<{
-    name: string;
-    last_sync_timestamp: Date | null;
-    files_processed: number;
-    records_synced: number;
-    last_error: string | null;
-  }>(`
-    SELECT s.name, ss.last_sync_timestamp, ss.files_processed, ss.records_synced, ss.last_error
-    FROM sources s
-    LEFT JOIN sync_state ss ON s.id = ss.source_id AND ss.entity_type = 'sessions'
-  `);
+type IndexTotals = {
+  projects: number;
+  sessions: number;
+  messages: number;
+  embeddings: number;
+};
 
+export async function getIndexTotals(): Promise<IndexTotals> {
   const totals = await query<{
     projects: string;
     sessions: string;
@@ -287,18 +293,43 @@ export async function getSyncStatus(): Promise<{
   `);
 
   return {
-    sources: sourceStats.rows.map((r) => ({
-      name: r.name,
-      lastSync: r.last_sync_timestamp,
-      filesProcessed: r.files_processed ?? 0,
-      recordsSynced: r.records_synced ?? 0,
-      lastError: r.last_error,
-    })),
-    totals: {
-      projects: parseInt(totals.rows[0].projects, 10),
-      sessions: parseInt(totals.rows[0].sessions, 10),
-      messages: parseInt(totals.rows[0].messages, 10),
-      embeddings: parseInt(totals.rows[0].embeddings, 10),
-    },
+    projects: parseInt(totals.rows[0].projects, 10),
+    sessions: parseInt(totals.rows[0].sessions, 10),
+    messages: parseInt(totals.rows[0].messages, 10),
+    embeddings: parseInt(totals.rows[0].embeddings, 10),
   };
+}
+
+export async function getSyncSources(): Promise<
+  {
+    name: string;
+    lastSync: Date | null;
+    filesProcessed: number;
+    recordsSynced: number;
+    lastError: string | null;
+  }[]
+> {
+  const sourceStats = await query<{
+    name: string;
+    last_sync_timestamp: Date | null;
+    files_processed: number;
+    records_synced: number;
+    last_error: string | null;
+  }>(`
+    SELECT s.name, ss.last_sync_timestamp, ss.files_processed, ss.records_synced, ss.last_error
+    FROM sources s
+    LEFT JOIN sync_state ss ON s.id = ss.source_id AND ss.entity_type = 'sessions'
+  `);
+
+  return sourceStats.rows.map((r) => ({
+    name: r.name,
+    lastSync: r.last_sync_timestamp,
+    filesProcessed: r.files_processed ?? 0,
+    recordsSynced: r.records_synced ?? 0,
+    lastError: r.last_error,
+  }));
+}
+
+export async function getSyncStatus() {
+  return { sources: await getSyncSources(), totals: await getIndexTotals() };
 }

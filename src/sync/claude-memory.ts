@@ -10,6 +10,7 @@ import {
   type ParsedMemory,
 } from '../parsers/claude-memory.js';
 import { resolveProjectPath, lastPathSegment } from '../utils/project-path.js';
+import { memoryExternalId } from './memory-id.js';
 
 // Sync for Claude Code MEMORIES -- the markdown files under
 // `~/.claude/projects/<slug>/memory/`.
@@ -67,9 +68,6 @@ export const emptyMemoryStats = (): MemorySyncStats => ({
   errors: [],
 });
 
-// The session external_id for a memory file. Namespaced so it can never
-// collide with a transcript's session id (a uuid) inside the same project.
-export const memoryExternalId = (fileName: string): string => `memory:${fileName}`;
 
 // The message external_id for one version. The hash IS the identity: the same
 // text is the same version no matter when it was observed or on which machine,

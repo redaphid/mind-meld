@@ -52,3 +52,6 @@ HANDOFF.md
 
 # Test coverage
 coverage/
+
+# Host auto-update state (scripts/host-autoupdate.sh)
+.autoupdate/

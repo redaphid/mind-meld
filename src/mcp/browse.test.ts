@@ -160,6 +160,16 @@ describe('listSessions title resolution (#95)', () => {
 })
 
 describe('listSessions withholds unsummarized sessions (#95)', () => {
+  describe('when a snapshot is current', () => {
+    beforeEach(async () => {
+      await listSessions({ limit: 10, offset: 0 })
+    })
+
+    it('allows it through the summary gate without relaxing the other filters', () => {
+      expect(sql()).toContain('s.deleted_at IS NULL AND s.is_automated = false AND (s.summary IS NOT NULL OR EXISTS (SELECT 1 FROM ingest_heads ih WHERE ih.current_session_id = s.id))')
+    })
+  })
+
   it('excludes them by default', async () => {
     await listSessions({ limit: 10, offset: 0 })
     expect(sql()).toContain('s.summary IS NOT NULL')

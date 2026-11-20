@@ -15,11 +15,12 @@ vi.mock('../db/postgres.js', () => ({
 
 // The tool calls the diagnostics-carrying form, so a degraded search can say so
 // in the text it hands back to an LLM.
-const doSearch = vi.fn(async () => ({ results: [], degraded: null }))
+const doSearch = vi.fn(async () => ({ results: [], degraded: null, projectIds: [] as number[] }))
 const findProjectsByPath = vi.fn(async () => [{ id: 7, name: 'proj' }])
+const formatSearchResults = vi.fn((_r: unknown, options?: { list?: string | null }) => `SEARCH RESULTS${options?.list ? ` ${options.list}` : ''}`)
 vi.mock('./search.js', () => ({
   searchWithDiagnostics: (...args: unknown[]) => doSearch(...(args as [])),
-  formatSearchResults: () => 'SEARCH RESULTS',
+  formatSearchResults: (...args: Parameters<typeof formatSearchResults>) => formatSearchResults(...args),
   findProjectsByPath: (...args: unknown[]) => findProjectsByPath(...(args as [])),
 }))
 
@@ -69,6 +70,14 @@ vi.mock('./notes.js', () => ({
   NOTE_TAG: 'note',
 }))
 
+// The log's writer is its own unit (search-log.test.ts); here we assert what
+// each tool hands it.
+const recorded: import('./search-log.js').LogEvent[] = []
+vi.mock('./search-log.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./search-log.js')>()),
+  searchLog: { record: (e: import('./search-log.js').LogEvent) => recorded.push(e) },
+}))
+
 const { createMcpServer } = await import('./tools.js')
 
 // Talk to the server exactly as a real client does, over an in-memory
@@ -76,7 +85,7 @@ const { createMcpServer } = await import('./tools.js')
 const connect = async () => {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   const client = new Client({ name: 'parity-test', version: '0.0.0' })
-  await Promise.all([createMcpServer().connect(serverTransport), client.connect(clientTransport)])
+  await Promise.all([createMcpServer('mcp-http').connect(serverTransport), client.connect(clientTransport)])
   return client
 }
 
@@ -93,6 +102,7 @@ const text = (result: unknown) =>
 // Call history only — the default implementations above must survive.
 beforeEach(() => {
   vi.clearAllMocks()
+  recorded.length = 0
 })
 
 const src = (file: string) =>
@@ -153,7 +163,7 @@ describe('every advertised tool executes', () => {
       name: 'search',
       arguments: { query: 'anything', includeAutomated: true },
     })
-    expect(text(result)).toBe('SEARCH RESULTS')
+    expect(text(result)).toMatch(/^SEARCH RESULTS L/)
     expect(doSearch).toHaveBeenCalledWith(expect.objectContaining({ includeAutomated: true }))
     await client.close()
   })
@@ -187,6 +197,48 @@ describe('every advertised tool executes', () => {
     await client.close()
   })
 
+  it('logs a search and the open that follows it under one caller, with the handle shown', async () => {
+    const client = await connect()
+    const out = text(await client.callTool({ name: 'search', arguments: { query: 'q', mode: 'text' } }))
+    await client.callTool({ name: 'getSession', arguments: { sessionId: 3 } })
+    await client.callTool({ name: 'getSession', arguments: { sessionId: 4, list: 'Lk3x9qa' } })
+    await client.close()
+
+    const [search, open, named] = recorded
+    expect(search).toMatchObject({ kind: 'search', tool: 'search', mode: 'text', request: { query: 'q', mode: 'text' }, results: [] })
+    if (search.kind !== 'search') throw new Error('first row is the search')
+    expect(out).toBe(`SEARCH RESULTS ${search.list}`)
+    expect(open).toMatchObject({ kind: 'follow-up', tool: 'getSession', target: { sessionId: 3 }, list: null })
+    expect(open.caller.key).toBe(search.caller.key)
+    expect(open.caller.client).toBe('parity-test/0.0.0')
+    expect(named).toMatchObject({ list: 'Lk3x9qa', target: { sessionId: 4 } })
+  })
+
+  it('logs a search that throws, and still reports the error to the caller', async () => {
+    doSearch.mockRejectedValueOnce(new TypeError('boom'))
+    const client = await connect()
+    const result = await client.callTool({ name: 'search', arguments: { query: 'q' } })
+    await client.close()
+    expect((result as { isError?: boolean }).isError).toBe(true)
+    expect(recorded[0]).toMatchObject({ kind: 'search', error: 'TypeError', mode: 'hybrid' })
+  })
+
+  it('logs every follow-up tool with its target and signal-bearing name', async () => {
+    const client = await connect()
+    const calls: [string, Record<string, unknown>, Record<string, unknown>][] = [
+      ['getMessages', { startMessageId: 11, endMessageId: 12 }, { messageId: 11 }],
+      ['getMessage', { id: 13 }, { messageId: 13 }],
+      ['getChunk', { sessionId: 2, chunkIndex: 1 }, { sessionId: 2, chunkIndex: 1 }],
+      ['addTag', { messageId: 14, tag: 'x' }, { messageId: 14 }],
+      ['removeTag', { sessionId: 15, tag: 'x' }, { sessionId: 15 }],
+      ['reportUselessSession', { sessionId: 16 }, { sessionId: 16 }],
+      ['unreportUselessSession', { sessionId: 17 }, { sessionId: 17 }],
+    ]
+    for (const [name, args] of calls) await client.callTool({ name, arguments: args })
+    await client.close()
+    expect(recorded.map((e) => [e.tool, (e as { target: unknown }).target])).toEqual(calls.map(([n, , t]) => [n, t]))
+  })
+
   it('runs the remaining read tools', async () => {
     const client = await connect()
     const calls: [string, Record<string, unknown>, string][] = [
@@ -216,12 +268,26 @@ describe('every advertised tool executes', () => {
         rows: [{ name: 'mind-meld', session_count: 7, message_count: 500 }],
         rowCount: 1,
       } as never)
+    const usage = (searches: number) => ({
+      rows: [{
+        searches, ok: searches, opened: 1, ranked: 1, median_rank: 2, mrr: 0.5, no_result: 0, degraded: 0,
+        p50: 12, p90: 40, feedback: 1, per_day: [{ day: '2026-11-12', client: 'claude-code', mode: 'hybrid', searches }],
+        vector_params: { negativeQuery: 1, likeSession: 0, unlikeSession: 0, likeProject: 0, unlikeProject: 0 },
+        stage_ms: Object.fromEntries(['semanticMs', 'embedMs', 'sessionMs', 'chunkMs', 'messageMs', 'fullTextMs'].map((k) => [k, { p50: 1, p90: 2 }])),
+      }],
+      rowCount: 1,
+    })
+    query.mockResolvedValueOnce(usage(4) as never).mockResolvedValueOnce(usage(10) as never)
 
     const client = await connect()
     const out = text(await client.callTool({ name: 'stats', arguments: {} }))
     expect(out).toContain('**claude_code** (coding): 4 projects, 10 sessions, 900 messages')
     expect(out).toContain('**coding:** 15 sessions')
     expect(out).toContain('- **mind-meld:** 7 sessions, 500 messages')
+    expect(out).toContain('| | 7d | 30d |')
+    expect(out).toContain('| Searches | 4 | 10 |')
+    expect(out).toContain('| Opened within 10 min | 25.0% | 10.0% |')
+    expect(out).toContain('- 2026-11-12 claude-code hybrid: 4')
     await client.close()
   })
 
@@ -419,15 +485,27 @@ describe('every advertised tool executes', () => {
     expect(names).not.toContain('saveNote')
   })
 
-  it('only resolves cwd to projects when a cwd was given', async () => {
+  // `explain` changes only the rendering, so search must never see it.
+  it('passes explain to the formatter and not to search', async () => {
     const client = await connect()
-
-    await client.callTool({ name: 'search', arguments: { query: 'x' } })
-    expect(findProjectsByPath).not.toHaveBeenCalled()
-
-    await client.callTool({ name: 'search', arguments: { query: 'x', cwd: '/w/proj' } })
-    expect(findProjectsByPath).toHaveBeenCalledWith('/w/proj')
+    await client.callTool({ name: 'search', arguments: { query: 'query-text-lantern-heron', explain: true } })
     await client.close()
+    expect(doSearch).toHaveBeenLastCalledWith({ query: 'query-text-lantern-heron' })
+    expect(formatSearchResults).toHaveBeenLastCalledWith([], { degraded: null, list: expect.stringMatching(/^L/), explain: true })
+  })
+
+  // Search already resolved the cwd; asking again cost a second query a search.
+  describe('when a search names a cwd', () => {
+    beforeEach(async () => {
+      doSearch.mockResolvedValueOnce({ results: [], degraded: null, projectIds: [7071] })
+      const client = await connect()
+      await client.callTool({ name: 'search', arguments: { query: 'query-text-lantern-heron', cwd: '/w/proj' } })
+      await client.close()
+    })
+
+    it('does not resolve the cwd a second time', () => {
+      expect(findProjectsByPath).not.toHaveBeenCalled()
+    })
   })
 
   it('says so, rather than failing, when a lookup finds nothing', async () => {

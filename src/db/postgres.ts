@@ -1,6 +1,6 @@
 import pg from 'pg';
 import { config } from '../config.js';
-import { isAutomated } from '../embeddings/classify.js';
+import { flagAutomated } from '../embeddings/automated-flags.js';
 import { normalizeText, normalizeDeep } from '../utils/text-encoding.js';
 import { canonicalizeProjectPath, findEquivalentIn, isWindowsHostOs } from '../utils/project-path.js';
 
@@ -217,9 +217,6 @@ export const queries = {
     projectId: number;
     externalId: string;
     title?: string;
-    // The opening user message. Claude Code sessions carry no title (#95), so
-    // this is the only place their persona prompt is visible to the classifier.
-    firstPrompt?: string;
     isAgent?: boolean;
     parentSessionId?: number;
     agentId?: string;
@@ -240,8 +237,8 @@ export const queries = {
       `INSERT INTO sessions (
         project_id, external_id, title, is_agent, parent_session_id, agent_id,
         claude_version, model_used, git_branch, cwd, raw_file_path, file_modified_at,
-        started_at, ended_at, is_automated, os, last_synced_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
+        started_at, ended_at, os, last_synced_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW())
       ON CONFLICT (project_id, external_id)
       DO UPDATE SET
         title = COALESCE($3, sessions.title),
@@ -255,8 +252,7 @@ export const queries = {
         file_modified_at = $12,
         started_at = COALESCE($13, sessions.started_at),
         ended_at = COALESCE($14, sessions.ended_at),
-        is_automated = $15,
-        os = COALESCE($16, sessions.os),
+        os = COALESCE($15, sessions.os),
         last_synced_at = NOW()
       RETURNING id`,
       [
@@ -274,7 +270,6 @@ export const queries = {
         params.fileModifiedAt ?? null,
         params.startedAt ?? null,
         params.endedAt ?? null,
-        isAutomated(clean(params.firstPrompt ?? params.title)),
         params.os === undefined ? clean(config.os) : clean(params.os),
       ]
     );
@@ -419,8 +414,12 @@ export const queries = {
   },
 
   // Update session stats
+  // Every writer calls this once a session's messages have landed, so it is
+  // also where the session is classified: the opening text is in place by now
+  // (#177).
   updateSessionStats: async (sessionId: number) => {
     await query('SELECT update_session_stats($1::integer)', [sessionId]);
+    await flagAutomated([sessionId]);
   },
 
   // Sync state
