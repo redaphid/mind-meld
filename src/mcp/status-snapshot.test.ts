@@ -7,11 +7,11 @@ describe('staleWhileRevalidate', () => {
   describe('when the first count has not finished', () => {
     let finish = (_value: string) => {}
     let load: ReturnType<typeof vi.fn>
-    let read: ReturnType<typeof staleWhileRevalidate<string>>
+    let read: ReturnType<typeof staleWhileRevalidate<string | null>>
 
     beforeEach(() => {
       load = vi.fn(() => new Promise<string>(resolve => { finish = resolve }))
-      read = staleWhileRevalidate(load, { refreshAfterMs: 30 })
+      read = staleWhileRevalidate(load, { initial: null, refreshAfterMs: 30 })
       read()
       read()
     })
@@ -40,14 +40,14 @@ describe('staleWhileRevalidate', () => {
     let clock: number
     let finish = (_value: string) => {}
     let load: ReturnType<typeof vi.fn>
-    let read: ReturnType<typeof staleWhileRevalidate<string>>
+    let read: ReturnType<typeof staleWhileRevalidate<string | null>>
 
     beforeEach(async () => {
       clock = 0
       load = vi.fn()
         .mockResolvedValueOnce('old')
         .mockImplementationOnce(() => new Promise<string>(resolve => { finish = resolve }))
-      read = staleWhileRevalidate(load, { refreshAfterMs: 30, now: () => clock })
+      read = staleWhileRevalidate(load, { initial: null, refreshAfterMs: 30, now: () => clock })
       read()
       await settle()
       clock = 29
@@ -80,7 +80,7 @@ describe('staleWhileRevalidate', () => {
   describe('when a recount fails', () => {
     let clock: number
     let load: ReturnType<typeof vi.fn>
-    let read: ReturnType<typeof staleWhileRevalidate<string>>
+    let read: ReturnType<typeof staleWhileRevalidate<string | null>>
 
     beforeEach(async () => {
       vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -89,7 +89,7 @@ describe('staleWhileRevalidate', () => {
         .mockResolvedValueOnce('Valley of the Sun')
         .mockRejectedValueOnce(new Error('canceling statement due to statement timeout'))
         .mockResolvedValueOnce('The Rusty Conquistador')
-      read = staleWhileRevalidate(load, { refreshAfterMs: 30, now: () => clock })
+      read = staleWhileRevalidate(load, { initial: null, refreshAfterMs: 30, now: () => clock })
       read()
       await settle()
       clock = 30
@@ -107,7 +107,7 @@ describe('staleWhileRevalidate', () => {
       expect(read()).toEqual({
         value: 'Valley of the Sun',
         asOf: new Date(0),
-        error: 'canceling statement due to statement timeout',
+        error: 'Error: canceling statement due to statement timeout',
       })
     })
 

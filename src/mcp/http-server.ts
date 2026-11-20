@@ -203,7 +203,13 @@ app.get('/openapi.yaml', async (req: any, res: any) => {
 // recount at a time however many clients poll.
 const STATUS_COUNTS_REFRESH_MS = 5 * 60_000
 
-const readCounts = staleWhileRevalidate(async () => {
+type StatusCounts = {
+  totals: Awaited<ReturnType<typeof getIndexTotals>> | null
+  pendingEmbeddings: { messages: number; sessions: number } | null
+  vectorisedMessages: number | null
+}
+
+const readCounts = staleWhileRevalidate<StatusCounts>(async () => {
   const totals = await getIndexTotals()
 
   // Both counts use the embedder's own predicate (src/embeddings/pending.ts),
@@ -226,7 +232,10 @@ const readCounts = staleWhileRevalidate(async () => {
     },
     vectorisedMessages: parseInt(vectorisedMessages.rows[0]?.count ?? '0', 10),
   }
-}, { refreshAfterMs: STATUS_COUNTS_REFRESH_MS })
+}, {
+  initial: { totals: null, pendingEmbeddings: null, vectorisedMessages: null },
+  refreshAfterMs: STATUS_COUNTS_REFRESH_MS,
+})
 
 app.get(['/api/status', '/status'], async (req: any, res: any) => {
   try {
@@ -296,10 +305,8 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
           messageCount: r.message_count,
         })),
       },
-      totals: counts.value?.totals ?? null,
-      pendingEmbeddings: counts.value?.pendingEmbeddings ?? null,
-      vectorisedMessages: counts.value?.vectorisedMessages ?? null,
-      countsAsOf: counts.asOf?.toISOString() ?? null,
+      ...counts.value,
+      countsAsOf: counts.asOf,
       countsError: counts.error,
       quarantined,
       // Counters only. Non-zero failed or dropped means usage stats undercount.
