@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { query } from '../db/postgres.js'
 import { searchWithDiagnostics, formatSearchResults, findProjectsByPath } from './search.js'
+import { DEFAULT_SEARCH_MODE, SEARCH_MODES } from './search-mode.js'
 import { sinceSchema } from './since.js'
 import {
   getSessionDigest,
@@ -19,6 +20,20 @@ import { resolveTitle } from './title.js'
 import { applyTags, removeTags, getTags, formatTagWrite, defaultExcludedTags, type TagTarget } from './tags.js'
 import { USELESS_TAG, hasNoiseVector, invalidateNoiseClusters } from './noise.js'
 import { writeNote, formatWrittenNote, NOTE_TAG } from './notes.js'
+import { STATS_WINDOWS, usageStats, formatUsageStats } from './usage-stats.js'
+import {
+  searchLog,
+  mcpCaller,
+  mintListHandle,
+  parseListHandle,
+  type FollowUpTool,
+  type FollowUpTarget,
+} from './search-log.js'
+
+const listParam = z
+  .string()
+  .optional()
+  .describe('The list handle of the search this came from (e.g. "Lk3x9qa"). Optional.')
 
 // addTag/removeTag both take an optional sessionId and an optional messageId
 // and require exactly one. Which granularity to use is the tagging agent's
@@ -55,7 +70,25 @@ const collectTags = (params: { tag?: string; tags?: string[] }): string[] => [
 //
 // src/mcp/tools.test.ts fails if a transport ever registers a tool inline
 // again.
-const registerTools = (server: McpServer) => {
+const registerTools = (server: McpServer, transport: 'mcp-http' | 'mcp-stdio') => {
+  const callerOf = (extra: { sessionId?: string }) =>
+    mcpCaller(transport, extra.sessionId, server.server.getClientVersion())
+  const followUp = (
+    tool: FollowUpTool,
+    params: Record<string, unknown>,
+    extra: { sessionId?: string },
+    target: FollowUpTarget
+  ) =>
+    searchLog.record({
+      kind: 'follow-up',
+      at: new Date(),
+      caller: callerOf(extra),
+      tool,
+      request: params,
+      target,
+      list: parseListHandle(params.list),
+    })
+
   server.tool(
     'search',
     `Search past AI conversations. Returns TERSE ranked hits — one line each, no
@@ -117,8 +150,8 @@ down for everyone afterwards. Search only gets quieter if you tell it.
       negativeQuery: z.string().optional().describe('Negative query - pushes results away from this concept'),
       excludeTerms: z.string().optional().describe('Hard filter - exclude results containing these terms'),
       cwd: z.string().optional().describe('Current working directory - conversations from matching projects get boosted'),
-      mode: z.enum(['semantic', 'text', 'hybrid']).optional().describe('Search mode: hybrid (default), semantic, or text'),
-      limit: z.number().optional().describe('Max results to return (default 8)'),
+      mode: z.enum(SEARCH_MODES).optional().describe('Search mode: hybrid (default), semantic, or text'),
+      limit: z.number().int().min(1).optional().describe('Max results to return (default 8)'),
       source: z.string().optional().describe('Filter to specific source'),
       since: sinceSchema.optional(),
       projectOnly: z.boolean().optional().describe('Only search conversations from the CWD project'),
@@ -132,15 +165,30 @@ down for everyone afterwards. Search only gets quieter if you tell it.
       tags: z.array(z.string()).optional().describe('Only return results carrying ANY of these tags (OR, not AND). Matches a tag on the session OR on any of its messages, so you do not have to know which granularity the tagging agent chose. Tags are free-form and case-insensitive; an unused tag is not an error, it simply matches nothing. Naming a tag here also overrides its default exclusion — tags:["useless"] is how you deliberately reach hidden sessions.'),
       excludeTags: z.array(z.string()).optional().describe('Hide results carrying ANY of these tags, in addition to the default-excluded set. A tag on the session hides the whole session; a tag on a single message only hides that message\'s own hit.'),
       includeNoise: z.boolean().optional().describe('Include sessions reported as useless, and switch off the ranking penalty that demotes results resembling reported noise. False by default. Pass true when you are debugging what the index actually holds rather than looking for an answer -- with it off you cannot tell "no such conversation" apart from "it was reported as noise".'),
+      explain: z.boolean().optional().describe('Add a score breakdown to each result: the fused base score, the noise and project adjustments, and the full-text rank value. Off by default.'),
     },
-    async (params) => {
-      const matchingProjects = params.cwd ? await findProjectsByPath(params.cwd) : []
-      const projectIds = matchingProjects.map((p) => p.id)
-      const { results, degraded } = await searchWithDiagnostics(params)
-      return {
-        content: [
-          { type: 'text', text: formatSearchResults(results, projectIds, degraded) },
-        ],
+    async (args, extra) => {
+      const { explain, ...params } = args
+      const list = mintListHandle()
+      const logged = {
+        kind: 'search' as const,
+        at: new Date(),
+        caller: callerOf(extra),
+        tool: 'search' as const,
+        list,
+        request: args,
+        mode: params.mode ?? DEFAULT_SEARCH_MODE,
+      }
+      const started = performance.now()
+      try {
+        const { results, degraded, armMs } = await searchWithDiagnostics(params)
+        searchLog.record({ ...logged, totalMs: performance.now() - started, results, degraded, armMs })
+        return {
+          content: [{ type: 'text', text: formatSearchResults(results, { degraded, list, explain }) }],
+        }
+      } catch (error) {
+        searchLog.record({ ...logged, totalMs: performance.now() - started, error: (error as Error).name })
+        throw error
       }
     }
   )
@@ -165,8 +213,10 @@ Returns: { summary, title, project, message_count, date, tokens, total_chunks,
       sessionId: z.number().describe('Session ID from search results'),
       chunkOffset: z.number().optional().describe('First section to return (0-based, default 0)'),
       chunkLimit: z.number().optional().describe('Max sections to return (default 20)'),
+      list: listParam,
     },
-    async (params) => {
+    async (params, extra) => {
+      followUp('getSession', params, extra, { sessionId: params.sessionId })
       const digest = await getSessionDigest(params)
       if (!digest) return { content: [{ type: 'text', text: 'Session not found.' }] }
       return { content: [{ type: 'text', text: formatDigest(digest) }] }
@@ -183,8 +233,9 @@ title search. Use getMessages to read raw messages once you have the session.`,
     {
       searchTerm: z.string().describe('Session external_id or title search term'),
     },
-    async (params) => {
+    async (params, extra) => {
       const digest = await getSessionDigest({ searchTerm: params.searchTerm })
+      followUp('getSessionTranscript', params, extra, digest ? { sessionId: digest.session_id } : {})
       if (!digest)
         return {
           content: [{ type: 'text', text: `No session found matching: ${params.searchTerm}` }],
@@ -219,8 +270,10 @@ truncated, and it's always explicit and recoverable.`,
       startMessageId: z.number().optional().describe('Start of a message-id range (from a chunk manifest)'),
       endMessageId: z.number().optional().describe('End of a message-id range (from a chunk manifest)'),
       maxChars: z.number().optional().describe('Override the default char budget'),
+      list: listParam,
     },
-    async (params) => {
+    async (params, extra) => {
+      followUp('getMessages', params, extra, { sessionId: params.sessionId, messageId: params.startMessageId })
       const result = await getMessages(params)
       if (!result) return { content: [{ type: 'text', text: 'No messages found.' }] }
       return { content: [{ type: 'text', text: formatMessages(result) }] }
@@ -234,8 +287,10 @@ message that getMessages returned TRUNCATED — reaching its full content requir
 this deliberate call, so a huge payload can never arrive by accident.`,
     {
       id: z.number().describe('Message id (from a truncated getMessages preview)'),
+      list: listParam,
     },
-    async (params) => {
+    async (params, extra) => {
+      followUp('getMessage', params, extra, { messageId: params.id })
       const message = await getMessageById(params.id)
       if (!message) return { content: [{ type: 'text', text: 'Message not found.' }] }
       return { content: [{ type: 'text', text: formatMessage(message) }] }
@@ -251,8 +306,10 @@ to getMessages.`,
     {
       sessionId: z.number().describe('Session ID'),
       chunkIndex: z.number().describe('Chunk index from the getSession manifest'),
+      list: listParam,
     },
-    async (params) => {
+    async (params, extra) => {
+      followUp('getChunk', params, extra, { sessionId: params.sessionId, chunkIndex: params.chunkIndex })
       const chunk = await getChunk(params)
       if (!chunk) return { content: [{ type: 'text', text: 'Chunk not found.' }] }
       return { content: [{ type: 'text', text: formatChunk(chunk, params.sessionId) }] }
@@ -261,7 +318,7 @@ to getMessages.`,
 
   server.tool(
     'stats',
-    'Get statistics about your conversation history',
+    'Get statistics about your conversation history, and how search is used over the last 7 and 30 days: searches, opens, rank of the opened result, latency, feedback and vector-parameter use',
     {},
     async () => {
       const stats = await query<{
@@ -312,6 +369,8 @@ to getMessages.`,
       output += `\n## Top Projects\n\n`
       for (const row of topProjects.rows)
         output += `- **${row.name}:** ${row.session_count} sessions, ${row.message_count} messages\n`
+
+      output += `\n` + formatUsageStats(await Promise.all(STATS_WINDOWS.map(usageStats)))
 
       return { content: [{ type: 'text', text: output }] }
     }
@@ -379,7 +438,8 @@ it by id, whether it is flagged or not.`,
         .optional()
         .describe('Why this session is useless. Free text — there is no controlled vocabulary. Stored on the tag, so a later reader can see what you judged and disagree.'),
     },
-    async ({ sessionId, reason }) => {
+    async ({ sessionId, reason }, extra) => {
+      followUp('reportUselessSession', { sessionId, reason }, extra, { sessionId })
       // Writes a TAG. It deliberately does NOT touch sessions.deleted_at.
       //
       // The previous implementation of this tool ran
@@ -447,7 +507,8 @@ tool has no business overruling that.`,
     {
       sessionId: z.number().describe('Session ID to un-flag'),
     },
-    async ({ sessionId }) => {
+    async ({ sessionId }, extra) => {
+      followUp('unreportUselessSession', { sessionId }, extra, { sessionId })
       const removed = await removeTags({ sessionId }, [USELESS_TAG])
       invalidateNoiseClusters()
 
@@ -501,11 +562,12 @@ Idempotent — re-tagging something changes nothing and is not an error.`,
       tags: z.array(z.string()).optional().describe('Several tags to apply at once. Combined with `tag` if both are given.'),
       note: z.string().optional().describe('Optional free-text reason, stored with the tag as provenance.'),
     },
-    async (params) => {
+    async (params, extra) => {
       const target = resolveTagTarget(params)
       const requested = collectTags(params)
       if (requested.length === 0)
         return { content: [{ type: 'text', text: 'No tag given. Pass tag: "something" or tags: ["a","b"].' }], isError: true }
+      followUp('addTag', params, extra, target)
       const applied = await applyTags(target, requested, { createdBy: 'mcp', note: params.note })
       // A "useless" tag is a report by another name; it changes the corpus now.
       if (applied.includes(USELESS_TAG)) invalidateNoiseClusters()
@@ -529,11 +591,12 @@ reported, not an error.`,
       tag: z.string().optional().describe('A tag to remove.'),
       tags: z.array(z.string()).optional().describe('Several tags to remove at once. Combined with `tag` if both are given.'),
     },
-    async (params) => {
+    async (params, extra) => {
       const target = resolveTagTarget(params)
       const requested = collectTags(params)
       if (requested.length === 0)
         return { content: [{ type: 'text', text: 'No tag given. Pass tag: "something" or tags: ["a","b"].' }], isError: true }
+      followUp('removeTag', params, extra, target)
       const removed = await removeTags(target, requested)
       if (removed.includes(USELESS_TAG)) invalidateNoiseClusters()
       const current = await getTags(target)
@@ -609,11 +672,12 @@ search/getSession/getMessages to find and read notes back later.`,
         id: number
         title: string | null
         summary: string | null
+        generated_title: string | null
         project_name: string
         started_at: Date
         message_count: number
       }>(
-        `SELECT s.id, s.title, s.summary, p.name as project_name, s.started_at, s.message_count
+        `SELECT s.id, s.title, s.summary, s.generated_title, p.name as project_name, s.started_at, s.message_count
          FROM sessions s
          JOIN projects p ON s.project_id = p.id
          WHERE p.id = ANY($1::int[]) AND s.deleted_at IS NULL
@@ -643,10 +707,11 @@ search/getSession/getMessages to find and read notes back later.`,
   return server
 }
 
-export const createMcpServer = () =>
+export const createMcpServer = (transport: 'mcp-http' | 'mcp-stdio') =>
   registerTools(
     new McpServer({
       name: 'mindmeld',
       version: '0.2.0',
-    })
+    }),
+    transport
   )

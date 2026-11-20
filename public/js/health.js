@@ -9,7 +9,7 @@
 // Each panel is written to distinguish its own case from the others.
 
 import { html, useState, useEffect, useCallback } from 'preact'
-import { apiGet } from './api.js'
+import { apiGet, apiPost } from './api.js'
 import { Card, Pill, Spinner, Bar } from './ui.js'
 import { fmtNum, fmtExact, timeAgo } from './util.js'
 
@@ -354,14 +354,7 @@ export const StandDownControl = ({ onChange }) => {
     setBusy(true)
     setError(null)
     try {
-      const res = await fetch(path, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify(body ?? {}),
-      })
-      const json = await res.json()
-      if (json.status === 'error') throw new Error(json.error)
-      setState(json)
+      setState(await apiPost(path, body))
       onChange?.()
     } catch (e) {
       setError(e.message)
@@ -408,6 +401,81 @@ export const StandDownControl = ({ onChange }) => {
               )}
             </div>
           `}
+      ${error &&
+      html`<div class="mono" style="color:var(--red);margin-top:8px;overflow-wrap:anywhere;font-size:12px">
+        ${error}
+      </div>`}
+    <//>
+  `
+}
+
+// ------------------------------------------------------------------ Semantic
+
+// The AI pipeline's on/off switch. Unlike stand-down it has no deadline: off
+// stays off until someone switches it on here (or the server starts with
+// MINDMELD_SEMANTIC=off). Polls so a switch from another device shows up.
+export const SemanticControl = ({ onChange }) => {
+  const [state, setState] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const [drainStarted, setDrainStarted] = useState(false)
+
+  const load = useCallback(async () => {
+    try {
+      setState(await apiGet('/api/semantic'))
+    } catch (e) {
+      setError(e.message)
+    }
+  }, [])
+
+  useEffect(() => {
+    load()
+    const sync = setInterval(load, 30000)
+    return () => clearInterval(sync)
+  }, [load])
+
+  const flip = async enabled => {
+    setBusy(true)
+    setError(null)
+    try {
+      const next = await apiPost('/api/semantic', { enabled, reason: 'switched from the dashboard' })
+      setState(next)
+      setDrainStarted(!!next.drain)
+      onChange?.()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!state && !error) return html`<${Card} title="Semantic"><${Spinner} /><//>`
+
+  const on = state?.enabled !== false
+
+  return html`
+    <${Card} title="Semantic">
+      <div class="m" style="margin:0">
+        <${Pill} kind=${on ? 'good' : 'warn'}>${on ? 'On' : 'Off · full-text only'}<//>
+        ${state?.changedAt && html`<span class="faint">switched ${timeAgo(state.changedAt)}</span>`}
+        ${state?.reason && html`<span class="faint">· ${state.reason}</span>`}
+      </div>
+      <div class="faint" style="font-size:12px;margin-top:8px;line-height:1.5">
+        ${on
+          ? html`Embedding, summarization and vector search are running. Switch off to stop all AI
+              work until you switch it back on — conversations keep being indexed for full-text
+              search and wait in the queue.`
+          : html`No AI work: nothing is embedded or summarized, Ollama is never called, and search
+              answers from full text. Conversations keep being indexed and wait in the queue;
+              switching on drains it.`}
+      </div>
+      ${on && drainStarted &&
+      html`<div class="faint" style="font-size:12px;margin-top:6px">Draining what queued up while it was off.</div>`}
+      <div style="margin-top:12px">
+        <button class=${on ? 'btn sm' : 'btn sm primary'} disabled=${busy || !state} onClick=${() => flip(!on)}>
+          ${on ? 'Switch semantic off' : 'Switch semantic on'}
+        </button>
+      </div>
       ${error &&
       html`<div class="mono" style="color:var(--red);margin-top:8px;overflow-wrap:anywhere;font-size:12px">
         ${error}

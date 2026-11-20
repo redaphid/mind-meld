@@ -283,18 +283,64 @@ should not be "simplified" away:
 - **It gates the embedding phase, not the file sync.** Reading transcripts into
   Postgres never touches the GPU, so conversations keep being indexed while
   standing down; only their vectors wait.
-- **Standing down is not an error.** `FullSyncResult.standDown` is its own
+- **Standing down is not an error.** `FullSyncResult.held` is its own
   field and is deliberately kept out of `errors`, because a run that records an
   error exits nonzero and monitoring would read an intentional yield as a failed
   sync.
 
-`shouldStandDown()` fails **open**: the table arrives in a migration applied by
-`mcp` on startup, so a worker can legitimately meet a database that has not got
-it yet, and a switch that cannot be read is not a switch that says stop.
+Stand-down fails **open**: the table arrives in a migration applied by `mcp` on
+startup, so a worker can legitimately meet a database that has not got it yet,
+and a switch that cannot be read is not a switch that says stop.
 
-Checkpoints are at batch boundaries in `generatePendingEmbeddings` and
-per-session in `updateAggregateEmbeddings` — the latter is the one that matters,
-since a session is 5-10 minutes of GPU.
+Workers never ask about stand-down by name. They ask `aiHold()` in
+`src/sync/sync-control.ts`, the one gate for both switches on this row (see the
+next section). Checkpoints are at batch boundaries in
+`generatePendingEmbeddings` and per-session in `updateAggregateEmbeddings` — the
+latter is the one that matters, since a session is 5-10 minutes of GPU.
+
+## The semantic switch (full-text-only mode)
+
+Off runs mindmeld without the AI pipeline: no embedding, no message, chunk or
+session summarization, no aggregate vectors, no centroid computation, no query
+vector for search, and no model checks against Ollama. Transcripts, memories
+and the ingest spool keep landing in Postgres, so full-text search stays
+current, and every new row still joins the queue (`src/embeddings/pending.ts`).
+Switching back on drains what accumulated; nothing is re-synced.
+
+```
+GET  /api/semantic              # {enabled, changedAt, reason}
+POST /api/semantic              # {enabled, reason} — on also kicks a drain now
+MINDMELD_SEMANTIC=off           # start in this mode (read by mcp at startup)
+```
+
+It is a column on the stand-down row (`init-db/025-semantic-switch.sql`), for
+the same reason stand-down is: the workers and the UI share only Postgres. What
+is deliberate:
+
+- **A switch, not a deadline.** Stand-down lapses on its own so a forgotten
+  press costs one cycle. This one stays off until someone turns it on, because
+  "run full-text only" is a decision, not a yield. Keep the two concepts apart.
+- **One gate.** Every background checkpoint calls `aiHold()`, which returns
+  `'semantic-off'`, `'standing-down'` or null. Search and centroid computation
+  call `semanticEnabled()` instead, because a stand-down governs ingestion, not
+  a query someone is waiting on. Do not add a third check at a new call site;
+  gate the new site on one of these two.
+- **The gate sits before the model checks.** `ensureEmbeddingModel` /
+  `ensureSummarizeModel` are Ollama requests too. `generatePendingEmbeddings`
+  and `updateAggregateEmbeddings` ask at entry, so every caller (the scheduled
+  sync, `mcp`'s "Run ingestion now", the CLI) is gated without restating it.
+- **Only `mcp` writes the startup value, and only "off".** The sync image runs
+  its binary afresh every cycle, so a worker writing it would undo a UI
+  switch-on once an hour. Writing "on" at startup would undo a UI switch-off on
+  every restart. Every process falls back to `MINDMELD_SEMANTIC` only when the
+  row cannot be read.
+- **Search says why it degraded.** With the switch off, `degraded.cause` is
+  `switched-off` and the MCP note says retrying will not help, instead of the
+  "retry shortly" an outage gets.
+- **Chroma stays up.** The UI cannot start containers, so switching on from the
+  dashboard needs Chroma already running. It sits idle while off. The
+  centroids container keeps its loop and skips each pass while off, so after a
+  switch-on its next pass is up to `CENTROID_INTERVAL_SECONDS` away.
 
 ## Why nothing is moving: `/api/system`
 
@@ -444,6 +490,31 @@ where γ = 0.2 (prevents over-suppression)
 
 Centroids are automatically recomputed every 7 hours by the `mindmeld-centroids` Docker container. Adjust via `CENTROID_INTERVAL_SECONDS` in `.env`.
 
+### The search log (`search_log`, `src/mcp/search-log.ts`)
+
+Every MCP and REST search writes a row, and so does every call that follows
+one: `getSession`, `getSessionTranscript`, `getMessages`, `getMessage`,
+`getChunk`, tag and report calls, and the REST session and message reads. Each
+search mints a list handle (`Lk3x9qa`), shown on the first line of the MCP text
+and as `list` in REST JSON.
+
+- **Linking.** A follow-up joins a search by the list handle it passes
+  (`list` on the tools, `?list=` over REST), or else by caller: that caller's
+  latest search within 30 minutes whose results hold the session, which also
+  fills `rank`. The caller is the MCP transport session id over HTTP (exact,
+  one per connected client), the process over stdio (one client per process,
+  but interleaved work in it is indistinguishable), and the `X-Mindmeld-Caller`
+  header over REST. Without that header a REST client is `rest:anon`, which is
+  many unrelated clients, so its follow-ups link only by the list they pass.
+- **Never on the response path.** `record` only enqueues; one loop writes rows
+  in order. A full queue (`MINDMELD_SEARCH_LOG_QUEUE`, 1000) drops and counts;
+  a failed insert counts and logs its SQLSTATE only. Both counts are in
+  `/status` as `searchLog`. `MINDMELD_SEARCH_LOG=off` stops writes.
+- **Personal data.** `request` holds query text. It is nulled after
+  `MINDMELD_SEARCH_LOG_RAW_DAYS` (180) by a daily pass in `mcp`; the hash,
+  results and links stay. No HTTP route returns raw rows, and nothing that
+  touches this table may log a driver error message, which can quote the row.
+
 ### SQL Search
 
 ```sql
@@ -543,7 +614,43 @@ push; and a tag pushed by `release.yml` using `GITHUB_TOKEN` cannot trigger
 another workflow. That is why GHCR has no version tag newer than `1.19.0`
 despite four releases. `latest` and `main` are unaffected and are what compose
 pulls.
-4. On the host: `docker compose pull && docker compose up -d`. Migrations auto-apply on `mcp` startup (`src/db/migrations.ts`).
+4. On the host: `scripts/host-autoupdate.sh run`, from a scheduler every few
+   minutes. Migrations auto-apply on `mcp` startup (`src/db/migrations.ts`).
+   `scripts/host-autoupdate.sh status` answers "what commit is this host
+   running, and is it the latest main".
+
+### The host updater (`scripts/host-autoupdate.sh`)
+
+Each run fast-forwards the checkout (only when no tracked file is modified),
+pulls the app images, and lets compose's dry run name the containers whose
+image or config changed; nothing else is touched, and it never runs `down` or
+removes a volume. These rules are deliberate:
+
+- **Only a complete set deploys.** A publish pushes each image when its own job
+  finishes, so a pull can land mid-publish. The run waits until every app image
+  carries the same revision label, and refuses one older than what runs.
+- **A busy container cannot veto its own replacement.** It waits for idle CPU
+  at most `AUTOUPDATE_IDLE_WAIT_SECONDS`, then replaces anyway. An idle gate
+  that a fault can hold shut keeps a broken container on its old image forever.
+- **Staleness is the alarm, not the run's exit code.** When main has been ahead
+  of the running revision longer than `AUTOUPDATE_STALE_AFTER_MINUTES` (time
+  measured from when the change landed on main), it pushes to ntfy, whatever
+  the cause: a failed publish, a dirty checkout, a paused updater. A failed
+  update or health check is pushed on its own, since it can leave the host on
+  main's revision and still broken.
+- **Unknown is not current.** When docker cannot be asked, no app container is
+  running, or origin cannot be fetched, `status` says UNKNOWN and exits
+  nonzero, and a run that stays unable to tell for the stale threshold alerts.
+- **Postgres is not followed.** Its image is the stock server rebuilt by every
+  publish; following it would restart the database on every merge. Migrations
+  come from `mcp`, not from that image. `AUTOUPDATE_EXCLUDE_SERVICES` (default
+  `postgres`) names what is held; `status` lists it as not auto-updated.
+  Stopped containers are left stopped.
+
+To roll back: `scripts/host-autoupdate.sh pause`, then
+`docker tag <image>:prev <image>:latest` and `docker compose up -d --no-deps
+<service>` (each replaced image is tagged `:prev` first). `resume` when main is
+fixed; until then the staleness alert keeps saying the host is behind.
 
 `/deploy` (`.claude/commands/deploy.md`) automates the push → tag → CI-watch → pull → restart, but it reads the existing version and does **not** bump it — edit `package.json` first.
 

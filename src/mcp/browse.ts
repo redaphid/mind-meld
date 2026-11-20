@@ -93,6 +93,7 @@ type SessionListRow = {
   id: number
   title: string | null
   summary: string | null
+  generated_title: string | null
   project: string | null
   project_id: number
   source: string
@@ -135,7 +136,7 @@ export const listSessions = async (
   const offsetParam = `$${params.length}`
 
   const result = await query<SessionListRow>(
-    `SELECT s.id, s.title, s.summary, p.name AS project, s.project_id,
+    `SELECT s.id, s.title, s.summary, s.generated_title, p.name AS project, s.project_id,
             src.name AS source, COALESCE(p.machine, $1) AS machine,
             s.message_count, s.is_automated, s.started_at, s.last_synced_at,
             (SELECT COUNT(*) FROM session_chunks c WHERE c.session_id = s.id) AS chunk_count,

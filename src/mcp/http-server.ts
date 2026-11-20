@@ -3,7 +3,8 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
 import { listProjects, listSessions, getActivity } from './browse.js'
-import { toSearchHit, toDigest, toMessages, toMessage } from './rest.js'
+import { toSearchResponse, toDigest, toMessages, toMessage, parseSearchShape } from './rest.js'
+import { STATS_WINDOWS, usageStats } from './usage-stats.js'
 import { listQuarantine, replayQuarantine, countPending } from '../sync/quarantine.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { hostHeaderValidation } from '@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js'
@@ -11,13 +12,22 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
-import { searchWithDiagnostics, findProjectsByPath, UnknownDataClassError } from './search.js'
+import { searchWithDiagnostics, UnknownDataClassError } from './search.js'
+import {
+  searchLog,
+  restCaller,
+  mintListHandle,
+  parseListHandle,
+  expireRawRequests,
+  type FollowUpTool,
+  type FollowUpTarget,
+} from './search-log.js'
 import { SnapshotConflictError } from './ingest-snapshot.js'
 import { IngestPayloadSchema, ingestConversation, MissingDataClassError } from './ingest.js'
 import { getSessionDigest, getMessages, getMessageById } from './session.js'
 import { createMcpServer } from './tools.js'
 import { getSyncStatus } from '../sync/orchestrator.js'
-import { startSyncRun, getSyncRunState } from './sync-run.js'
+import { startSyncRun, getSyncRunState, switchSemantic } from './sync-run.js'
 import {
   pendingMessagesCount,
   pendingSessionsCount,
@@ -27,7 +37,7 @@ import { getThroughput, clampWindow } from './throughput.js'
 import { readSystemStatus } from './system-status.js'
 import { getSummaryStatus } from './summary-status.js'
 import { getEmbeddingSeries, clampSeriesWindow } from './embedding-series.js'
-import { readStandDown, standDown, resumeSync } from '../sync/stand-down.js'
+import { readStandDown, standDown, resumeSync, readSemantic, setSemantic, aiHold } from '../sync/sync-control.js'
 import { getCollectionStats } from '../db/chroma.js'
 import { config } from '../config.js'
 import { ensureEmbeddingModel } from '../embeddings/ollama.js'
@@ -45,7 +55,7 @@ const { version } = require('../../package.json')
 // The MCP tool surface is shared verbatim with the stdio transport
 // (src/mcp/server.ts) - see src/mcp/tools.ts. Declaring the tools here as
 // well is what let the two drift, so this transport declares none of its own.
-const getServer = createMcpServer
+const getServer = () => createMcpServer('mcp-http')
 
 const MCP_PORT = process.env.MCP_PORT ? parseInt(process.env.MCP_PORT, 10) : 3000
 
@@ -194,11 +204,12 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
       id: number
       title: string | null
       summary: string | null
+      generated_title: string | null
       project: string
       last_synced_at: string
       message_count: number
     }>(`
-      SELECT s.id, s.title, s.summary, p.name as project,
+      SELECT s.id, s.title, s.summary, s.generated_title, p.name as project,
              s.last_synced_at, s.message_count
       FROM sessions s
       JOIN projects p ON s.project_id = p.id
@@ -230,9 +241,10 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
       started_at: string
       title: string | null
       summary: string | null
+      generated_title: string | null
       project: string
     }>(`
-      SELECT s.started_at, s.title, s.summary, p.name as project
+      SELECT s.started_at, s.title, s.summary, s.generated_title, p.name as project
       FROM sessions s
       JOIN projects p ON s.project_id = p.id
       WHERE s.deleted_at IS NULL
@@ -274,6 +286,8 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
       },
       vectorisedMessages: parseInt(vectorisedMessages.rows[0]?.count ?? '0', 10),
       quarantined,
+      // Counters only. Non-zero failed or dropped means usage stats undercount.
+      searchLog: searchLog.stats(),
       chroma: { collections: chromaCollections },
       latestSession: latest
         ? {
@@ -496,14 +510,45 @@ const listParam = (raw: unknown): string[] | undefined => {
 
 // Search over the same index the MCP tool uses — same fusion, same filters —
 // returning the structured results rather than the MCP text rendering.
+// Opens from REST name their list with ?list=, and their caller with the
+// X-Mindmeld-Caller header (src/mcp/search-log.ts).
+const logRestFollowUp = (req: any, tool: FollowUpTool, target: FollowUpTarget) =>
+  searchLog.record({
+    kind: 'follow-up',
+    at: new Date(),
+    caller: restCaller((name) => req.get(name)),
+    tool,
+    request: { ...req.query, ...req.params },
+    target,
+    list: parseListHandle(req.query.list),
+  })
+
 app.get('/api/search', apiRoute('Search', async (req, res) => {
   const q = typeof req.query.q === 'string' ? req.query.q : undefined
-  const mode = req.query.mode as 'semantic' | 'text' | 'hybrid' | undefined
 
   if (!q?.trim()) {
     res.status(400).json({ status: 'error', error: 'q is required' })
     return
   }
+
+  const shape = parseSearchShape(req.query)
+  if ('error' in shape) {
+    res.status(400).json({ status: 'error', error: shape.error })
+    return
+  }
+  const { mode, limit } = shape
+
+  const list = mintListHandle()
+  const logged = {
+    kind: 'search' as const,
+    at: new Date(),
+    caller: restCaller((name) => req.get(name)),
+    tool: 'rest:search' as const,
+    list,
+    request: { ...req.query },
+    mode,
+  }
+  const started = performance.now()
 
   const cwd = typeof req.query.cwd === 'string' ? req.query.cwd : undefined
 
@@ -516,8 +561,8 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
     outcome = await searchWithDiagnostics({
       query: q,
       negativeQuery: typeof req.query.not === 'string' ? req.query.not : undefined,
-      mode: mode && ['semantic', 'text', 'hybrid'].includes(mode) ? mode : 'hybrid',
-      limit: Math.min(intParam(req.query.limit, 20), 100),
+      mode,
+      limit,
       source: typeof req.query.source === 'string' ? req.query.source : undefined,
       since: typeof req.query.since === 'string' ? req.query.since : undefined,
       cwd,
@@ -541,6 +586,7 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
       includeNoise: boolParam(req.query.includeNoise),
     })
   } catch (error) {
+    searchLog.record({ ...logged, totalMs: performance.now() - started, error: (error as Error).name })
     // A typo'd class is a caller mistake, not a server fault — 400, with the
     // valid vocabulary in the message.
     if (error instanceof UnknownDataClassError) {
@@ -550,21 +596,9 @@ app.get('/api/search', apiRoute('Search', async (req, res) => {
     throw error
   }
 
-  const projectIds = cwd ? (await findProjectsByPath(cwd)).map(p => p.id) : []
+  searchLog.record({ ...logged, totalMs: performance.now() - started, results: outcome.results, degraded: outcome.degraded, armMs: outcome.armMs })
 
-  res.json({
-    status: 'ok',
-    query: q,
-    mode: mode ?? 'hybrid',
-    count: outcome.results.length,
-    projectIds,
-    // Additive and null on a healthy search, so nothing that ignores it breaks.
-    // Non-null means the vector arms were skipped and these results came from
-    // full text alone — the difference between "no such conversation" and "the
-    // GPU gate was shut", which are indistinguishable from the results list.
-    degraded: outcome.degraded,
-    results: outcome.results.map(toSearchHit),
-  })
+  res.json(toSearchResponse({ query: q, list, mode, outcome }))
 }))
 
 app.get('/api/projects', apiRoute('Projects', async (_req, res) => {
@@ -587,6 +621,7 @@ app.get('/api/sessions', apiRoute('Sessions', async (req, res) => {
 }))
 
 app.get('/api/sessions/:id', apiRoute('Session digest', async (req, res) => {
+  logRestFollowUp(req, 'rest:session', { sessionId: intParam(req.params.id, 0) })
   const digest = await getSessionDigest({
     sessionId: intParam(req.params.id, 0),
     chunkOffset: intParam(req.query.chunkOffset, 0),
@@ -600,6 +635,10 @@ app.get('/api/sessions/:id', apiRoute('Session digest', async (req, res) => {
 }))
 
 app.get('/api/sessions/:id/messages', apiRoute('Session messages', async (req, res) => {
+  logRestFollowUp(req, 'rest:messages', {
+    sessionId: intParam(req.params.id, 0),
+    ...(req.query.startMessageId ? { messageId: intParam(req.query.startMessageId, 0) } : {}),
+  })
   const result = await getMessages({
     sessionId: intParam(req.params.id, 0),
     offset: req.query.startMessageId ? undefined : Math.max(intParam(req.query.offset, 0), 0),
@@ -617,6 +656,7 @@ app.get('/api/sessions/:id/messages', apiRoute('Session messages', async (req, r
 
 // The escape hatch for a message that came back TRUNCATED: one message, whole.
 app.get('/api/messages/:id', apiRoute('Message', async (req, res) => {
+  logRestFollowUp(req, 'rest:message', { messageId: intParam(req.params.id, 0) })
   const message = await getMessageById(intParam(req.params.id, 0))
   if (!message) {
     res.status(404).json({ status: 'error', error: 'Message not found' })
@@ -737,6 +777,28 @@ app.post('/api/stand-down/resume', apiRoute('Resume sync', async (_req, res) => 
   res.json({ status: 'ok', ...(await resumeSync()) })
 }))
 
+// Search usage over the last 7 and 30 days, aggregates only (src/mcp/usage-stats.ts).
+app.get('/api/stats', apiRoute('Search usage', async (_req, res) => {
+  res.json({ status: 'ok', windows: await Promise.all(STATS_WINDOWS.map(usageStats)) })
+}))
+
+// The semantic switch: run without the AI pipeline until someone turns it
+// back on. Unlike stand-down it has no deadline, on purpose.
+app.get('/api/semantic', apiRoute('Semantic state', async (_req, res) => {
+  res.json({ status: 'ok', ...(await readSemantic()) })
+}))
+
+// {enabled, reason}. Switching on also starts a drain of the queue that built
+// up while it was off; `drain` carries that run (or the one already running).
+app.post('/api/semantic', apiRoute('Switch semantic', async (req, res) => {
+  const { enabled, reason } = req.body ?? {}
+  if (typeof enabled !== 'boolean') {
+    res.status(400).json({ status: 'error', error: '`enabled` must be true or false' })
+    return
+  }
+  res.json({ status: 'ok', ...(await switchSemantic(enabled, typeof reason === 'string' ? reason : null)) })
+}))
+
 app.post('/api/ingest', async (req: any, res: any) => {
   try {
     const payload = IngestPayloadSchema.parse(req.body)
@@ -760,13 +822,31 @@ app.post('/api/ingest', async (req: any, res: any) => {
   }
 })
 
+// The query text in the search log expires; the rest of the row stays.
+const expireSearchLog = () =>
+  expireRawRequests()
+    .then((n) => n > 0 && console.log(`[search-log] nulled query text on ${n} rows past retention`))
+    .catch((e) => console.error('[search-log] retention pass failed:', (e as { code?: string }).code ?? 'unknown'))
+
 const start = async () => {
-  await runMigrations()
+  await runMigrations(config.postgres)
+  void expireSearchLog()
+  setInterval(expireSearchLog, 24 * 60 * 60 * 1000).unref()
+
+  // Only `mcp` writes the startup value, and only "off". The sync image runs
+  // its binary afresh every cycle, so a worker writing it would undo a UI
+  // switch-on once an hour; and writing "on" here would undo a UI switch-off
+  // on every restart. Unset or "on" leaves the stored switch alone.
+  if (!config.semantic.enabledAtStartup) {
+    await setSemantic(false, 'MINDMELD_SEMANTIC=off at startup')
+    console.log('[MCP HTTP] Semantic switched off (MINDMELD_SEMANTIC=off): no AI work until it is switched on')
+  }
 
   // Pull models to disk if not present (does NOT load into VRAM)
-  Promise.all([ensureEmbeddingModel(), ensureSummarizeModel()])
-    .then(() => console.log('[MCP HTTP] Models verified'))
-    .catch(e => console.warn('[MCP HTTP] Model pull check failed (non-fatal):', e.message))
+  if (!(await aiHold()))
+    Promise.all([ensureEmbeddingModel(), ensureSummarizeModel()])
+      .then(() => console.log('[MCP HTTP] Models verified'))
+      .catch(e => console.warn('[MCP HTTP] Model pull check failed (non-fatal):', e.message))
 
   app.listen(MCP_PORT, () => {
     console.log(`[MCP HTTP] Mindmeld server listening on http://localhost:${MCP_PORT}`)

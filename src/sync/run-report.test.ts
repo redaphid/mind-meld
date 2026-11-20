@@ -24,8 +24,9 @@ const result = (over: Partial<FullSyncResult> = {}): FullSyncResult => ({
   history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
   memories: emptyMemoryStats(),
   spool: { configured: false, drained: 0, quarantined: 0 },
+  automatedFlagsSet: 0,
   embeddings: { messagesEmbedded: 100, sessionsUpdated: 5 },
-  standDown: false,
+  held: null,
   errors: [],
   ...over,
 });

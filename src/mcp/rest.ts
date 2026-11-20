@@ -4,7 +4,9 @@
 // tools; these mappers are the single seam between the two, so the HTTP
 // contract can stay stable while the query layer evolves.
 
-import type { SearchResult } from './search.js'
+import type { SearchOutcome, SearchResult } from './search.js'
+import { DEFAULT_SEARCH_MODE, SEARCH_MODES, isSearchMode, type SearchMode } from './search-mode.js'
+import type { Adjustment, EvidenceList } from './evidence.js'
 import type { TitleSource } from './title.js'
 import type { SessionDigest, MessagesResult, RenderedMessage, SessionMessage } from './session.js'
 
@@ -30,6 +32,31 @@ export type SearchHitDto = {
   // the matched region instead of at the top. Null when the hit is the session
   // as a whole.
   cursor: { chunkIndex: number } | { messageId: number } | null
+  // Why it ranked here (src/mcp/evidence.ts): every arm that found it with its
+  // rank and raw similarity, best first, the fused score before adjustments,
+  // and each adjustment. `score` is `base` with the adjustments applied in
+  // order; `matchedTier` and `cursor` come from the first piece of evidence.
+  evidence: EvidenceList
+  base: number
+  adjustments: Adjustment[]
+}
+
+// GET /api/search's mode and limit. An unknown mode used to become hybrid
+// silently, so a typo'd ?mode=vector ran a different search from the one asked
+// for; a limit below 1 used to reach the search layer.
+const SEARCH_LIMIT_DEFAULT = 20
+const SEARCH_LIMIT_MAX = 100
+
+export const parseSearchShape = (q: {
+  mode?: unknown
+  limit?: unknown
+}): { error: string } | { mode: SearchMode; limit: number } => {
+  const mode = q.mode ?? DEFAULT_SEARCH_MODE
+  if (!isSearchMode(mode)) return { error: `mode must be one of ${SEARCH_MODES.join(', ')}` }
+  if (q.limit === undefined || q.limit === '') return { mode, limit: SEARCH_LIMIT_DEFAULT }
+  const limit = Number(q.limit)
+  if (!Number.isInteger(limit) || limit < 1) return { error: 'limit must be a positive integer' }
+  return { mode, limit: Math.min(limit, SEARCH_LIMIT_MAX) }
 }
 
 const iso = (value: Date | string | null | undefined): string | null => {
@@ -57,6 +84,36 @@ export const toSearchHit = (r: SearchResult): SearchHitDto => ({
       : r.cursor?.message_id != null
         ? { messageId: r.cursor.message_id }
         : null,
+  evidence: r.evidence,
+  base: r.base,
+  adjustments: r.adjustments,
+})
+
+// GET /api/search. `list` is the handle a follow-up passes back as ?list= so
+// the search log can tie what was opened to what was shown.
+export const toSearchResponse = ({
+  query,
+  list,
+  mode,
+  outcome,
+}: {
+  query: string
+  list: string
+  mode: string
+  outcome: SearchOutcome
+}) => ({
+  status: 'ok' as const,
+  query,
+  list,
+  mode,
+  count: outcome.results.length,
+  projectIds: outcome.projectIds,
+  // Additive and null on a healthy search, so nothing that ignores it breaks.
+  // Non-null means the vector arms were skipped and these results came from
+  // full text alone — the difference between "no such conversation" and "the
+  // GPU gate was shut", which are indistinguishable from the results list.
+  degraded: outcome.degraded,
+  results: outcome.results.map(toSearchHit),
 })
 
 export type ChunkDto = {

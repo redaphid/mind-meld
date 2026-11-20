@@ -16,7 +16,10 @@ const wireQueries = (overrides: {
   coverage?: Row
   bad?: Row
   embeddings?: Row
+  sessions?: Row[]
+  scanPages?: Row[][]
 }) => {
+  const scanPages = [...(overrides.scanPages ?? [])]
   const coverage = { total: '100', summarized: '90', null_backlog: '10', ...overrides.coverage }
   const bad = {
     truncated: '0',
@@ -40,14 +43,39 @@ const wireQueries = (overrides: {
     ...overrides.embeddings,
   }
   query.mockImplementation((sql: string) => {
+    if (sql.includes('ORDER BY id LIMIT')) return Promise.resolve(rows(...(scanPages.shift() ?? [])))
     if (sql.includes('null_backlog')) return Promise.resolve(rows(coverage))
     if (sql.includes('any_bad')) return Promise.resolve(rows(bad))
     if (sql.includes('pending_msgs')) return Promise.resolve(rows(embeddings))
+    if (sql.includes('AS opening')) return Promise.resolve(rows(...(overrides.sessions ?? [])))
     throw new Error(`unexpected query: ${sql.slice(0, 60)}`)
   })
 }
 
 describe('getHealth', () => {
+  // The count that would have shown 798 sessions drifting for two months (#177).
+  it('counts sessions whose stored automated flag disagrees with the classifier, by direction', async () => {
+    const session = (id: number, stored: boolean, opening: string) => ({ id, source: 'claude_code', machine: null, stored, opening })
+    wireQueries({
+      sessions: [
+        session(1, false, 'You are a Slack monitoring assistant for the lair'),
+        session(2, true, 'Fix the lantern'),
+        session(3, true, 'You are a curiosity curator'),
+        session(4, false, 'Fix the kraken'),
+      ],
+    })
+    const h = await getHealth()
+    expect(h.automatedFlagDrift).toEqual({ unflagged: 1, unexplained: 1 })
+    expect(formatHealth(h)).toContain('Should be flagged and is not: 1')
+    expect(formatHealth(h)).toContain('Flagged, and this process\x27s rule does not explain it: 1')
+    expect(formatHealth(h)).toContain('Automated Flags: UNHEALTHY')
+  })
+
+  it('calls automated flags healthy only when neither count is set', async () => {
+    wireQueries({ sessions: [{ id: 1, source: 'claude_code', machine: null, stored: false, opening: 'Fix the lantern' }] })
+    expect(formatHealth(await getHealth())).toContain('Automated Flags: HEALTHY')
+  })
+
   it('computes coverage as summarized / (summarized + null backlog)', async () => {
     wireQueries({ coverage: { total: '100', summarized: '90', null_backlog: '10' } })
     const h = await getHealth()
@@ -69,6 +97,19 @@ describe('getHealth', () => {
     expect(h.badSummaryTotal).toBe(5)
     expect(h.badSummaryByCategory.too_short).toBe(3)
     expect(h.badSummaryByCategory.unsummarizable).toBe(2)
+  })
+
+  it('counts as loopy exactly the summaries the summarizer would refuse, across scan pages', async () => {
+    const words = (n: number, tag: string) => Array.from({ length: n }, (_, i) => `${tag}${i}`).join(' ')
+    const looped = `${words(50, 'a')} ${Array(40).fill(words(10, 'b')).join(' ')}`
+    const honest = words(400, 'c')
+    const fullPage = Array.from({ length: 500 }, (_, i) => ({ id: i + 1, summary: i === 3 ? looped : honest }))
+    wireQueries({ scanPages: [fullPage, [{ id: 900, summary: looped }, { id: 901, summary: honest }]] })
+    await getHealth()
+    const badCall = query.mock.calls.find(([sql]) => String(sql).includes('any_bad'))
+    expect(badCall?.[1]).toEqual([[4, 900]])
+    const scanCalls = query.mock.calls.filter(([sql]) => String(sql).includes('ORDER BY id LIMIT'))
+    expect(scanCalls.map(([, params]) => (params as unknown[])[0])).toEqual([0, 500])
   })
 
   it('passes the configured collection names to embedding queries', async () => {

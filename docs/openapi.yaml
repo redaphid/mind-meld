@@ -269,7 +269,15 @@ paths:
 
         By default only `coding`-class data is searched (see `dataClass`);
         naming a `source` explicitly bypasses that default.
+
+        Every search is recorded in the search log, and the response carries
+        its `list` handle. Pass that handle as `?list=` when you open a hit
+        (`/api/sessions/{id}`, its messages, or `/api/messages/{id}`) so the
+        open is tied to the list it came from. The log is readable only from
+        the database; no route returns its rows.
       parameters:
+        - $ref: '#/components/parameters/MindmeldCaller'
+        - $ref: '#/components/parameters/MindmeldClient'
         - name: q
           in: query
           required: true
@@ -279,13 +287,14 @@ paths:
           example: how did I set up the cloudflare tunnel
         - name: mode
           in: query
+          description: Any other value is a 400.
           schema:
             type: string
             enum: [hybrid, semantic, text]
             default: hybrid
         - name: limit
           in: query
-          description: Hits to return. Capped at 100.
+          description: Hits to return. Capped at 100; a limit that is not a positive integer is a 400.
           schema:
             type: integer
             default: 20
@@ -372,15 +381,18 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [status, query, mode, count, projectIds, results]
+                required: [status, query, list, mode, count, projectIds, results]
                 properties:
                   status:
                     type: string
                     const: ok
                   query:
                     type: string
+                  list:
+                    $ref: '#/components/schemas/ListHandle'
                   mode:
                     type: string
+                    description: The mode that ran. An unrecognised `mode` runs, and reports, `hybrid`.
                     enum: [hybrid, semantic, text]
                   count:
                     type: integer
@@ -407,11 +419,22 @@ paths:
                       evidence the conversation does not exist — retry shortly.
                       In `semantic` mode there is no fallback arm, so results
                       will be empty.
-                    required: [semantic, reason]
+
+                      Also non-null, with `cause: switched-off`, while the
+                      semantic switch is off (`/api/semantic`). That is a
+                      deliberate choice rather than an outage, so retrying will
+                      not help until someone switches it back on.
+                    required: [semantic, cause, reason]
                     properties:
                       semantic:
                         type: boolean
                         const: false
+                      cause:
+                        type: string
+                        enum: [unavailable, switched-off]
+                        description: |
+                          `unavailable` is transient and worth retrying;
+                          `switched-off` lasts until the switch is turned on.
                       reason:
                         type: string
                         description: The underlying failure, passed through whole.
@@ -421,7 +444,7 @@ paths:
                     items:
                       $ref: '#/components/schemas/SearchHit'
         '400':
-          description: Missing `q`.
+          description: Missing `q`, an unknown `mode` or `dataClass`, or a `limit` that is not a positive integer.
           content:
             application/json:
               schema:
@@ -570,6 +593,9 @@ paths:
 
         No raw messages are returned here, however large the session.
       parameters:
+        - $ref: '#/components/parameters/ListParam'
+        - $ref: '#/components/parameters/MindmeldCaller'
+        - $ref: '#/components/parameters/MindmeldClient'
         - name: id
           in: path
           required: true
@@ -629,6 +655,9 @@ paths:
         `nextOffset` / `nextStartMessageId` carry the cursor for the next page;
         both `null` means the read is complete.
       parameters:
+        - $ref: '#/components/parameters/ListParam'
+        - $ref: '#/components/parameters/MindmeldCaller'
+        - $ref: '#/components/parameters/MindmeldClient'
         - name: id
           in: path
           required: true
@@ -687,6 +716,9 @@ paths:
         `truncated: true` — reaching a 271K-character message takes this
         deliberate call and can never happen by accident through a page read.
       parameters:
+        - $ref: '#/components/parameters/ListParam'
+        - $ref: '#/components/parameters/MindmeldCaller'
+        - $ref: '#/components/parameters/MindmeldClient'
         - name: id
           in: path
           required: true
@@ -1271,6 +1303,106 @@ paths:
                   run:
                     $ref: '#/components/schemas/SyncRun'
 
+  /api/stats:
+    get:
+      tags: [Monitoring]
+      operationId: getUsageStats
+      summary: Search usage over the last 7 and 30 days
+      description: |
+        Aggregates from the search log, the same numbers the `stats` MCP tool
+        prints. No query text, caller or session id. Clients `bench` and
+        `eval` are left out. Rates are over searches that did not throw, and
+        are null when there were none.
+      responses:
+        '200':
+          description: One entry per window, 7 days first.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, windows]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  windows:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UsageStats'
+
+  /api/semantic:
+    get:
+      tags: [Monitoring]
+      operationId: getSemantic
+      summary: Whether the AI pipeline is switched on
+      description: |
+        Off means no Ollama work of any kind: no embedding, no summarization,
+        no session or chunk vectors, no centroid computation, and no query
+        vector for search, which answers from full text with `degraded` set.
+        Transcripts, memories and the ingest spool keep landing in Postgres,
+        and every new row still joins the embedding queue, so nothing is lost
+        while it is off.
+
+        Unlike stand-down this is a switch, not a deadline: it stays off until
+        someone switches it on. Starting the `mcp` service with
+        `MINDMELD_SEMANTIC=off` switches it off at startup.
+      responses:
+        '200':
+          description: Current state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SemanticResponse'
+    post:
+      tags: [Monitoring]
+      operationId: setSemantic
+      summary: Switch the AI pipeline on or off
+      description: |
+        Switching off stops each worker at its next checkpoint: between
+        embedding batches, and between sessions in the summarization drain.
+
+        Switching on also starts an ingestion run (the same single-flight run
+        as `POST /api/sync`), so the queue that built up while it was off
+        starts draining now rather than at the next sync interval. `drain`
+        carries that run, or the one already in flight; it is null when
+        switching off.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled:
+                  type: boolean
+                reason:
+                  type: string
+                  description: Free text shown with the state, e.g. who switched it and why.
+      responses:
+        '200':
+          description: The stored state, and the drain a switch-on started.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SemanticResponse'
+                  - type: object
+                    required: [drain]
+                    properties:
+                      drain:
+                        type: object
+                        nullable: true
+                        required: [started, state]
+                        properties:
+                          started:
+                            type: boolean
+                            description: False when a run was already in flight.
+                          state:
+                            $ref: '#/components/schemas/SyncRun'
+        '400':
+          description: '`enabled` was missing or not a boolean.'
+
   /mcp:
     post:
       tags: [MCP]
@@ -1403,6 +1535,39 @@ paths:
 
 components:
   parameters:
+    ListParam:
+      name: list
+      in: query
+      required: false
+      description: |
+        The `list` handle of the search this hit came from. Records the open in
+        the search log against that list. Optional; an unknown handle is not an error.
+      schema:
+        $ref: '#/components/schemas/ListHandle'
+
+    MindmeldCaller:
+      name: X-Mindmeld-Caller
+      in: header
+      required: false
+      description: |
+        A stable id for one caller (the web UI sends one per tab), up to 64 of
+        `[A-Za-z0-9_.:-]`. The search log links a caller's opens to its latest
+        search within 30 minutes. Absent or malformed, the caller is `anon`.
+      schema:
+        type: string
+        example: ui:k3x9qa
+
+    MindmeldClient:
+      name: X-Mindmeld-Client
+      in: header
+      required: false
+      description: |
+        What is calling (`web-ui`, `bench`, `eval`), same character rules as
+        `X-Mindmeld-Caller`. Usage stats group by it. Absent, `rest`.
+      schema:
+        type: string
+        example: web-ui
+
     McpSessionIdOptional:
       name: Mcp-Session-Id
       in: header
@@ -1422,6 +1587,102 @@ components:
         format: uuid
 
   schemas:
+    UsageStats:
+      type: object
+      required: [days, searches, perDay, openedShare, openedRank, noResultRate, degradedRate, latencyMs, stageMs, feedbackPerSearch, vectorParams]
+      properties:
+        days:
+          type: integer
+          example: 7
+        searches:
+          type: integer
+          description: Every search in the window, including ones that threw.
+        perDay:
+          type: array
+          description: Searches per UTC day, by client name (without its version) and mode.
+          items:
+            type: object
+            required: [day, client, mode, searches]
+            properties:
+              day:
+                type: string
+                format: date
+              client:
+                type: string
+              mode:
+                type: string
+                nullable: true
+              searches:
+                type: integer
+        openedShare:
+          type: number
+          nullable: true
+          description: Share of searches with an open of one of their results within 10 minutes.
+        openedRank:
+          type: object
+          description: Rank of the first result opened within 10 minutes of each search, when it was in that search's list.
+          required: [opens, median, mrr]
+          properties:
+            opens:
+              type: integer
+            median:
+              type: number
+              nullable: true
+            mrr:
+              type: number
+              nullable: true
+              description: Mean of 1 / rank.
+        noResultRate:
+          type: number
+          nullable: true
+        degradedRate:
+          type: number
+          nullable: true
+        latencyMs:
+          type: object
+          required: [p50, p90]
+          properties:
+            p50:
+              type: number
+              nullable: true
+            p90:
+              type: number
+              nullable: true
+        stageMs:
+          type: object
+          description: >-
+            p50 and p90 of each search stage, over the searches it ran in. The
+            embed and the three semantic tiers run concurrently with full text,
+            so stages do not sum to latencyMs. semanticMs spans the embed and
+            the tiers.
+          required: [semanticMs, embedMs, sessionMs, chunkMs, messageMs, fullTextMs]
+          additionalProperties:
+            type: object
+            required: [p50, p90]
+            properties:
+              p50:
+                type: number
+                nullable: true
+              p90:
+                type: number
+                nullable: true
+        feedbackPerSearch:
+          type: number
+          nullable: true
+          description: Tag and report calls per search.
+        vectorParams:
+          type: object
+          description: Searches that set each vector-math parameter. REST `not` counts as `negativeQuery`.
+          required: [negativeQuery, likeSession, unlikeSession, likeProject, unlikeProject]
+          additionalProperties:
+            type: integer
+
+    ListHandle:
+      type: string
+      pattern: '^L[2-9a-hjkmnp-z]{6}$'
+      description: A search's result-list handle, minted per search.
+      example: Lk3x9qa
+
     Health:
       type: object
       required: [status, name, version]
@@ -1504,6 +1765,33 @@ components:
           description: |
             Records sync could not process, kept for replay in
             `/api/quarantine`. Non-zero means data is waiting, not lost.
+        searchLog:
+          type: object
+          description: |
+            The search log writer in this process. Rows are written off the
+            response path; `failed` and `dropped` count rows lost, so non-zero
+            means usage stats undercount.
+          required: [enabled, written, failed, dropped, queued, lastFailureAt, lastFailureCode]
+          properties:
+            enabled:
+              type: boolean
+            written:
+              type: integer
+            failed:
+              type: integer
+            dropped:
+              type: integer
+              description: Rows refused because the write queue was full.
+            queued:
+              type: integer
+            lastFailureAt:
+              type: string
+              format: date-time
+              nullable: true
+            lastFailureCode:
+              type: string
+              nullable: true
+              description: The Postgres SQLSTATE of the last failed write. Never the message, which can quote the row.
         chroma:
           type: object
           required: [collections]
@@ -1530,7 +1818,7 @@ components:
                 titleSource:
                   description: See SearchHit.titleSource.
                   type: string
-                  enum: [source, summary, none]
+                  enum: [source, generated, summary, none]
                 project:
                   type: string
 
@@ -1571,7 +1859,7 @@ components:
         titleSource:
           description: See SearchHit.titleSource.
           type: string
-          enum: [source, summary, none]
+          enum: [source, generated, summary, none]
         project:
           type: string
         lastSyncedAt:
@@ -1800,6 +2088,24 @@ components:
             Why the last run stopped, verbatim. A GPU gate in front of Ollama
             refusing the work reads as its own 503 explanation here.
 
+    SemanticResponse:
+      type: object
+      required: [status, enabled, changedAt, reason]
+      properties:
+        status:
+          type: string
+          const: ok
+        enabled:
+          type: boolean
+        changedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null when it has never been switched.
+        reason:
+          type: string
+          nullable: true
+
     SyncRunResponse:
       type: object
       required: [status, started, run, message]
@@ -1898,7 +2204,7 @@ components:
 
     SearchHit:
       type: object
-      required: [sessionId, title, titleSource, project, projectPath, source, dataClass, date, score, matchedTier, noiseDamping, snippet, cursor]
+      required: [sessionId, title, titleSource, project, projectPath, source, dataClass, date, score, matchedTier, noiseDamping, snippet, cursor, evidence, base, adjustments]
       properties:
         sessionId:
           type: integer
@@ -1915,11 +2221,13 @@ components:
         titleSource:
           description: |
             How the title was obtained. `source` means the origin system supplied
-            it; `summary` means it was derived from the session summary; `none`
-            means the session has neither and `title` is null. A title is never
-            fabricated from message content (issue #95).
+            it; `generated` means the summarizer wrote it, which happens only for
+            a short session whose stored summary is its own transcript; `summary`
+            means it was derived from the session summary; `none` means the
+            session has none of these and `title` is null. A title is never a cut
+            fragment of message content (issue #95).
           type: string
-          enum: [source, summary, none]
+          enum: [source, generated, summary, none]
         project:
           type: string
         projectPath:
@@ -1942,12 +2250,16 @@ components:
         score:
           type: number
           description: |
-            Fused rank score, plus a boost when the session belongs to a project
-            matching `cwd`. Comparable within one response, not across responses.
+            The ordering key: `base` with each of `adjustments` applied in
+            order. Comparable within one response, not across responses, and
+            not a measure of match quality; for that read the cosines in
+            `evidence`.
         matchedTier:
           type: string
           enum: [session, chunk, message]
-          description: Which index tier produced the hit.
+          description: |
+            The tier of the first entry in `evidence`, the arm that ranked the
+            session best. A full-text match is a `message`.
         noiseDamping:
           description: |
             The factor the noise penalty multiplied `score` by, where 1 means
@@ -1981,6 +2293,70 @@ components:
               properties:
                 messageId:
                   type: integer
+        evidence:
+          description: |
+            Every arm that found the session, best first: lowest rank, ties
+            broken in the order session, chunk, message, lexical. `rank` is
+            1-based, the session's position in that arm after filtering, which
+            is the position fusion scored it at. `cosine` is the raw similarity
+            of the session's nearest vector in that arm. `tsRank` is Postgres
+            `ts_rank` of its best matching message, comparable only within one
+            query.
+          type: array
+          minItems: 1
+          items:
+            oneOf:
+              - type: object
+                required: [arm, rank, cosine]
+                properties:
+                  arm: { type: string, const: session }
+                  rank: { type: integer, minimum: 1 }
+                  cosine: { type: number }
+              - type: object
+                required: [arm, rank, cosine, chunkIndex]
+                properties:
+                  arm: { type: string, const: chunk }
+                  rank: { type: integer, minimum: 1 }
+                  cosine: { type: number }
+                  chunkIndex: { type: integer }
+              - type: object
+                required: [arm, rank, cosine, messageId]
+                properties:
+                  arm: { type: string, const: message }
+                  rank: { type: integer, minimum: 1 }
+                  cosine: { type: number }
+                  messageId: { type: integer }
+              - type: object
+                required: [arm, rank, tsRank, messageId]
+                properties:
+                  arm: { type: string, const: lexical }
+                  rank: { type: integer, minimum: 1 }
+                  tsRank: { type: number }
+                  messageId: { type: integer }
+        base:
+          type: number
+          description: The reciprocal-rank fusion of the ranks in `evidence`, before any adjustment.
+        adjustments:
+          description: |
+            Applied to `base` in this order. `noise` multiplies by `factor`;
+            `similarity` is the cosine to the nearest reported-noise cluster,
+            and a factor of 1 means measured and clean. Absent when the penalty
+            was off or the session has no summary vector (`noiseDamping` null).
+            `project` adds `boost` for a session in a project matching `cwd`.
+          type: array
+          items:
+            oneOf:
+              - type: object
+                required: [kind, similarity, factor]
+                properties:
+                  kind: { type: string, const: noise }
+                  similarity: { type: number }
+                  factor: { type: number, minimum: 0, maximum: 1 }
+              - type: object
+                required: [kind, boost]
+                properties:
+                  kind: { type: string, const: project }
+                  boost: { type: number }
 
     Project:
       type: object
@@ -2025,7 +2401,7 @@ components:
         titleSource:
           description: See SearchHit.titleSource.
           type: string
-          enum: [source, summary, none]
+          enum: [source, generated, summary, none]
         summary:
           description: Full generated summary, or null if it has not been summarised yet.
           oneOf:
@@ -2094,7 +2470,7 @@ components:
         titleSource:
           description: See SearchHit.titleSource.
           type: string
-          enum: [source, summary, none]
+          enum: [source, generated, summary, none]
         summary:
           oneOf:
             - type: 'null'
@@ -2254,7 +2630,7 @@ components:
         titleSource:
           description: See SearchHit.titleSource.
           type: string
-          enum: [source, summary, none]
+          enum: [source, generated, summary, none]
         project:
           oneOf:
             - type: 'null'

@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from 'fs/promises';
 import { dirname, join } from 'path';
 import { query } from '../db/postgres.js';
 import { hashContent } from '../parsers/claude-memory.js';
-import { memoryExternalId } from './claude-memory.js';
+import { MEMORY_EXTERNAL_ID_LIKE, memoryExternalId } from './memory-id.js';
 
 // The read side of the memory backup (src/sync/claude-memory.ts writes it).
 //
@@ -60,7 +60,7 @@ export const listMemories = async (options?: {
      FROM sessions s
      JOIN projects p ON s.project_id = p.id
      JOIN messages m ON m.session_id = s.id
-     WHERE s.external_id LIKE 'memory:%'
+     WHERE s.external_id LIKE '${MEMORY_EXTERNAL_ID_LIKE}'
        AND m.role = 'memory'
        AND m.content_text IS NOT NULL
        ${filter}
