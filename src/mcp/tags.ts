@@ -153,9 +153,19 @@ export const defaultExcludedTags = (): string[] => normalizeTags(config.tags.def
 // An explicit excludeTags entry is NOT overridden the same way -- if a caller
 // names a tag on both sides it is contradicting itself, and refusing to show
 // the thing is the safe reading of a contradiction.
-export const resolveExcludedTags = (includeTags: readonly string[], excludeTags: readonly string[]): string[] => {
+//
+// includeNoise:true suspends the DEFAULT set entirely -- that is the debugging
+// escape hatch reportUselessSession's description points at. It does NOT
+// suspend an explicit excludeTags: the caller named those in this very call,
+// and a general "show me the hidden stuff" flag has no business overriding a
+// specific instruction given alongside it.
+export const resolveExcludedTags = (
+  includeTags: readonly string[],
+  excludeTags: readonly string[],
+  includeNoise = false
+): string[] => {
   const requested = new Set(includeTags)
-  const fromDefault = defaultExcludedTags().filter((tag) => !requested.has(tag))
+  const fromDefault = includeNoise ? [] : defaultExcludedTags().filter((tag) => !requested.has(tag))
   return normalizeTags([...fromDefault, ...excludeTags])
 }
 
@@ -208,9 +218,10 @@ export const passesTagFilter = (filter: TagFilter, sessionId: number, messageId?
 export const resolveTagFilter = async (params: {
   tags?: string[]
   excludeTags?: string[]
+  includeNoise?: boolean
 }): Promise<TagFilter> => {
   const includeTags = normalizeTags(params.tags ?? [])
-  const excludeTags = resolveExcludedTags(includeTags, params.excludeTags ?? [])
+  const excludeTags = resolveExcludedTags(includeTags, params.excludeTags ?? [], params.includeNoise === true)
 
   const filter = emptyTagFilter()
   filter.includeTags = includeTags

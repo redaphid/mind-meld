@@ -9,6 +9,7 @@ export type SessionMetadata = {
   project_id: number
   title: string | null
   summary: string | null
+  generated_title: string | null
   project_name: string
   project_path: string
   source_name: string
@@ -70,7 +71,7 @@ const DEFAULT_CHUNK_LIMIT = 20
 const DEFAULT_CHAR_BUDGET = 24000
 
 const SELECT_METADATA = `
-  SELECT s.id, s.external_id, s.title, s.summary, p.id as project_id,
+  SELECT s.id, s.external_id, s.title, s.summary, s.generated_title, p.id as project_id,
          p.name as project_name, p.path as project_path,
          src.name as source_name, s.started_at, s.ended_at, s.message_count,
          s.model_used, s.git_branch, s.total_input_tokens, s.total_output_tokens
@@ -116,6 +117,7 @@ const buildManifest = async (
             count(*) OVER() AS total_chunks
      FROM session_chunks
      WHERE session_id = $1
+       AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = session_id AND s.deleted_at IS NULL)
      ORDER BY chunk_index ASC
      OFFSET $2 LIMIT $3`,
     [sessionId, offset, limit]
@@ -287,6 +289,7 @@ const readWindow = async (sessionId: number, offset: number, limit: number) => {
     `SELECT id, sequence_num, role, content_text, tool_name, timestamp, model
      FROM messages
      WHERE session_id = $1
+       AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = session_id AND s.deleted_at IS NULL)
      ORDER BY sequence_num ASC
      OFFSET $2
      LIMIT $3`,
@@ -300,6 +303,7 @@ const readRange = async (sessionId: number, startId: number, endId: number) => {
     `SELECT id, sequence_num, role, content_text, tool_name, timestamp, model
      FROM messages
      WHERE session_id = $1 AND id >= $2 AND id <= $3
+       AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = session_id AND s.deleted_at IS NULL)
      ORDER BY sequence_num ASC`,
     [sessionId, startId, endId]
   )
@@ -367,9 +371,9 @@ export const getMessages = async (params: GetMessagesParams): Promise<MessagesRe
 // — it can never arrive by accident through a window or range read.
 export const getMessageById = async (id: number): Promise<SessionMessage | null> => {
   const result = await query<SessionMessage>(
-    `SELECT id, sequence_num, role, content_text, tool_name, timestamp, model
-     FROM messages
-     WHERE id = $1`,
+    `SELECT m.id, m.sequence_num, m.role, m.content_text, m.tool_name, m.timestamp, m.model
+     FROM messages m JOIN sessions s ON s.id = m.session_id
+     WHERE m.id = $1 AND s.deleted_at IS NULL`,
     [id]
   )
   return result.rows[0] ?? null
@@ -387,7 +391,8 @@ export const getChunk = async (
   }>(
     `SELECT chunk_index, summary, start_message_id, end_message_id, content_chars
      FROM session_chunks
-     WHERE session_id = $1 AND chunk_index = $2`,
+     WHERE session_id = $1 AND chunk_index = $2
+       AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = session_id AND s.deleted_at IS NULL)`,
     [params.sessionId, params.chunkIndex]
   )
   const row = result.rows[0]

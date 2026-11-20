@@ -15,11 +15,12 @@ vi.mock('../db/postgres.js', () => ({
 
 // The tool calls the diagnostics-carrying form, so a degraded search can say so
 // in the text it hands back to an LLM.
-const doSearch = vi.fn(async () => ({ results: [], degraded: null }))
+const doSearch = vi.fn(async () => ({ results: [], degraded: null, projectIds: [] as number[] }))
 const findProjectsByPath = vi.fn(async () => [{ id: 7, name: 'proj' }])
+const formatSearchResults = vi.fn((_r: unknown, options?: { list?: string | null }) => `SEARCH RESULTS${options?.list ? ` ${options.list}` : ''}`)
 vi.mock('./search.js', () => ({
   searchWithDiagnostics: (...args: unknown[]) => doSearch(...(args as [])),
-  formatSearchResults: () => 'SEARCH RESULTS',
+  formatSearchResults: (...args: Parameters<typeof formatSearchResults>) => formatSearchResults(...args),
   findProjectsByPath: (...args: unknown[]) => findProjectsByPath(...(args as [])),
 }))
 
@@ -43,6 +44,14 @@ vi.mock('./health.js', () => ({
   formatHealth: () => 'HEALTH',
 }))
 
+const doHasNoiseVector = vi.fn(async () => true)
+const doInvalidateNoiseClusters = vi.fn()
+vi.mock('./noise.js', () => ({
+  USELESS_TAG: 'useless',
+  hasNoiseVector: (...args: unknown[]) => doHasNoiseVector(...(args as [])),
+  invalidateNoiseClusters: () => doInvalidateNoiseClusters(),
+}))
+
 const doApplyTags = vi.fn(async () => ['useless'])
 const doRemoveTags = vi.fn(async () => ['useless'])
 const doGetTags = vi.fn(async () => ['useless'])
@@ -61,6 +70,14 @@ vi.mock('./notes.js', () => ({
   NOTE_TAG: 'note',
 }))
 
+// The log's writer is its own unit (search-log.test.ts); here we assert what
+// each tool hands it.
+const recorded: import('./search-log.js').LogEvent[] = []
+vi.mock('./search-log.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./search-log.js')>()),
+  searchLog: { record: (e: import('./search-log.js').LogEvent) => recorded.push(e) },
+}))
+
 const { createMcpServer } = await import('./tools.js')
 
 // Talk to the server exactly as a real client does, over an in-memory
@@ -68,7 +85,7 @@ const { createMcpServer } = await import('./tools.js')
 const connect = async () => {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   const client = new Client({ name: 'parity-test', version: '0.0.0' })
-  await Promise.all([createMcpServer().connect(serverTransport), client.connect(clientTransport)])
+  await Promise.all([createMcpServer('mcp-http').connect(serverTransport), client.connect(clientTransport)])
   return client
 }
 
@@ -85,6 +102,7 @@ const text = (result: unknown) =>
 // Call history only — the default implementations above must survive.
 beforeEach(() => {
   vi.clearAllMocks()
+  recorded.length = 0
 })
 
 const src = (file: string) =>
@@ -104,6 +122,7 @@ const EXPECTED_TOOLS = [
   'reportUselessSession',
   'search',
   'stats',
+  'unreportUselessSession',
   'writeNote',
 ]
 
@@ -144,7 +163,7 @@ describe('every advertised tool executes', () => {
       name: 'search',
       arguments: { query: 'anything', includeAutomated: true },
     })
-    expect(text(result)).toBe('SEARCH RESULTS')
+    expect(text(result)).toMatch(/^SEARCH RESULTS L/)
     expect(doSearch).toHaveBeenCalledWith(expect.objectContaining({ includeAutomated: true }))
     await client.close()
   })
@@ -178,6 +197,48 @@ describe('every advertised tool executes', () => {
     await client.close()
   })
 
+  it('logs a search and the open that follows it under one caller, with the handle shown', async () => {
+    const client = await connect()
+    const out = text(await client.callTool({ name: 'search', arguments: { query: 'q', mode: 'text' } }))
+    await client.callTool({ name: 'getSession', arguments: { sessionId: 3 } })
+    await client.callTool({ name: 'getSession', arguments: { sessionId: 4, list: 'Lk3x9qa' } })
+    await client.close()
+
+    const [search, open, named] = recorded
+    expect(search).toMatchObject({ kind: 'search', tool: 'search', mode: 'text', request: { query: 'q', mode: 'text' }, results: [] })
+    if (search.kind !== 'search') throw new Error('first row is the search')
+    expect(out).toBe(`SEARCH RESULTS ${search.list}`)
+    expect(open).toMatchObject({ kind: 'follow-up', tool: 'getSession', target: { sessionId: 3 }, list: null })
+    expect(open.caller.key).toBe(search.caller.key)
+    expect(open.caller.client).toBe('parity-test/0.0.0')
+    expect(named).toMatchObject({ list: 'Lk3x9qa', target: { sessionId: 4 } })
+  })
+
+  it('logs a search that throws, and still reports the error to the caller', async () => {
+    doSearch.mockRejectedValueOnce(new TypeError('boom'))
+    const client = await connect()
+    const result = await client.callTool({ name: 'search', arguments: { query: 'q' } })
+    await client.close()
+    expect((result as { isError?: boolean }).isError).toBe(true)
+    expect(recorded[0]).toMatchObject({ kind: 'search', error: 'TypeError', mode: 'hybrid' })
+  })
+
+  it('logs every follow-up tool with its target and signal-bearing name', async () => {
+    const client = await connect()
+    const calls: [string, Record<string, unknown>, Record<string, unknown>][] = [
+      ['getMessages', { startMessageId: 11, endMessageId: 12 }, { messageId: 11 }],
+      ['getMessage', { id: 13 }, { messageId: 13 }],
+      ['getChunk', { sessionId: 2, chunkIndex: 1 }, { sessionId: 2, chunkIndex: 1 }],
+      ['addTag', { messageId: 14, tag: 'x' }, { messageId: 14 }],
+      ['removeTag', { sessionId: 15, tag: 'x' }, { sessionId: 15 }],
+      ['reportUselessSession', { sessionId: 16 }, { sessionId: 16 }],
+      ['unreportUselessSession', { sessionId: 17 }, { sessionId: 17 }],
+    ]
+    for (const [name, args] of calls) await client.callTool({ name, arguments: args })
+    await client.close()
+    expect(recorded.map((e) => [e.tool, (e as { target: unknown }).target])).toEqual(calls.map(([n, , t]) => [n, t]))
+  })
+
   it('runs the remaining read tools', async () => {
     const client = await connect()
     const calls: [string, Record<string, unknown>, string][] = [
@@ -207,27 +268,120 @@ describe('every advertised tool executes', () => {
         rows: [{ name: 'mind-meld', session_count: 7, message_count: 500 }],
         rowCount: 1,
       } as never)
+    const usage = (searches: number) => ({
+      rows: [{
+        searches, ok: searches, opened: 1, ranked: 1, median_rank: 2, mrr: 0.5, no_result: 0, degraded: 0,
+        p50: 12, p90: 40, feedback: 1, per_day: [{ day: '2026-11-12', client: 'claude-code', mode: 'hybrid', searches }],
+        vector_params: { negativeQuery: 1, likeSession: 0, unlikeSession: 0, likeProject: 0, unlikeProject: 0 },
+        stage_ms: Object.fromEntries(['semanticMs', 'embedMs', 'sessionMs', 'chunkMs', 'messageMs', 'fullTextMs'].map((k) => [k, { p50: 1, p90: 2 }])),
+      }],
+      rowCount: 1,
+    })
+    query.mockResolvedValueOnce(usage(4) as never).mockResolvedValueOnce(usage(10) as never)
 
     const client = await connect()
     const out = text(await client.callTool({ name: 'stats', arguments: {} }))
     expect(out).toContain('**claude_code** (coding): 4 projects, 10 sessions, 900 messages')
     expect(out).toContain('**coding:** 15 sessions')
     expect(out).toContain('- **mind-meld:** 7 sessions, 500 messages')
+    expect(out).toContain('| | 7d | 30d |')
+    expect(out).toContain('| Searches | 4 | 10 |')
+    expect(out).toContain('| Opened within 10 min | 25.0% | 10.0% |')
+    expect(out).toContain('- 2026-11-12 claude-code hybrid: 4')
     await client.close()
   })
 
-  it('soft-deletes on reportUselessSession, and says so when there was nothing to delete', async () => {
+  // THE POINT OF THIS TEST is that reportUselessSession does not delete. It used
+  // to run `UPDATE sessions SET deleted_at = now()`, which had no undo path; the
+  // 440 rows in the live database carrying deleted_at were set by the warmup
+  // script, not by this tool, and 426 of them are personal SMS threads. So the
+  // assertion that matters most here is the negative one at the bottom: no SQL
+  // this tool issues may mention deleted_at.
+  it('flags rather than deletes on reportUselessSession, and counts it as noise at once', async () => {
     const client = await connect()
 
-    query.mockResolvedValueOnce({ rows: [{ id: 5 }], rowCount: 1 } as never)
-    expect(
-      text(await client.callTool({ name: 'reportUselessSession', arguments: { sessionId: 5 } }))
-    ).toBe('Session 5 soft-deleted.')
+    query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }], rowCount: 1 } as never)
+    const out = text(await client.callTool({
+      name: 'reportUselessSession',
+      arguments: { sessionId: 5, reason: 'notification stub' },
+    }))
+    expect(out).toContain('flagged "useless"')
+    expect(out).toContain('Not deleted.')
+    expect(out).toContain('unreportUselessSession')
 
-    // rowCount 0 — already deleted, or never existed.
+    // The reason is free text and is carried onto the tag, not merely logged.
+    expect(doApplyTags).toHaveBeenCalledWith({ sessionId: 5 }, ['useless'], {
+      createdBy: 'reportUselessSession',
+      note: 'notification stub',
+    })
+    // The tag is what puts a session in the noise corpus; the next search has
+    // to re-cluster rather than wait out the cache.
+    expect(doInvalidateNoiseClusters).toHaveBeenCalled()
+    expect(out).toContain('similar sessions will rank lower too')
+
+    // A session with no summary vector yet is flagged all the same, and told so.
+    doHasNoiseVector.mockResolvedValueOnce(false)
+    query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }], rowCount: 1 } as never)
+    expect(
+      text(await client.callTool({ name: 'reportUselessSession', arguments: { sessionId: 8 } }))
+    ).toContain('once it is summarized')
+
+    // A Chroma outage cannot fail a report whose tag is already written.
+    doHasNoiseVector.mockRejectedValueOnce(new Error('chroma is down'))
+    query.mockResolvedValueOnce({ rows: [{ '?column?': 1 }], rowCount: 1 } as never)
+    expect(
+      text(await client.callTool({ name: 'reportUselessSession', arguments: { sessionId: 9 } }))
+    ).toContain('flagged "useless"')
+
+    // A session that does not exist is reported as such, and is not tagged.
+    doApplyTags.mockClear()
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never)
     expect(
       text(await client.callTool({ name: 'reportUselessSession', arguments: { sessionId: 6 } }))
-    ).toContain('not found or already deleted')
+    ).toContain('not found')
+    expect(doApplyTags).not.toHaveBeenCalled()
+
+    // NOTHING this tool runs may touch deleted_at. Clearing or setting it is how
+    // 426 personal SMS threads would leak into search.
+    for (const call of query.mock.calls)
+      expect(String((call as unknown[])[0])).not.toContain('deleted_at')
+
+    await client.close()
+  })
+
+  it('undoes a report on unreportUselessSession, and takes it out of the corpus at once', async () => {
+    const client = await connect()
+
+    expect(
+      text(await client.callTool({ name: 'unreportUselessSession', arguments: { sessionId: 5 } }))
+    ).toContain('no longer flagged useless')
+    expect(doRemoveTags).toHaveBeenCalledWith({ sessionId: 5 }, ['useless'])
+    // Removing the tag is what takes the session out of the noise corpus, so the
+    // next search has to re-cluster without it.
+    expect(doInvalidateNoiseClusters).toHaveBeenCalled()
+
+    // Un-reporting something never reported is not an error.
+    doRemoveTags.mockResolvedValueOnce([] as never)
+    expect(
+      text(await client.callTool({ name: 'unreportUselessSession', arguments: { sessionId: 7 } }))
+    ).toContain('Nothing to undo')
+
+    await client.close()
+  })
+
+  // addTag/removeTag with "useless" change the noise corpus exactly as a report
+  // does, so the next search must not wait out the cluster cache.
+  it('re-clusters at once when addTag or removeTag touches "useless"', async () => {
+    const client = await connect()
+    doInvalidateNoiseClusters.mockClear()
+    await client.callTool({ name: 'addTag', arguments: { sessionId: 5, tag: 'useless' } })
+    expect(doInvalidateNoiseClusters).toHaveBeenCalledTimes(1)
+    await client.callTool({ name: 'removeTag', arguments: { sessionId: 5, tag: 'useless' } })
+    expect(doInvalidateNoiseClusters).toHaveBeenCalledTimes(2)
+
+    doApplyTags.mockResolvedValueOnce(['keeper'] as never)
+    await client.callTool({ name: 'addTag', arguments: { sessionId: 5, tag: 'keeper' } })
+    expect(doInvalidateNoiseClusters).toHaveBeenCalledTimes(2)
     await client.close()
   })
 
@@ -331,15 +485,27 @@ describe('every advertised tool executes', () => {
     expect(names).not.toContain('saveNote')
   })
 
-  it('only resolves cwd to projects when a cwd was given', async () => {
+  // `explain` changes only the rendering, so search must never see it.
+  it('passes explain to the formatter and not to search', async () => {
     const client = await connect()
-
-    await client.callTool({ name: 'search', arguments: { query: 'x' } })
-    expect(findProjectsByPath).not.toHaveBeenCalled()
-
-    await client.callTool({ name: 'search', arguments: { query: 'x', cwd: '/w/proj' } })
-    expect(findProjectsByPath).toHaveBeenCalledWith('/w/proj')
+    await client.callTool({ name: 'search', arguments: { query: 'query-text-lantern-heron', explain: true } })
     await client.close()
+    expect(doSearch).toHaveBeenLastCalledWith({ query: 'query-text-lantern-heron' })
+    expect(formatSearchResults).toHaveBeenLastCalledWith([], { degraded: null, list: expect.stringMatching(/^L/), explain: true })
+  })
+
+  // Search already resolved the cwd; asking again cost a second query a search.
+  describe('when a search names a cwd', () => {
+    beforeEach(async () => {
+      doSearch.mockResolvedValueOnce({ results: [], degraded: null, projectIds: [7071] })
+      const client = await connect()
+      await client.callTool({ name: 'search', arguments: { query: 'query-text-lantern-heron', cwd: '/w/proj' } })
+      await client.close()
+    })
+
+    it('does not resolve the cwd a second time', () => {
+      expect(findProjectsByPath).not.toHaveBeenCalled()
+    })
   })
 
   it('says so, rather than failing, when a lookup finds nothing', async () => {

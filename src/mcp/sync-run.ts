@@ -4,6 +4,7 @@ import {
   AGGREGATE_BATCH_SIZE,
 } from '../embeddings/batch.js'
 import { drainIngestSpool } from '../sync/ingest-spool.js'
+import { setSemantic, type SemanticState } from '../sync/sync-control.js'
 
 // A manually triggered ingestion pass, for the "Run ingestion now" button in
 // the UI and for POST /api/sync.
@@ -97,12 +98,12 @@ const runPendingEmbeddings = async (): Promise<SyncRunResult> => {
   }
 
   let sessionsUpdated = 0
-  const drainStart = Date.now()
+  const deadline = Date.now() + MAX_AGGREGATE_DRAIN_MS
   while (true) {
-    const aggregate = await updateAggregateEmbeddings()
+    const aggregate = await updateAggregateEmbeddings(deadline)
     sessionsUpdated += aggregate.sessionsUpdated
     if (aggregate.sessionsFetched < AGGREGATE_BATCH_SIZE) break
-    if (Date.now() - drainStart > MAX_AGGREGATE_DRAIN_MS) {
+    if (Date.now() >= deadline) {
       console.log('[sync-run] aggregate drain budget reached; backlog resumes next run')
       break
     }
@@ -194,4 +195,17 @@ export const resetSyncRunState = () => {
     error: null,
   }
   inFlight = null
+}
+
+// The semantic switch as the UI presses it. Switching on kicks a drain straight
+// away rather than leaving the backlog that built up while it was off to wait
+// out SYNC_INTERVAL_SECONDS. The drain is the ordinary single-flight run, so a
+// press while one is in flight reports that run instead of starting another.
+// Switching off starts nothing: workers stop at their next checkpoint.
+export const switchSemantic = async (
+  enabled: boolean,
+  reason: string | null
+): Promise<SemanticState & { drain: { started: boolean; state: SyncRunState } | null }> => {
+  const semantic = await setSemantic(enabled, reason)
+  return { ...semantic, drain: enabled ? startSyncRun() : null }
 }

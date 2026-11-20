@@ -13,7 +13,7 @@ export const SessionView = ({ id }) => {
   const { query } = useRoute()
   const [tab, setTab] = useState('digest')
   const [range, setRange] = useState(null)
-  const { data, error, loading, reload } = useApi(`/api/sessions/${id}`)
+  const { data, error, loading, reload } = useApi(`/api/sessions/${id}`, { list: query.list })
 
   const digest = data?.digest
 

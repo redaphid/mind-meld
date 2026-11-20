@@ -47,6 +47,24 @@ jobs:
 
   quality:
     runs-on: ubuntu-latest
+    # For the suites that need real PostgreSQL (src/__tests__/scratch-database.ts).
+    # Only the "Database tests" step points at it, so coverage is measured the
+    # way a checkout without a database measures it and the ratchet means the
+    # same thing in both places.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mindmeld
+          POSTGRES_PASSWORD: mindmeld
+          POSTGRES_DB: conversations
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mindmeld -d conversations"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,6 +88,19 @@ jobs:
 
       - name: Tests with coverage
         run: pnpm run test:coverage
+
+      # The whole suite again, now with a database: REQUIRE_DATABASE makes a
+      # suite that cannot reach it fail instead of skipping.
+      - name: Database tests
+        env:
+          REQUIRE_DATABASE: "1"
+          POSTGRES_HOST: 127.0.0.1
+          POSTGRES_PORT: "5432"
+          POSTGRES_USER: mindmeld
+          POSTGRES_PASSWORD: mindmeld
+        run: |
+          psql --version
+          pnpm test
 
       - name: Knip ratchet (fails only on regression or stale baseline)
         run: pnpm run quality:knip

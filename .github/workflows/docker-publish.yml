@@ -1,9 +1,21 @@
 name: Build and Push Docker Images
 
 on:
+  # Every commit on main publishes `latest`/`main`. Without this, a merge that
+  # does not touch package.json never reaches an image at all: release.yml is
+  # gated on `paths: ["package.json"]`, and this workflow used to start only
+  # after a successful Release. #139 landed on main at 06:47 and built nothing
+  # -- the code was on the default branch and unreachable from any tag a host
+  # could pull, with no failure anywhere to say so.
   push:
+    branches:
+      - main
     tags:
       - 'v*'
+  # Kept so a release still republishes, and so the `v*` tag path keeps working
+  # when a tag is pushed by a human (a tag pushed by release.yml's GITHUB_TOKEN
+  # cannot trigger this workflow -- that is why no `1.2x.0` image tag exists
+  # despite four releases).
   workflow_run:
     workflows: ["Release"]
     types: [completed]
@@ -13,6 +25,14 @@ on:
         description: 'Tag to build (e.g., latest, v1.0.0)'
         required: false
         default: 'latest'
+
+# A release commit now matches two triggers at once (the push to main, and the
+# workflow_run after Release finishes). Both would push the same `latest` tag,
+# and the loser silently decides what `latest` means. Serialize instead of
+# cancelling: a cancelled run leaves `latest` pointing at whatever landed last.
+concurrency:
+  group: docker-publish
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io

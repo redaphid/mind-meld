@@ -83,18 +83,39 @@ export async function querySimilar(
   whereFilter?: Record<string, unknown>
 ): Promise<{
   ids: string[][];
-  documents: (string | null)[][];
-  metadatas: (Record<string, unknown> | null)[][];
   distances: (number | null)[][] | null;
 }> {
   const collection = await getCollection(collectionName);
+  // Search ranks by distance and hydrates from Postgres; documents and
+  // metadatas would only cross the wire to be dropped.
+  const include = ['distances'];
   const results = await collection.query({
     queryEmbeddings: [queryEmbedding],
     nResults,
     where: whereFilter as Parameters<typeof collection.query>[0]['where'],
-    include: ['documents', 'metadatas', 'distances'],
+    include: include as Parameters<typeof collection.query>[0]['include'],
   });
   return results;
+}
+
+// Vectors for known ids, fetched in batches so a long id list does not become
+// one oversized request. Ids with no stored vector are absent from the map.
+export async function getEmbeddingsByIds(
+  collectionName: string,
+  ids: string[],
+  batchSize = 300
+): Promise<Map<string, number[]>> {
+  const collection = await getCollection(collectionName);
+  const vectors = new Map<string, number[]>();
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const result = await collection.get({ ids: ids.slice(i, i + batchSize), include: ['embeddings'] });
+    const embeddings = (result.embeddings ?? []) as unknown as (number[] | null)[];
+    result.ids.forEach((id, j) => {
+      const vec = embeddings[j];
+      if (vec && vec.length > 0) vectors.set(id, Array.from(vec));
+    });
+  }
+  return vectors;
 }
 
 // Check if ID exists in collection

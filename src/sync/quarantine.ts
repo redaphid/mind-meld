@@ -14,6 +14,7 @@
 import { query } from '../db/postgres.js'
 import { config } from '../config.js'
 import { parseClaudeLine, type ParsedMessage } from '../parsers/claude-messages.js'
+import { parseCodexLine } from '../parsers/codex-messages.js'
 import { queries } from '../db/postgres.js'
 import { normalizeText } from '../utils/text-encoding.js'
 import { IngestPayloadSchema } from '../mcp/ingest-schema.js'
@@ -287,13 +288,22 @@ const replayRow = async (row: QuarantineRow): Promise<ReplayOutcome> => {
   const parsed: ParsedMessage =
     row.stage === 'parse'
       ? (() => {
-          const result = parseClaudeLine(row.payload!, 0)
+          const result = row.source === 'codex'
+            ? parseCodexLine(row.payload!, 0)
+            : parseClaudeLine(row.payload!, 0)
           if (result.kind !== 'message') throw new Error(`still unusable: ${result.reason}`)
           return result.message
         })()
       : (() => {
           const raw = JSON.parse(row.payload!) as ParsedMessage
-          return { ...raw, timestamp: new Date(raw.timestamp) }
+          if (row.source !== 'codex') return { ...raw, timestamp: new Date(raw.timestamp) }
+          // A Codex message's contentJson is the raw response payload, so the
+          // record can be re-parsed: a parser fix then reaches rows whose
+          // source file Codex has since pruned.
+          const line = JSON.stringify({ type: 'response_item', timestamp: raw.timestamp, payload: raw.contentJson })
+          const result = parseCodexLine(line, raw.sequenceNum)
+          if (result.kind !== 'message') throw new Error(`still unusable: ${result.reason}`)
+          return { ...result.message, uuid: raw.uuid }
         })()
 
   await queries.insertMessage({
@@ -304,6 +314,7 @@ const replayRow = async (row: QuarantineRow): Promise<ReplayOutcome> => {
     contentJson: parsed.contentJson,
     toolName: parsed.toolName,
     toolInput: parsed.toolInput,
+    toolResult: parsed.toolResult,
     thinkingText: parsed.thinkingText,
     model: parsed.model,
     inputTokens: parsed.inputTokens,

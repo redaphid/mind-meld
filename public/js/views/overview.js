@@ -14,7 +14,7 @@ import { navigate } from '../router.js'
 import { Card, Stat, Spinner, ErrorBox, Pill, Bar } from '../ui.js'
 import { fmtNum, fmtExact, timeAgo, sourceLabel, pct } from '../util.js'
 import { EmbeddingChart, ChartWindowPicker } from '../chart.js'
-import { OllamaCard, ChromaCard, LoadCard, SummaryCard, StandDownControl } from '../health.js'
+import { OllamaCard, ChromaCard, LoadCard, SummaryCard, StandDownControl, SemanticControl } from '../health.js'
 
 // POST /api/sync answers 202 when it starts a run and 409 when one was already
 // in flight — neither is a failure, and both carry the run's state, so this
@@ -374,12 +374,56 @@ const EmbeddingActivity = () => {
   `
 }
 
+const rate = r => (r == null ? 'n/a' : `${Math.round(r * 100)}%`)
+const fixed = (n, digits) => (n == null ? 'n/a' : n.toFixed(digits))
+
+// From /api/stats, the same numbers the `stats` MCP tool prints. Headline is
+// the last 7 days; each figure's 30-day value sits under or beside it.
+const UsageCard = () => {
+  const { data, error } = useApi('/api/stats')
+  if (!data)
+    return html`<${Card} title="Search usage">
+      ${error ? html`<div class="faint">usage unavailable</div>` : html`<${Spinner} />`}
+    <//>`
+
+  const [week, month] = data.windows
+  const line = (label, f) => html`<div class="m" style="margin:4px 0 0;font-size:13px">
+    <span>${label}</span><span class="right nowrap">${f(week)} <span class="faint">· ${f(month)}</span></span>
+  </div>`
+
+  return html`<${Card} title="Search usage" action=${html`<span class="faint">7d · 30d</span>`}>
+    <div class="stat-grid" style="margin-bottom:8px">
+      <${Stat} n=${week.searches} label="Searches" sub=${`30d ${fmtNum(month.searches)}`} />
+      <${Stat} n=${rate(week.openedShare)} exact=${rate(week.openedShare)} label="Opened ≤10 min" sub=${`30d ${rate(month.openedShare)}`} />
+      <${Stat} n=${fixed(week.openedRank.mrr, 2)} exact=${fixed(week.openedRank.mrr, 3)} label="MRR of open" sub=${`30d ${fixed(month.openedRank.mrr, 2)}`} />
+      <${Stat} n=${fixed(week.latencyMs.p50, 0)} exact=${fixed(week.latencyMs.p50, 1)} label="p50 ms" sub=${`30d ${fixed(month.latencyMs.p50, 0)}`} />
+    </div>
+    ${line('Median opened rank', w => fixed(w.openedRank.median, 1))}
+    ${line('No results', w => rate(w.noResultRate))}
+    ${line('Degraded', w => rate(w.degradedRate))}
+    ${line('p90 ms', w => fixed(w.latencyMs.p90, 0))}
+    ${Object.keys(week.stageMs)
+      .filter(s => week.stageMs[s].p50 != null || month.stageMs[s].p50 != null)
+      .map(s => line(`${s.replace(/Ms$/, '')} p50/p90 ms`, w => `${fixed(w.stageMs[s].p50, 0)}/${fixed(w.stageMs[s].p90, 0)}`))}
+    ${line('Feedback per search', w => fixed(w.feedbackPerSearch, 2))}
+    ${Object.keys(week.vectorParams).map(p => line(p, w => fmtNum(w.vectorParams[p])))}
+  <//>`
+}
+
 export const OverviewView = () => {
   const status = useApi('/status')
   const activity = useApi('/api/activity', { days: 30 })
   const machines = useApi('/api/machines')
   const system = useApi('/api/system')
   const summaries = useApi('/api/summaries')
+  // Bumped when the semantic switch flips. Remounting the runner makes it
+  // re-read /api/sync, so the drain a switch-on starts shows its progress.
+  const [runnerKey, setRunnerKey] = useState(0)
+  const semanticSwitched = () => {
+    setRunnerKey(k => k + 1)
+    status.reload()
+    system.reload()
+  }
 
   // Totals, embedding coverage, pending counts and the quarantine badge all
   // come from /status, so refreshing it refreshes the whole screen. Activity is
@@ -404,8 +448,10 @@ export const OverviewView = () => {
   const s = status.data
   const totals = s?.totals ?? {}
   const pending = s?.pendingEmbeddings ?? {}
-  const embedded = Number(totals.embeddings ?? 0)
-  const messages = Number(totals.messages ?? 0)
+  // ui and mcp are separate images; a server that predates the field must not
+  // read as 0% coverage.
+  const vectorised = s?.vectorisedMessages
+  const embeddable = Number(vectorised ?? 0) + Number(pending.messages ?? 0)
 
   return html`
     ${status.error &&
@@ -422,11 +468,15 @@ export const OverviewView = () => {
     </div>
 
     <${Card} title="Embedding coverage">
-      <div class="m" style="margin:0;font-size:13px">
-        <span>${pct(embedded, messages)}% of messages vectorised</span>
-        <span class="right faint">${fmtExact(embedded)} / ${fmtExact(messages)}</span>
-      </div>
-      <${Bar} value=${embedded} total=${messages} />
+      ${vectorised === undefined
+        ? html`<div class="m faint" style="margin:0;font-size:13px">
+            coverage unavailable: the API server is older than this page
+          </div>`
+        : html`<div class="m" style="margin:0;font-size:13px">
+              <span>${pct(vectorised, embeddable)}% of embeddable messages vectorised</span>
+              <span class="right faint">${fmtExact(vectorised)} / ${fmtExact(embeddable)}</span>
+            </div>
+            <${Bar} value=${vectorised} total=${embeddable} />`}
       <div class="m" style="margin-top:10px">
         <${Pill} kind=${pending.messages > 0 ? 'warn' : 'good'}>
           ${fmtNum(pending.messages ?? 0)} messages pending
@@ -436,10 +486,12 @@ export const OverviewView = () => {
         <//>
       </div>
       <${QueueThroughput} />
-      <${IngestionRunner} onFinished=${status.reload} />
+      <${IngestionRunner} key=${runnerKey} onFinished=${status.reload} />
     <//>
 
     <${EmbeddingActivity} />
+
+    <${SemanticControl} onChange=${semanticSwitched} />
 
     <${StandDownControl} onChange=${system.reload} />
 
@@ -459,6 +511,8 @@ export const OverviewView = () => {
         <span class="right faint nowrap">review →</span>
       </div>
     </button>`}
+
+    <${UsageCard} />
 
     <${Card} title="Last 30 days">
       ${activity.loading && html`<${Spinner} />`}

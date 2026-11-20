@@ -6,12 +6,14 @@ import {
   getEmbeddingMetadata,
   getCollection,
 } from "../db/chroma.js";
+import { sessionVectorId } from "../db/vector-ids.js";
 import { generateEmbeddings, ensureEmbeddingModel } from "./ollama.js";
-import { summarizeConversation, ensureSummarizeModel, combineSummaries } from "./summarize.js";
+import { summarizeConversation, ensureSummarizeModel, combineSummaries, generateTitle } from "./summarize.js";
+import { isVerbatimTranscript } from "./verbatim.js";
 import { persistSessionChunks, SessionMessage } from "./chunks.js";
-import { embeddableMessages, embeddableSessions } from "./pending.js";
+import { embeddableSessions, nextMessagesToEmbed } from "./pending.js";
 import { classifyNoise } from "./classify.js";
-import { shouldStandDown, STAND_DOWN_NOTICE } from "../sync/stand-down.js";
+import { aiHold, AI_HOLD_NOTICE } from "../sync/sync-control.js";
 
 export interface BatchEmbeddingStats {
   processed: number;
@@ -69,19 +71,10 @@ interface GetMessagesResult {
 async function getMessagesToEmbed(limit: number, maxChars?: number): Promise<GetMessagesResult> {
   // Fetch more than needed since we filter in JS — noise rate is ~10-15%
   const overfetch = Math.ceil(limit * 1.3);
-  // $1 is the LIMIT, so the shared predicate's own params start at $2. This is
-  // the same fragment /status and /api/throughput count with — see pending.ts
-  // for why that sharing is load-bearing rather than tidiness.
-  const embeddable = embeddableMessages(2, maxChars);
-  const result = await query<MessageToEmbed>(
-    `SELECT m.id, m.session_id, m.content_text, m.role, m.timestamp,
-            p.path as project_path, src.name as source_name, m.model,
-            COALESCE(p.data_class, src.data_class) as data_class
-     ${embeddable.sql}
-     ORDER BY m.id
-     LIMIT $1`,
-    [overfetch, ...embeddable.params],
-  );
+  // Shared with pending.ts, the same predicate /status and /api/throughput
+  // count with — see there for why that sharing is load-bearing.
+  const next = nextMessagesToEmbed(maxChars);
+  const result = await query<MessageToEmbed>(next.sql, [overfetch, ...next.params]);
 
   const kept: MessageToEmbed[] = [];
   const skipped: Array<{ id: number; detail: string }> = [];
@@ -153,7 +146,14 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
     );
   }
 
-  // Ensure models are available
+  // Before the model checks, which are Ollama requests themselves: with
+  // semantic off this pass must not reach Ollama at all.
+  const heldAtStart = await aiHold();
+  if (heldAtStart) {
+    console.log(AI_HOLD_NOTICE[heldAtStart]);
+    return stats;
+  }
+
   await ensureEmbeddingModel();
   await ensureSummarizeModel();
 
@@ -166,11 +166,12 @@ export async function generatePendingEmbeddings(): Promise<BatchEmbeddingStats> 
   let lastStallReason = "";
 
   for (;;) {
-    // The stand-down checkpoint for the fast phase. Between batches rather than
-    // inside one: a batch is seconds, and abandoning it mid-flight would waste
+    // The checkpoint for the fast phase. Between batches rather than inside
+    // one: a batch is seconds, and abandoning it mid-flight would waste
     // embeddings already paid for.
-    if (await shouldStandDown()) {
-      console.log(STAND_DOWN_NOTICE);
+    const held = await aiHold();
+    if (held) {
+      console.log(AI_HOLD_NOTICE[held]);
       break;
     }
 
@@ -418,7 +419,7 @@ const markSessionProcessed = async (
      DO UPDATE SET content_chars_at_embed = $5`,
     [
       config.chroma.collections.sessions,
-      `session-${sessionId}`,
+      sessionVectorId(sessionId),
       config.embeddings.model,
       config.embeddings.dimensions,
       contentChars,
@@ -431,12 +432,17 @@ export const AGGREGATE_BATCH_SIZE = 100;
 
 // Update session-level embeddings with summarization for long conversations
 // Now also re-embeds sessions where content_chars has grown
-export async function updateAggregateEmbeddings(): Promise<{
+export async function updateAggregateEmbeddings(deadline: number): Promise<{
   sessionsUpdated: number;
   sessionsReembedded: number;
   sessionsFetched: number;
 }> {
-  // Ensure summarization model is available
+  const heldAtStart = await aiHold();
+  if (heldAtStart) {
+    console.log(AI_HOLD_NOTICE[heldAtStart]);
+    return { sessionsUpdated: 0, sessionsReembedded: 0, sessionsFetched: 0 };
+  }
+
   await ensureSummarizeModel();
 
   // Get sessions that need embedding:
@@ -477,10 +483,12 @@ export async function updateAggregateEmbeddings(): Promise<{
     // The checkpoint that actually matters. Summarizing one session is 5-10
     // minutes of GPU, so checking once per session is the difference between
     // yielding promptly and holding the card for the rest of the batch.
-    if (await shouldStandDown()) {
-      console.log(STAND_DOWN_NOTICE);
+    const held = await aiHold();
+    if (held) {
+      console.log(AI_HOLD_NOTICE[held]);
       break;
     }
+    if (Date.now() >= deadline) break;
 
     const isReembed = session.existing_content_chars !== null;
     let actualContentChars = 0;
@@ -489,7 +497,7 @@ export async function updateAggregateEmbeddings(): Promise<{
       // Also verify Chroma has the embedding with correct content_chars
       const chromaMetadata = await getEmbeddingMetadata(
         config.chroma.collections.sessions,
-        `session-${session.id}`,
+        sessionVectorId(session.id),
       );
 
       // If Chroma already has this embedding with sufficient content_chars,
@@ -508,7 +516,7 @@ export async function updateAggregateEmbeddings(): Promise<{
              DO UPDATE SET content_chars_at_embed = $5`,
             [
               config.chroma.collections.sessions,
-              `session-${session.id}`,
+              sessionVectorId(session.id),
               config.embeddings.model,
               config.embeddings.dimensions,
               chromaContentChars,
@@ -548,7 +556,10 @@ export async function updateAggregateEmbeddings(): Promise<{
       // build the session-level summary, avoiding a second qwen pass.
       const chunks = await persistSessionChunks(session.id, messages.rows);
       const textForEmbedding = chunks
-        ? await combineSummaries(chunks.map((c) => c.summary))
+        ? await combineSummaries(
+            chunks.map((c) => c.summary),
+            { joinIfShort: !chunks.some((c) => c.verbatim) },
+          )
         : await summarizeConversation(formattedMessages);
       const wasSummarized =
         textForEmbedding.length < formattedMessages.join("").length;
@@ -570,7 +581,7 @@ export async function updateAggregateEmbeddings(): Promise<{
 
       // Upsert to Chroma sessions collection (update if exists)
       await upsertEmbeddings(config.chroma.collections.sessions, {
-        ids: [`session-${session.id}`],
+        ids: [sessionVectorId(session.id)],
         embeddings: [embeddings[0]],
         documents: [textForEmbedding.slice(0, 2000)],
         metadatas: [
@@ -589,10 +600,18 @@ export async function updateAggregateEmbeddings(): Promise<{
         ],
       });
 
+      // A source title outranks a generated one (title.ts), so only an untitled
+      // session is worth the call. A session that has outgrown its verbatim
+      // transcript gets NULL, so a stale generated title never outlives it.
+      const generatedTitle =
+        isVerbatimTranscript(textForEmbedding) && !session.title?.trim()
+          ? await generateTitle(textForEmbedding)
+          : null;
+
       // Store summary in Postgres for FTS (always update - summary improves over time)
       await query(
-        `UPDATE sessions SET summary = $1, content_chars = $2 WHERE id = $3`,
-        [textForEmbedding, actualContentChars, session.id],
+        `UPDATE sessions SET summary = $1, content_chars = $2, generated_title = $4 WHERE id = $3`,
+        [textForEmbedding, actualContentChars, session.id, generatedTitle],
       );
 
       // Record/update in PostgreSQL with content_chars_at_embed
@@ -606,7 +625,7 @@ export async function updateAggregateEmbeddings(): Promise<{
          DO UPDATE SET content_chars_at_embed = $5`,
         [
           config.chroma.collections.sessions,
-          `session-${session.id}`,
+          sessionVectorId(session.id),
           config.embeddings.model,
           config.embeddings.dimensions,
           actualContentChars,

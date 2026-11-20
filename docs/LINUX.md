@@ -11,6 +11,7 @@ Claude Code lives at the same path on macOS and Linux:
 ```bash
 # .env
 CLAUDE_CODE_PATH=~/.claude                              # same as macOS
+CODEX_PATH=~/.codex                                     # same as macOS
 ```
 
 ## Ollama on Linux

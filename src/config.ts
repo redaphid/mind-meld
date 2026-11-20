@@ -39,15 +39,33 @@ function getEnvBool(key: string, defaultValue: boolean): boolean {
   return value.toLowerCase() === "true" || value === "1";
 }
 
-// A comma-separated env var as a list. An explicitly empty value ("") means an
+// An on/off switch someone types by hand (MINDMELD_SEMANTIC, MINDMELD_SEARCH_LOG),
+// parsed strictly: a typo such as "of" must stop the process at startup rather
+// than quietly leave the switch in a state nobody chose. Unset means on.
+function getEnvSwitch(key: string): boolean {
+  const value = process.env[key];
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (["", "on", "true", "1"].includes(normalized)) return true;
+  if (["off", "false", "0"].includes(normalized)) return false;
+  throw new Error(`${key} must be "on" or "off", got "${value}"`);
+}
+
+function getEnvFloat(key: string, defaultValue: number): number {
+  const value = process.env[key];
+  if (!value) return defaultValue;
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : defaultValue;
+}
+
+// A separated (comma by default) env var as a list. An explicitly empty value ("") means an
 // empty list, not "fall back to the default" -- otherwise a setting like
 // MINDMELD_DEFAULT_EXCLUDED_TAGS could never be turned off from the
 // environment, only changed to something else.
-function getEnvList(key: string, defaultValue: string[]): string[] {
+function getEnvList(key: string, defaultValue: string[], separator = ","): string[] {
   const value = process.env[key];
   if (value === undefined) return defaultValue;
   return value
-    .split(",")
+    .split(separator)
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
 }
@@ -72,6 +90,15 @@ export const config = {
     retentionDays: getEnvInt("LOG_RETENTION_DAYS", 14),
   },
 
+  automated: {
+    // Opening-line prefixes that mark a session as an automated run, on top of
+    // the built-in AUTOMATED_PATTERNS in src/embeddings/classify.ts. For persona
+    // prompts that belong to one deployment and not in a public repo. Matched
+    // literally against the start of the first line. Separated by `|`, not
+    // commas, because an opening line routinely contains a comma.
+    prefixes: getEnvList("MINDMELD_AUTOMATED_PREFIXES", [], "|"),
+  },
+
   tags: {
     // Tags whose presence hides a session from search unless the caller asks
     // for them by name. "useless" is the first member and the reason the set
@@ -82,6 +109,75 @@ export const config = {
     // Note this is the ONLY place tags are treated specially -- the vocabulary
     // itself stays open, and nothing here restricts what tags may be created.
     defaultExcluded: getEnvList("MINDMELD_DEFAULT_EXCLUDED_TAGS", ["useless"]),
+  },
+
+  // Negative-vector ranking (task 326). Reporting a session as useless does two
+  // things: it tags that one session, and it teaches search what noise LOOKS
+  // like, so that SIMILAR sessions nobody has reported are ranked down too. The
+  // second half is this block.
+  // The search event log (src/mcp/search-log.ts). Off stops new rows only; the
+  // list handle is still returned so output stays the same shape.
+  searchLog: {
+    enabled: getEnvSwitch("MINDMELD_SEARCH_LOG"),
+    // Rows waiting to be written. Past it new rows are dropped and counted, so
+    // a stalled database costs log rows, never memory or search latency.
+    queueCapacity: getEnvInt("MINDMELD_SEARCH_LOG_QUEUE", 1000),
+    // Days the query text (search_log.request) is kept before it is nulled.
+    rawDays: getEnvInt("MINDMELD_SEARCH_LOG_RAW_DAYS", 180),
+  },
+
+  noise: {
+    // How hard a result that resembles reported noise is pushed down, as a
+    // multiplicative damping: score * (1 - weight * similarityToNearestCluster).
+    // Multiplicative rather than subtractive because the fused score is an RRF
+    // sum in the ~0.01-0.05 range while PROJECT_BOOST is 0.5 -- any fixed
+    // subtraction is either a rounding error against the boost or annihilates
+    // every organic score. A damping factor is scale-free and survives both.
+    //
+    // The default is measured, not guessed: see the sweep in the PR. Pushed
+    // much higher, the penalty starts evicting real conversations that merely
+    // sit near noise in embedding space, which is the one failure this feature
+    // must not have.
+    penaltyWeight: getEnvFloat("MINDMELD_NOISE_PENALTY_WEIGHT", 0.35),
+
+    // Similarity at or below the floor is "not noise-like at all" and costs
+    // nothing. Without a floor EVERY result carries some penalty and the whole
+    // ranking shifts down roughly uniformly -- all cost and no effect.
+    //
+    // The floor is CALIBRATED, never fixed: it sits at this quantile of how
+    // noise-like real sessions look against the AUTOMATED clusters, so at most
+    // (1 - quantile) of real sessions pay anything for resembling automated
+    // runs. Sessions resembling something an agent reported can pay more --
+    // that is what reporting is for (see buildNoiseModel). A fixed 0.55 was tuned on a
+    // 120-vector corpus; against 1,900 vectors it damped 99.4% of real sessions
+    // (`pnpm run noise:eval`), because real similarity had drifted to a median
+    // of 0.69. A calibrated floor moves with the corpus instead.
+    floorQuantile: getEnvFloat("MINDMELD_NOISE_FLOOR_QUANTILE", 0.95),
+
+    // How many real sessions the floor is calibrated against, per rebuild.
+    floorSample: getEnvInt("MINDMELD_NOISE_FLOOR_SAMPLE", 500),
+
+    // Noise vectors are CLUSTERED and a result is scored against its NEAREST
+    // cluster, not against one global mean. Sentinel results and tool-call spam
+    // occupy different regions; their mean points at neither, so a single
+    // centroid penalizes the empty space between them and misses both.
+    //
+    // 0 means "choose k from the corpus size" (see chooseClusterCount).
+    clusterCount: getEnvInt("MINDMELD_NOISE_CLUSTERS", 0),
+
+    // How long a computed set of cluster centroids is reused before rebuilding.
+    // Clustering re-reads every noise vector, which is far too much work to
+    // repeat per search, and noise accumulates slowly enough that a few minutes
+    // of staleness costs nothing. A report or un-report invalidates the cache
+    // immediately, so the agent that just flagged something sees the effect on
+    // its next search rather than up to a TTL later.
+    clusterCacheMs: getEnvInt("MINDMELD_NOISE_CLUSTER_CACHE_MS", 300000),
+
+    // Search text asks the reading agent to judge results damped below this
+    // factor, and to report the ones that are noise. Agents almost never report
+    // unprompted. Measured: real-topic results that pay anything sit at
+    // x0.94-0.99, held-out noise averages x0.85, so 0.9 separates them.
+    nudgeBelow: getEnvFloat("MINDMELD_NOISE_NUDGE_BELOW", 0.9),
   },
 
   // PostgreSQL
@@ -174,12 +270,23 @@ export const config = {
       path: expandPath(getEnv("CLAUDE_CODE_PATH", "~/.claude")),
       name: "claude_code",
     },
+    codex: {
+      path: expandPath(getEnv("CODEX_PATH", "~/.codex")),
+      name: "codex",
+    },
   },
 
   // Sync
   sync: {
     intervalMinutes: getEnvInt("SYNC_INTERVAL_MINUTES", 60),
     incremental: getEnvBool("SYNC_INCREMENTAL", true),
+  },
+
+  // The semantic switch (src/sync/sync-control.ts). The live value is a row in
+  // Postgres that the UI can flip; this is what `mcp` writes there at startup
+  // when it says off, and what every process assumes if the row is unreadable.
+  semantic: {
+    enabledAtStartup: getEnvSwitch("MINDMELD_SEMANTIC"),
   },
 
   // Embedding healing

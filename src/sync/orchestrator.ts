@@ -1,10 +1,13 @@
 import { syncClaudeCode, syncClaudeHistory } from './claude-code.js';
+import { syncCodex } from './codex.js';
+import { syncClaudeMemories, emptyMemoryStats, type MemorySyncStats } from './claude-memory.js';
 import { drainIngestSpool } from './ingest-spool.js';
 import { generatePendingEmbeddings, updateAggregateEmbeddings, AGGREGATE_BATCH_SIZE } from '../embeddings/batch.js';
 import { ensureEmbeddingModel } from '../embeddings/ollama.js';
 import { ensureSummarizeModel } from '../embeddings/summarize.js';
 import { query } from '../db/postgres.js';
-import { shouldStandDown, STAND_DOWN_NOTICE } from './stand-down.js';
+import { flagAutomated } from '../embeddings/automated-flags.js';
+import { aiHold, AI_HOLD_NOTICE, type AiHold } from './sync-control.js';
 
 const MAX_AGGREGATE_DRAIN_MS = 50 * 60 * 1000;
 
@@ -19,11 +22,23 @@ export interface FullSyncResult {
     skipped: number;
     quarantined: number;
   };
+  codex: {
+    projectsProcessed: number;
+    sessionsProcessed: number;
+    messagesInserted: number;
+    skipped: number;
+    quarantined: number;
+  };
   history: {
     entries: number;
     malformedLines: number;
     invalidTimestamps: number;
   };
+  // Claude Code memories (src/sync/claude-memory.ts). Reported separately from
+  // claudeCode even though they land in the same tables, because "0 new
+  // versions" is the healthy steady state here and would look like a stalled
+  // sync if it were folded into the message count.
+  memories: MemorySyncStats;
   // The edge ingest spool (src/sync/ingest-spool.ts). `configured: false`
   // means this machine has no spool env set, which is normal, not idle.
   spool: {
@@ -31,20 +46,23 @@ export interface FullSyncResult {
     drained: number;
     quarantined: number;
   };
+  // Sessions the classifier marks automated that were not flagged yet. Non-zero
+  // after a pattern is added; flags are never cleared here (#177).
+  automatedFlagsSet: number;
   embeddings: {
     messagesEmbedded: number;
     sessionsUpdated: number;
   };
-  // True when the embedding phase was skipped because something asked
-  // ingestion to stand down. Not an error — see where it is set.
-  standDown: boolean;
+  // Why the embedding phase was skipped (semantic switched off, or a
+  // stand-down), or null when it ran. Not an error — see where it is set.
+  held: AiHold | null;
   errors: string[];
 }
 
 export async function runFullSync(options?: {
   incremental?: boolean;
   skipEmbeddings?: boolean;
-  sources?: 'claude_code'[];
+  sources?: Array<'claude_code' | 'codex'>;
 }): Promise<FullSyncResult> {
   const startTime = new Date();
   const errors: string[] = [];
@@ -53,12 +71,15 @@ export async function runFullSync(options?: {
   console.log(`Starting full sync at ${startTime.toISOString()}`);
   console.log('='.repeat(60));
 
-  // Pull models to disk if not present (does NOT load into VRAM)
-  try {
-    await Promise.all([ensureEmbeddingModel(), ensureSummarizeModel()]);
-    console.log('Models verified');
-  } catch (e) {
-    console.warn('Model pull check failed (non-fatal):', e);
+  // Pull models to disk if not present (does NOT load into VRAM). These are
+  // Ollama requests, so they wait behind the same gate as the embedding phase.
+  if (!options?.skipEmbeddings && !(await aiHold())) {
+    try {
+      await Promise.all([ensureEmbeddingModel(), ensureSummarizeModel()]);
+      console.log('Models verified');
+    } catch (e) {
+      console.warn('Model pull check failed (non-fatal):', e);
+    }
   }
 
   const result: FullSyncResult = {
@@ -66,14 +87,17 @@ export async function runFullSync(options?: {
     endTime: new Date(),
     durationMs: 0,
     claudeCode: { projectsProcessed: 0, sessionsProcessed: 0, messagesInserted: 0, skipped: 0, quarantined: 0 },
+    codex: { projectsProcessed: 0, sessionsProcessed: 0, messagesInserted: 0, skipped: 0, quarantined: 0 },
     history: { entries: 0, malformedLines: 0, invalidTimestamps: 0 },
+    memories: emptyMemoryStats(),
     spool: { configured: false, drained: 0, quarantined: 0 },
+    automatedFlagsSet: 0,
     embeddings: { messagesEmbedded: 0, sessionsUpdated: 0 },
-    standDown: false,
+    held: null,
     errors: [],
   };
 
-  const sourcesToSync = options?.sources ?? ['claude_code'];
+  const sourcesToSync = options?.sources ?? ['claude_code', 'codex'];
 
   // Sync Claude Code
   if (sourcesToSync.includes('claude_code')) {
@@ -112,6 +136,40 @@ export async function runFullSync(options?: {
         errors.push(error);
       }
     }
+
+    // Memories (~/.claude/projects/*/memory/*.md). Runs even when transcript
+    // sync above recorded errors: the two read different files, and a corpus
+    // that exists ONLY on this disk must not go un-backed-up because some
+    // unrelated transcript was unreadable.
+    try {
+      console.log('\n--- Syncing Claude memories ---');
+      const memoryStats = await syncClaudeMemories({ incremental: options?.incremental });
+      result.memories = memoryStats;
+      errors.push(...memoryStats.errors);
+    } catch (e) {
+      const error = `Claude memory sync failed: ${e}`;
+      console.error(error);
+      errors.push(error);
+    }
+  }
+
+  if (sourcesToSync.includes('codex')) {
+    try {
+      console.log('\n--- Syncing Codex ---');
+      const codexStats = await syncCodex({ incremental: options?.incremental });
+      result.codex = {
+        projectsProcessed: codexStats.projectsProcessed,
+        sessionsProcessed: codexStats.sessionsProcessed,
+        messagesInserted: codexStats.messagesInserted,
+        skipped: codexStats.skipped,
+        quarantined: codexStats.quarantined,
+      };
+      errors.push(...codexStats.errors);
+    } catch (e) {
+      const error = `Codex sync failed: ${e}`;
+      console.error(error);
+      errors.push(error);
+    }
   }
 
   // Drain the edge ingest spool — push ingestion's equivalent of reading
@@ -138,20 +196,36 @@ export async function runFullSync(options?: {
     errors.push(error);
   }
 
+  // Writers flag the sessions they write, but a pattern configured since never
+  // reaches sessions whose files are done changing (#177). This only sets
+  // flags, so a worker missing MINDMELD_AUTOMATED_PREFIXES cannot undo what a
+  // configured one set. Before the embedding phase, so a session flagged here
+  // is not summarized by this run.
+  try {
+    result.automatedFlagsSet = await flagAutomated();
+    if (result.automatedFlagsSet > 0)
+      console.log(`
+--- Flagged ${result.automatedFlagsSet} sessions automated ---`);
+  } catch (e) {
+    const error = `Automated flag check failed: ${e}`;
+    console.error(error);
+    errors.push(error);
+  }
+
   // Generate embeddings.
   //
-  // Stand-down gates this phase and not the file sync above it, because the
-  // point is to yield the GPU, and reading transcripts into Postgres never
-  // touches it. Conversations keep being indexed while standing down; only
-  // their vectors wait, and the next cycle picks them up from the same queue.
+  // The AI gate holds this phase and not the file sync above it, because the
+  // point is to keep off the GPU, and reading transcripts into Postgres never
+  // touches it. Conversations keep being indexed while held; only their
+  // vectors wait, and a later cycle picks them up from the same queue.
   // Deliberately NOT pushed onto `errors`: a run that records an error exits
-  // nonzero, and container monitoring would read an intentional yield as a
+  // nonzero, and container monitoring would read an intentional hold as a
   // failed sync. It is reported as its own fact instead.
-  const standingDown = !options?.skipEmbeddings && (await shouldStandDown());
-  if (standingDown) console.log(STAND_DOWN_NOTICE);
-  result.standDown = standingDown;
+  const held = options?.skipEmbeddings ? null : await aiHold();
+  if (held) console.log(AI_HOLD_NOTICE[held]);
+  result.held = held;
 
-  if (!options?.skipEmbeddings && !standingDown) {
+  if (!options?.skipEmbeddings && !held) {
     try {
       console.log('\n--- Generating Embeddings ---');
       const embeddingStats = await generatePendingEmbeddings();
@@ -160,19 +234,20 @@ export async function runFullSync(options?: {
       console.log('\n--- Updating Aggregate Embeddings ---');
       // Drain the backlog batch-by-batch instead of one batch per sync cycle,
       // but stop after MAX_AGGREGATE_DRAIN_MS so new-message sync never starves
-      const drainStart = Date.now();
+      const deadline = Date.now() + MAX_AGGREGATE_DRAIN_MS;
       while (true) {
-        const aggregateStats = await updateAggregateEmbeddings();
+        const aggregateStats = await updateAggregateEmbeddings(deadline);
         result.embeddings.sessionsUpdated += aggregateStats.sessionsUpdated;
         if (aggregateStats.sessionsFetched < AGGREGATE_BATCH_SIZE) break;
         // The drain would otherwise keep requesting batches for the next 50
-        // minutes; updateAggregateEmbeddings returns early when standing down,
-        // so without this the loop spins asking for work it will not do.
-        if (await shouldStandDown()) {
-          console.log(STAND_DOWN_NOTICE);
+        // minutes; updateAggregateEmbeddings returns early when held, so
+        // without this the loop spins asking for work it will not do.
+        const heldNow = await aiHold();
+        if (heldNow) {
+          console.log(AI_HOLD_NOTICE[heldNow]);
           break;
         }
-        if (Date.now() - drainStart > MAX_AGGREGATE_DRAIN_MS) {
+        if (Date.now() >= deadline) {
           console.log('Aggregate drain time budget reached; remaining backlog resumes next cycle');
           break;
         }

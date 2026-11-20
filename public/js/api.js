@@ -10,11 +10,9 @@ const buildUrl = (path, params = {}) => {
   return url.pathname + url.search
 }
 
-export const apiGet = async (path, params, signal) => {
-  const res = await fetch(buildUrl(path, params), {
-    signal,
-    headers: { accept: 'application/json' },
-  })
+// Every route answers {status: 'ok', ...} or {status: 'error', error}; a
+// non-JSON body (a proxy error page) is reported with its HTTP status.
+const readBody = async res => {
   const text = await res.text()
 
   let body
@@ -29,6 +27,36 @@ export const apiGet = async (path, params, signal) => {
 
   return body
 }
+
+// Names this tab to the search log, so opening a hit links to the search it
+// came from (src/mcp/search-log.ts). One id per tab, kept across reloads.
+const tabId = (() => {
+  const fresh = Math.random().toString(36).slice(2, 10)
+  try {
+    const id = sessionStorage.getItem('mindmeld-tab') ?? fresh
+    sessionStorage.setItem('mindmeld-tab', id)
+    return id
+  } catch {
+    return fresh
+  }
+})()
+
+export const apiGet = async (path, params, signal) =>
+  readBody(
+    await fetch(buildUrl(path, params), {
+      signal,
+      headers: { accept: 'application/json', 'x-mindmeld-caller': `ui:${tabId}`, 'x-mindmeld-client': 'web-ui' },
+    })
+  )
+
+export const apiPost = async (path, body) =>
+  readBody(
+    await fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(body ?? {}),
+    })
+  )
 
 // key: any serialisable value. Changing it refetches; a null key means "not
 // ready yet", which keeps a view from firing a request with missing params.

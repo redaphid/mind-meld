@@ -1,6 +1,6 @@
 # Mindmeld
 
-**Your AI conversations, searchable.** Mindmeld indexes every Claude Code
+**Your AI conversations, searchable.** Mindmeld indexes every Claude Code and Codex
 conversation on your machines into one local index, and hands it back to
 Claude through MCP — so "how did I solve this last time?" has an answer.
 
@@ -8,7 +8,8 @@ Nothing leaves your hardware. Postgres, Chroma, and Ollama all run locally; ther
 are no cloud calls and no API keys.
 
 ```
-  ~/.claude/projects/*.jsonl ──▶ sync ─▶ Postgres (metadata + full-text)
+  ~/.claude/projects/*.jsonl ──┐
+  ~/.codex/{sessions,archived_sessions}/**/*.jsonl ──▶ sync ─▶ Postgres (metadata + full-text)
                                     │     Chroma  (vectors: messages, chunks,
                                     │              sessions, projects)
                                     └─▶ Ollama (summaries + embeddings)
@@ -96,13 +97,15 @@ toward or away from a style of work — see [USAGE.md](docs/USAGE.md#weighted-ce
 
 ## Running the sync
 
-Sync is a CLI, not a service. It scans each machine's own `~/.claude/projects`,
+Sync is a CLI, not a service. It scans each machine's own `~/.claude/projects`
+and `~/.codex/sessions` (plus `archived_sessions` when present),
 so **every machine you work on needs its own sync** pointed at the shared index.
 
 ```bash
 pnpm install
 pnpm run sync                 # incremental (default)
 pnpm run sync -- --full       # ignore incremental state, re-scan everything
+pnpm run sync:codex           # Codex only
 ```
 
 To run it hourly on Linux, install the `mindmeld-sync` systemd user timer:
@@ -154,6 +157,7 @@ serves its own copy at `http://localhost:3847/openapi.yaml`.
 | `GET /status` | Sync state, index totals, embedding backlog, Chroma counts |
 | `GET /openapi.yaml` | This deployment's API spec |
 | `POST /api/ingest` | Push a conversation from a source Mindmeld doesn't sync itself |
+| `GET\|POST /api/semantic` | Read or flip the semantic switch. Off runs full-text only, with no AI work; on drains what queued up meanwhile |
 | `POST\|GET\|DELETE /mcp` | MCP Streamable HTTP transport |
 
 > **There is no authentication.** A Host-header allowlist (`localhost`,
@@ -175,12 +179,14 @@ the containers.
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `mindmeld` / `mindmeld` / `conversations` | Must match across every machine feeding one index |
 | `CHROMA_HOST` / `CHROMA_PORT` | `localhost` / `8001` | |
 | `MCP_HTTP_PORT` | `3847` | Host port published for the `mcp` container |
+| `MINDMELD_SEMANTIC` | `on` | `off` starts in full-text-only mode: no Ollama/GPU work and no vectors, while ingestion into Postgres continues. A startup state; the dashboard switch (`/api/semantic`) can turn it back on |
 | `OLLAMA_URL` | `http://localhost:11434` | Serves both vectorization (`bge-m3`) and generation (`qwen3`). Flash attention must be off |
 | `OLLAMA_MAX_CONCURRENCY` | `1` | Over an SSH tunnel, concurrent requests each balloon to ~30s. Raise only when Ollama is local |
 | `OLLAMA_TIMEOUT_MS` / `OLLAMA_MAX_RETRIES` | `120000` / `3` | Per-request timeout and retry count |
 | `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | `bge-m3` / `1024` | Changing the model requires re-embedding everything |
 | `SUMMARIZE_MODEL` | `qwen3:8b` | Compose overrides this per-deployment |
 | `CLAUDE_CODE_PATH` | `~/.claude` | Same on macOS and Linux |
+| `CODEX_PATH` | `~/.codex` | Codex active and archived rollout files |
 | `SYNC_INTERVAL_SECONDS` | `3600` | Used by the sync loop scripts |
 | `CENTROID_INTERVAL_SECONDS` | `25200` | Centroid recompute, every 7 hours |
 | `WARMUP_INTERVAL_SECONDS` | `21600` | Warmup-session filtering |
@@ -210,6 +216,13 @@ pnpm exec tsx scripts/backfill-truncated.ts --dry-run
 Migrations in `init-db/` are applied automatically when the `mcp` container
 starts (`src/db/migrations.ts`) — **never** by the sync CLI. Keep the host on the
 newest version so a remote machine can't write rows its schema lacks.
+
+Each file runs in one transaction with `ON_ERROR_STOP`, together with the
+`schema_migrations` row that records it. A file that fails is rolled back and
+left unrecorded, no later file runs, and `mcp` exits with the psql error in its
+log. A migration therefore cannot open its own transaction or use
+`CREATE INDEX CONCURRENTLY`. The Postgres image does not pre-apply `init-db/`,
+so the runner is the only thing that applies a migration.
 
 ### Deploying
 

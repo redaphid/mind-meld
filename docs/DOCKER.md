@@ -90,8 +90,9 @@ logs (`journalctl --user -u mindmeld-sync`, or launchd's log file) instead.
 | Source | macOS | Linux |
 | --- | --- | --- |
 | Claude Code | `~/.claude` | `~/.claude` |
+| Codex | `~/.codex` | `~/.codex` |
 
-Only what is **currently on disk**. Claude Code rotates old transcripts away, so
+Only what is **currently on disk**. Conversation clients may rotate old transcripts away, so
 a fresh machine usually holds only a handful of sessions; the index is the
 durable archive from the day you start syncing forward.
 
@@ -153,9 +154,9 @@ pnpm run sync:embeddings
 
 ### Adding a sync service for another machine
 
-The base file indexes no Claude Code home of its own. To index one, add a
+The base file indexes no conversation-client home of its own. To index one, add a
 service built on the `mindmeld-sync` image with the home bind-mounted at
-`/root/.claude:ro` and a `MACHINE_NAME` of your own.
+`/root/.claude:ro` and/or `/root/.codex:ro`, and a `MACHINE_NAME` of your own.
 
 Use the `${VAR:?message}` form for both, not a default. Docker *creates* a
 missing bind-mount source directory and mounts it empty: the sync then walks

@@ -12,6 +12,10 @@ vi.mock('../embeddings/batch.js', () => ({
 // below, and the production default) it is a no-op.
 const { drainIngestSpool } = vi.hoisted(() => ({ drainIngestSpool: vi.fn() }))
 vi.mock('../sync/ingest-spool.js', () => ({ drainIngestSpool }))
+const { setSemantic } = vi.hoisted(() => ({
+  setSemantic: vi.fn(async (enabled: boolean, reason: string | null) => ({ enabled, changedAt: null, reason })),
+}))
+vi.mock('../sync/sync-control.js', () => ({ setSemantic }))
 
 import {
   generatePendingEmbeddings,
@@ -22,6 +26,7 @@ import {
   getSyncRunState,
   awaitSyncRun,
   resetSyncRunState,
+  switchSemantic,
 } from './sync-run.js'
 
 const NO_SPOOL = { configured: false, drained: 0, quarantined: 0, errors: [] }
@@ -340,5 +345,54 @@ describe('when the embedding pass stalls', () => {
   it('finishes, releasing the lock for the next press', () => {
     expect(getSyncRunState().running).toBe(false)
     expect(startSyncRun(async () => ({ messagesEmbedded: 0, sessionsUpdated: 0 })).started).toBe(true)
+  })
+})
+
+// Whatever piled up while semantic was off should start draining when it comes
+// back on, not an hour later when the sync interval next comes round.
+describe('switchSemantic', () => {
+  beforeEach(() => {
+    resetSyncRunState()
+    setSemantic.mockClear()
+    vi.mocked(generatePendingEmbeddings).mockReset().mockResolvedValue({
+      processed: 0,
+      skipped: 0,
+      errors: 0,
+      stalled: null,
+    } as any)
+    vi.mocked(updateAggregateEmbeddings).mockReset().mockResolvedValue({
+      sessionsUpdated: 0,
+      sessionsReembedded: 0,
+      sessionsFetched: 0,
+    })
+  })
+
+  it('switching on stores it and starts draining the queue', async () => {
+    const result = await switchSemantic(true, 'from the dashboard')
+    await awaitSyncRun()
+
+    expect(setSemantic).toHaveBeenCalledWith(true, 'from the dashboard')
+    expect(result.enabled).toBe(true)
+    expect(result.drain?.started).toBe(true)
+    expect(generatePendingEmbeddings).toHaveBeenCalledTimes(1)
+  })
+
+  // The store has to come first, or the drain it kicks would read "off" and
+  // do nothing.
+  it('stores the switch before the drain starts', async () => {
+    await switchSemantic(true, null)
+    await awaitSyncRun()
+
+    expect(setSemantic.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(generatePendingEmbeddings).mock.invocationCallOrder[0]
+    )
+  })
+
+  it('switching off starts nothing', async () => {
+    const result = await switchSemantic(false, null)
+
+    expect(result.enabled).toBe(false)
+    expect(result.drain).toBeNull()
+    expect(generatePendingEmbeddings).not.toHaveBeenCalled()
   })
 })

@@ -8,7 +8,7 @@ import { closePool } from "../src/db/postgres.js";
 const main = async () => {
   let total = 0;
   while (true) {
-    const stats = await updateAggregateEmbeddings();
+    const stats = await updateAggregateEmbeddings(Infinity);
     if (stats.sessionsUpdated === 0 && stats.sessionsReembedded === 0) {
       console.log(`done. total sessions processed: ${total}`);
       return;
