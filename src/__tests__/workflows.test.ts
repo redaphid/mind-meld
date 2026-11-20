@@ -64,3 +64,19 @@ describe('GitHub workflows', () => {
     }
   });
 });
+
+// The arm64 centroids build ran `pnpm install` under QEMU, died with SIGILL,
+// and buildkit waited on it for the 6-hour job limit while the host, which
+// deploys only a set built from one commit, deployed nothing.
+describe('docker-publish.yml', () => {
+  const doc = parse(readFileSync(join(WORKFLOWS, 'docker-publish.yml'), 'utf8')) as any;
+  const jobs = Object.entries<any>(doc.jobs);
+
+  it.each(jobs)('%s sets timeout-minutes', (_name, job) => {
+    expect(job['timeout-minutes']).toBeLessThanOrEqual(60);
+  });
+
+  it.each(jobs)('%s builds without QEMU emulation', (_name, job) => {
+    expect(job.steps.map((step: any) => step.uses ?? '')).not.toContainEqual(expect.stringContaining('setup-qemu-action'));
+  });
+});
