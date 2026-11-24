@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
@@ -6,9 +5,8 @@ import { listProjects, listSessions, getActivity } from './browse.js'
 import { toSearchResponse, toDigest, toMessages, toMessage, parseSearchShape } from './rest.js'
 import { STATS_WINDOWS, usageStats } from './usage-stats.js'
 import { listQuarantine, replayQuarantine, countPending } from '../sync/quarantine.js'
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import type { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { hostHeaderValidation } from '@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js'
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { query, closePool } from '../db/postgres.js'
 import { runMigrations } from '../db/migrations.js'
@@ -48,6 +46,8 @@ import { startDbLogSink, installFlushOnExit, sinkStats, flushLogs } from '../log
 import { ensureSummarizeModel } from '../embeddings/summarize.js'
 import { createRequire } from 'node:module'
 import { resolveTitle } from './title.js'
+import { TransportRegistry } from './transport-registry.js'
+import { mcpSessionHandlers } from './mcp-sessions.js'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../../package.json')
@@ -101,84 +101,22 @@ app.use(
   })
 )
 
-const transports: Record<string, StreamableHTTPServerTransport> = {}
-
-const mcpPostHandler = async (req: any, res: any) => {
-  const sessionId = req.headers['mcp-session-id'] as string | undefined
-
-  try {
-    let transport: StreamableHTTPServerTransport
-
-    if (sessionId && transports[sessionId]) {
-      transport = transports[sessionId]
-    } else if (!sessionId && isInitializeRequest(req.body)) {
-      transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (id) => {
-          transports[id] = transport
-        },
-        onsessionclosed: (id) => {
-          delete transports[id]
-        }
-      })
-
-      transport.onclose = () => {
-        const sid = transport.sessionId
-        if (sid && transports[sid]) delete transports[sid]
-      }
-
-      const server = getServer()
-      await server.connect(transport)
-      await transport.handleRequest(req, res, req.body)
-      return
-    } else {
-      res.status(400).json({
-        jsonrpc: '2.0',
-        error: { code: -32000, message: 'Bad Request: No valid session ID provided' },
-        id: null
-      })
-      return
-    }
-
-    await transport.handleRequest(req, res, req.body)
-  } catch (error) {
-    console.error('[MCP HTTP] Error handling request:', error)
-    if (!res.headersSent) {
-      res.status(500).json({
-        jsonrpc: '2.0',
-        error: { code: -32603, message: 'Internal server error' },
-        id: null
-      })
-    }
-  }
+const parsePositiveInt = (value: string | undefined, fallback: number): number => {
+  const parsed = Number.parseInt(value ?? '', 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
-const mcpGetHandler = async (req: any, res: any) => {
-  const sessionId = req.headers['mcp-session-id'] as string
-  if (!sessionId || !transports[sessionId]) {
-    res.status(400).send('Invalid or missing session ID')
-    return
-  }
-  await transports[sessionId].handleRequest(req, res)
-}
-
-const mcpDeleteHandler = async (req: any, res: any) => {
-  const sessionId = req.headers['mcp-session-id'] as string
-  if (!sessionId || !transports[sessionId]) {
-    res.status(400).send('Invalid or missing session ID')
-    return
-  }
-  try {
-    await transports[sessionId].handleRequest(req, res)
-  } catch (error) {
-    console.error('[MCP HTTP] Error handling session termination:', error)
-    if (!res.headersSent) res.status(500).send('Error processing session termination')
-  }
-}
-
-app.post('/mcp', mcpPostHandler)
-app.get('/mcp', mcpGetHandler)
-app.delete('/mcp', mcpDeleteHandler)
+const TRANSPORT_IDLE_MS = parsePositiveInt(process.env.MCP_TRANSPORT_IDLE_MINUTES, 30) * 60_000
+const transportRegistry = new TransportRegistry<StreamableHTTPServerTransport>(
+  TRANSPORT_IDLE_MS,
+  Date.now,
+  (sessionId, error) => console.error(`[MCP HTTP] Error closing idle transport ${sessionId}:`, error),
+)
+transportRegistry.start()
+const mcp = mcpSessionHandlers(transportRegistry, getServer)
+app.post('/mcp', mcp.post)
+app.get('/mcp', mcp.get)
+app.delete('/mcp', mcp.delete)
 
 app.get('/health', (req: any, res: any) => {
   res.json({ status: 'ok', name: 'mindmeld', version })
@@ -284,6 +222,7 @@ app.get(['/api/status', '/status'], async (req: any, res: any) => {
         messages: parseInt(pendingMessages.rows[0]?.count ?? '0', 10),
         sessions: parseInt(pendingSessions.rows[0]?.count ?? '0', 10),
       },
+      transports: { open: transportRegistry.size() },
       vectorisedMessages: parseInt(vectorisedMessages.rows[0]?.count ?? '0', 10),
       quarantined,
       // Counters only. Non-zero failed or dropped means usage stats undercount.
@@ -859,14 +798,7 @@ start().catch(error => {
 })
 
 process.on('SIGINT', async () => {
-  for (const sessionId in transports) {
-    try {
-      await transports[sessionId].close()
-      delete transports[sessionId]
-    } catch (error) {
-      console.error(`[MCP HTTP] Error closing transport ${sessionId}:`, error)
-    }
-  }
+  await transportRegistry.closeAll()
   await closePool()
   process.exit(0)
 })
