@@ -43,8 +43,10 @@ Syncthing encrypts them in transit only. The backup directory must only ever
 sync to machines you would give those credentials to, unless the far end is
 added as an untrusted (encrypted) Syncthing device.
 
-Two generations are kept (`BACKUP_KEEP`). History is the far end's job, for
-example ZFS snapshots of the receiving dataset; the sidecar keeps a short tail.
+One generation is kept (`BACKUP_KEEP`, default 1): the newest verified one. History
+is the far end's job, for example ZFS snapshots of the receiving dataset. The previous
+generation is pruned only after the new one is verified and promoted, so the size
+checks below still compare against it.
 
 ## How a bad backup is kept out
 
